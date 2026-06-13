@@ -16,7 +16,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -1282,24 +1285,37 @@ def docx_body_markdown(path: pathlib.Path, assets_dir: pathlib.Path) -> tuple[st
         return normalize_markdown("\n\n".join(blocks)), props, image_after - image_before, image_after
 
 
-def convert_docx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
-    source_hash = sha256_file(path)
-    out_name = f"DOCX-{slugify(path.stem)}.md"
+def convert_docx(
+    path: pathlib.Path,
+    output_dir: pathlib.Path,
+    model: str,
+    *,
+    source_type: str = "docx",
+    source_path: pathlib.Path | None = None,
+    source_hash: str | None = None,
+    source_size: int | None = None,
+    conversion_tool: str = "`zipfile` + `ElementTree`",
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    source_path = source_path or path
+    source_hash = source_hash or sha256_file(source_path)
+    source_size = source_size if source_size is not None else source_path.stat().st_size
+    prefix = "DOC" if source_type == "doc" else "DOCX"
+    out_name = f"{prefix}-{slugify(source_path.stem)}.md"
     out_path = output_dir / out_name
     assets_dir = output_dir / "assets" / out_path.stem
     body, props, new_images, image_count = docx_body_markdown(path, assets_dir)
-    title = props.get("title") or path.stem
+    title = props.get("title") or source_path.stem
     meta = {
         "title": title,
         "type": "source-conversion",
-        "source_type": "docx",
-        "source_path": rel(path),
+        "source_type": source_type,
+        "source_path": rel(source_path),
         "source_url": "",
         "created": today(),
         "updated": today(),
         "status": "draft",
         "model": model,
-        "tags": ["source/docx", "status/draft"],
+        "tags": [f"source/{source_type}", "status/draft"],
         "source_hash": source_hash,
         "asset_count": image_count,
     }
@@ -1310,8 +1326,8 @@ def convert_docx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tu
         "",
         "## 来源信息",
         "",
-        f"- 源文件：`{rel(path)}`",
-        "- 文件类型：DOCX",
+        f"- 源文件：`{rel(source_path)}`",
+        f"- 文件类型：{source_type.upper()}",
         f"- 作者：{props.get('creator') or '未知'}",
         f"- 创建时间：{props.get('created') or '未知'}",
         f"- 修改时间：{props.get('modified') or '未知'}",
@@ -1319,11 +1335,11 @@ def convert_docx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tu
         f"- 新增图片：{new_images} 个",
         f"- SHA256：`{source_hash}`",
         f"- 转换时间：{now_iso()}",
-        "- 转换工具：`zipfile` + `ElementTree`",
+        f"- 转换工具：{conversion_tool}",
         "",
         "## 待整理区",
         "",
-        "> 这是 DOCX 转换草稿。正式入库前建议核对标题层级、列表、表格和图片顺序。",
+        f"> 这是 {source_type.upper()} 转换草稿。正式入库前建议核对标题层级、列表、表格和图片顺序。",
         "",
         "## 原文抽取",
         "",
@@ -1333,10 +1349,10 @@ def convert_docx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tu
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(markdown), encoding="utf-8")
     item = {
-        "source_path": rel(path),
-        "source_type": "docx",
+        "source_path": rel(source_path),
+        "source_type": source_type,
         "source_hash": source_hash,
-        "source_size": path.stat().st_size,
+        "source_size": source_size,
         "output_path": rel(out_path),
         "status": "converted",
         "converted_at": now_iso(),
@@ -1346,6 +1362,32 @@ def convert_docx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tu
         "error": "",
     }
     return out_path, item
+
+
+def convert_doc(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+    textutil = shutil.which("textutil")
+    if not textutil:
+        raise RuntimeError("unsupported .doc conversion: macOS textutil command not found")
+    source_hash = sha256_file(path)
+    source_size = path.stat().st_size
+    with tempfile.TemporaryDirectory(prefix="local-note-doc-") as temp_dir:
+        temp_path = pathlib.Path(temp_dir)
+        docx_path = temp_path / f"{path.stem}.docx"
+        command = [textutil, "-convert", "docx", "-output", str(docx_path), str(path)]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0 or not docx_path.exists():
+            message = (result.stderr or result.stdout or "unknown textutil error").strip()
+            raise RuntimeError(f".doc conversion failed via textutil: {message}")
+        return convert_docx(
+            docx_path,
+            output_dir,
+            model,
+            source_type="doc",
+            source_path=path,
+            source_hash=source_hash,
+            source_size=source_size,
+            conversion_tool="`textutil` -> `zipfile` + `ElementTree`",
+        )
 
 
 def text_from_content(content: Any) -> str:
@@ -1491,7 +1533,7 @@ def should_skip(
 def discover_sources(source_dir: pathlib.Path, sample: bool, cfg: dict[str, str]) -> list[pathlib.Path]:
     pdfs = sorted(source_dir.glob("AI_paper/*.pdf"))
     conversations = sorted(source_dir.glob("AI-Chat/LM-Studio/**/*.conversation.json"))
-    docx_files = sorted(source_dir.glob("**/*.docx"))
+    docx_files = sorted([*source_dir.glob("**/*.docx"), *source_dir.glob("**/*.doc")])
     if sample:
         pdfs = pdfs[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_PDF"])]
         conversations = conversations[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_JSON"])]
@@ -1575,6 +1617,13 @@ def main() -> int:
                     print(f"skip {rel(source)}")
                     continue
                 out_path, item = convert_docx(source, output_dir, model)
+            elif source.suffix.lower() == ".doc":
+                output_path = output_dir / f"DOC-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item = convert_doc(source, output_dir, model)
             else:
                 raise ValueError(f"unsupported source type: {source}")
             update_manifest(manifest, item)

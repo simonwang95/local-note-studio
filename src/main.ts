@@ -52,7 +52,7 @@ const taskHints: Record<TaskType, string> = {
   "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
   "web-url": "输入微信公众号文章或一般网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
-  "source-file": "输入本地 .docx 或 .pdf 文件路径，Markdown 会直接写入本次输出目录。",
+  "source-file": "输入本地 .doc、.docx 或 .pdf 文件路径，抽取后会调用 Qwen 整理，并在末尾保留原文。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
   "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录。",
 };
@@ -292,6 +292,10 @@ document.querySelector<HTMLButtonElement>("#toggleApiKey")?.addEventListener("cl
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
   setOutput(tauriRuntimeHint());
+} else {
+  window.setTimeout(() => {
+    void runEnvironmentCheck();
+  }, 250);
 }
 
 function inputValue(id: string): string {

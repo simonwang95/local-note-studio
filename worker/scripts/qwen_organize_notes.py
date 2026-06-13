@@ -146,7 +146,7 @@ def note_type_for(source_type: str) -> str:
         return "paper-note"
     if source_type == "lmstudio-conversation":
         return "chat-note"
-    if source_type == "docx":
+    if source_type in {"doc", "docx"}:
         return "document-note"
     if source_type in {"webpage", "wechat-article"}:
         return "article-note"
@@ -393,6 +393,7 @@ def build_output_path(output_dir: pathlib.Path, title: str, source_type: str) ->
     prefix = {
         "pdf": "PAPER",
         "lmstudio-conversation": "CHAT",
+        "doc": "DOC",
         "docx": "DOCX",
         "webpage": "WEB",
         "wechat-article": "WECHAT",
@@ -403,7 +404,7 @@ def build_output_path(output_dir: pathlib.Path, title: str, source_type: str) ->
 
 
 def original_source_section(body: str, source_type: str) -> str:
-    if source_type not in {"wechat-article", "webpage", "docx", "lmstudio-conversation"}:
+    if source_type not in {"wechat-article", "webpage", "doc", "docx", "pdf", "lmstudio-conversation"}:
         return ""
     original = body.strip()
     if not original:
@@ -469,13 +470,10 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
             f"- 原始来源：`{source_ref}`",
         ]
     )
-    if source_type == "pdf":
-        output_parts = [frontmatter(organized_meta), f"# {title}", source_trace, organized_body]
-    else:
-        output_parts = [frontmatter(organized_meta), f"# {title}", "## Qwen 整理", demote_markdown_headings(organized_body), source_trace]
-        original = original_source_section(body, source_type)
-        if original:
-            output_parts.append(original)
+    output_parts = [frontmatter(organized_meta), f"# {title}", "## Qwen 整理", demote_markdown_headings(organized_body), source_trace]
+    original = original_source_section(body, source_type)
+    if original:
+        output_parts.append(original)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n\n".join(output_parts).rstrip() + "\n", encoding="utf-8")
     item = {

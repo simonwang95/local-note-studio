@@ -17,7 +17,7 @@ npm run tauri:dev
 - Vite 前端开发服务：`http://127.0.0.1:1420`
 - Tauri 桌面窗口：Local Note Studio
 
-只有 Tauri 桌面窗口能调用 Rust `run_worker` 命令，从而运行 Python worker、检查依赖、预览命令和执行任务。
+只有 Tauri 桌面窗口能调用 Rust `run_worker` 命令，从而运行 Python worker、检查依赖、预览命令和执行任务。桌面窗口启动后会自动运行一次“检查依赖”，日志区会直接显示当前环境是否可用。
 
 ### 仅预览界面：浏览器模式
 
@@ -162,6 +162,7 @@ Waiting for your frontend dev server...
 - `ffmpeg`
 - 可选：`mlx-whisper`
 - 可选：`opencc`
+- 可选：`textutil`，macOS 通常自带；转换旧版 `.doc` 文件时需要
 - 条件需要：`ASR_LOCAL_MODEL`，当 B站视频没有字幕、需要本地语音转文字时使用
 
 如果使用 conda，可参考：
@@ -330,9 +331,14 @@ https://mp.weixin.qq.com/s/...
 输入源填写本地文件路径：
 
 ```text
+/path/to/file.doc
 /path/to/file.docx
 /path/to/file.pdf
 ```
+
+旧版 `.doc` 会先通过 macOS 自带 `textutil` 转成临时 `.docx`，再进入 Markdown 抽取流程；如果转换结果层级或表格不理想，建议用 Word/WPS 另存为 `.docx` 后再运行一次。
+
+运行时会先生成转换草稿，再自动调用 `qwen_organize_notes.py` 做正式整理。整理后的文件会在上方插入 `## Qwen 整理`，末尾保留完整 `## 原文抽取`，也就是“在原文基础上插入整理”，方便回看原文和核对模型摘要。
 
 输出目录通常为：
 

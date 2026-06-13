@@ -39,10 +39,13 @@ python3 worker/local_note_studio_worker.py \
 
 ## Word/PDF Source Conversion
 
+Legacy `.doc` files are supported on macOS through `textutil`, then parsed through the existing DOCX converter. If a complex `.doc` loses layout, save it as `.docx` in Word/WPS and run the task again.
+The desktop worker converts the source first, then runs `qwen_organize_notes.py` on the converted Markdown. The organized note keeps the extracted original text at the end.
+
 ```bash
 python3 worker/local_note_studio_worker.py \
   --task source-file \
-  --source "/path/to/file.docx" \
+  --source "/path/to/file.doc|/path/to/file.docx|/path/to/file.pdf" \
   --output-dir "/path/to/notes/Inbox"
 ```
 

@@ -241,6 +241,20 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
             warning_count += 1
         lines.append(status_line(ok, f"Optional command `{command}`", first_line(output), hint, required=False))
 
+    textutil = "/usr/bin/textutil" if pathlib.Path("/usr/bin/textutil").exists() else "textutil"
+    ok, output = probe([textutil, "-help"], env)
+    if not ok:
+        warning_count += 1
+    lines.append(
+        status_line(
+            ok,
+            "Optional command `textutil`",
+            "available for legacy .doc conversion" if ok else first_line(output),
+            "macOS textutil is required when converting legacy .doc files.",
+            required=False,
+        )
+    )
+
     lines.append("")
     lines.append("Configuration checks")
     api_base = req.api_base or env.get("DEFAULT_LLM_API_BASE", "")
@@ -412,7 +426,7 @@ def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
     return ""
 
 
-def run_web_url_task(req: TaskRequest, env: dict[str, str]) -> str:
+def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
     convert_command = command_for(req)
     if req.dry_run:
         organize_preview = [
@@ -427,7 +441,7 @@ def run_web_url_task(req: TaskRequest, env: dict[str, str]) -> str:
             [
                 render_command(convert_command),
                 "",
-                "then organize converted Markdown:",
+                "then organize converted Markdown with Qwen:",
                 render_command(organize_preview),
             ]
         ) + "\n"
@@ -543,8 +557,8 @@ def main(argv: list[str] | None = None) -> int:
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
         return 0
-    if req.task == "web-url":
-        sys.stdout.write(run_web_url_task(req, env))
+    if req.task in {"web-url", "source-file"}:
+        sys.stdout.write(run_convert_and_organize_task(req, env))
         return 0
     command = command_for(req)
     sys.stdout.write(run_command(command, env, req.dry_run))
