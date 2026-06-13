@@ -34,13 +34,13 @@
 | `QWEN_ORGANIZE_MAX_RETRIES` | `2` | Qwen 正式整理遇到 408/429/5xx 等临时错误时的重试次数 |
 | `QWEN_ORGANIZE_RETRY_DELAY` | `3` | Qwen 正式整理重试的初始等待秒数，后续指数退避 |
 | `QWEN_ORGANIZE_COOLDOWN_DELAY` | `60` | Qwen 批量正式整理每篇之间的冷却等待秒数；未配置时继承 `COOLDOWN_DELAY` |
-| `QWEN_QUICKREAD_MAX_CHARS` | `90000` | PDF 速读时一次性喂给 Qwen 的最大抽取文本字符数 |
+| `QWEN_QUICKREAD_MAX_CHARS` | `128000` | PDF 速读时一次性喂给 Qwen 的最大抽取文本字符数；设为 `0` 表示不主动截断 |
 | `QWEN_QUICKREAD_MAX_TOKENS` | `80000` | PDF 速读请求的输出 token 预算 |
 | `QWEN_QUICKREAD_TIMEOUT_SECONDS` | `1200` | PDF 速读单次请求超时时间 |
 | `QWEN_QUICKREAD_MAX_RETRIES` | `2` | PDF 速读遇到 408/429/5xx 等临时错误时的重试次数 |
 | `QWEN_QUICKREAD_RETRY_DELAY` | `5` | PDF 速读重试初始等待秒数，后续指数退避 |
 | `QWEN_QUICKREAD_COOLDOWN_DELAY` | `60` | PDF 批量速读每篇之间的冷却等待秒数；未配置时继承 `COOLDOWN_DELAY` |
-| `BILIBILI_OUTPUT_DIR` | `notes/Net/BiliBili` | B 站转写输出根目录，脚本自动追加 `YYYY-MM` 子目录 |
+| `BILIBILI_OUTPUT_DIR` | `notes/Net/BiliBili` | B 站转写输出目录，脚本会直接写入该目录 |
 | `BILIBILI_DEDUPE_DIRS` | `notes` | B 站收藏夹扫描时用于去重的目录，多个目录用系统路径分隔符分开 |
 | `VIDEO_MANIFEST_ENABLED` | `true` | 视频后处理时是否写入 `indexes/video-manifest.json`，可用 `--no-video-manifest` 临时跳过 |
 | `BILIBILI_STATE_DIR` | `indexes/bilibili-state` | B 站处理状态和报告目录 |

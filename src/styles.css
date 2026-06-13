@@ -1,11 +1,14 @@
 :root {
-  color: #172033;
-  background: #f6f7f9;
+  color: #2b241d;
+  background: #f7f2ea;
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 body {
   margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(184, 91, 50, 0.08), transparent 34rem),
+    #f7f2ea;
 }
 
 button,
@@ -24,34 +27,36 @@ select {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  background: #ffffff;
-  border-right: 1px solid #dde2ea;
+  background: #fbf7f0;
+  border-right: 1px solid #e4d8c9;
   padding: 24px;
 }
 
 .sidebar h1 {
   margin: 0 0 12px;
-  font-size: 22px;
+  color: #241f1a;
+  font-size: 26px;
+  letter-spacing: 0;
 }
 
 .sidebar p {
-  color: #5b667a;
+  color: #756b5f;
   margin: 0;
 }
 
 .status-card {
   display: grid;
   gap: 6px;
-  border: 1px solid #dde2ea;
+  border: 1px solid #e4d8c9;
   border-radius: 8px;
   padding: 14px;
-  background: #f8fafc;
-  color: #344054;
+  background: #fffdf9;
+  color: #3d332a;
 }
 
 .status-card span,
 .field-note {
-  color: #667085;
+  color: #786f66;
 }
 
 .workspace {
@@ -63,9 +68,10 @@ select {
 
 .panel,
 .log-panel {
-  border: 1px solid #dde2ea;
+  border: 1px solid #e0d5c7;
   border-radius: 8px;
-  background: #ffffff;
+  background: rgba(255, 253, 249, 0.96);
+  box-shadow: 0 12px 28px rgba(73, 52, 36, 0.06);
   padding: 18px;
 }
 
@@ -94,6 +100,7 @@ select {
 .log-panel h2 {
   margin: 0;
   font-size: 17px;
+  color: #28221d;
 }
 
 .step {
@@ -102,7 +109,7 @@ select {
   width: 24px;
   height: 24px;
   border-radius: 999px;
-  background: #2563eb;
+  background: #b85b32;
   color: #ffffff;
   font-weight: 700;
 }
@@ -110,35 +117,51 @@ select {
 label {
   display: grid;
   gap: 8px;
-  color: #344054;
+  color: #51463c;
   font-weight: 600;
+}
+
+.input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(2, auto);
+  gap: 8px;
+  align-items: center;
+}
+
+.input-row button + button {
+  margin-left: 0;
+}
+
+label > .input-row {
+  gap: 8px;
 }
 
 input,
 select {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #cbd5e1;
+  border: 1px solid #d9cdbd;
   border-radius: 8px;
   padding: 10px 12px;
-  background: #fff;
-  color: #111827;
+  background: #fffefa;
+  color: #241f1a;
 }
 
 input:focus,
 select:focus {
-  outline: 2px solid #bfdbfe;
-  border-color: #2563eb;
+  outline: 3px solid rgba(184, 91, 50, 0.18);
+  border-color: #b85b32;
 }
 
 button {
-  border: 1px solid #2563eb;
+  border: 1px solid #b85b32;
   border-radius: 8px;
   padding: 10px 14px;
-  background: #2563eb;
+  background: #b85b32;
   color: white;
   cursor: pointer;
   white-space: nowrap;
+  font-weight: 700;
 }
 
 button:disabled {
@@ -147,20 +170,33 @@ button:disabled {
 }
 
 button.secondary {
-  background: white;
-  color: #2563eb;
+  background: #fffdf9;
+  color: #9d4829;
+}
+
+button.compact-button {
+  min-width: 58px;
+  padding-inline: 12px;
+}
+
+button.icon-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
 }
 
 button.danger {
-  border-color: #dc2626;
-  background: #dc2626;
+  border-color: #c2412d;
+  background: #c2412d;
   color: #ffffff;
 }
 
 button.danger:disabled {
-  border-color: #cbd5e1;
-  background: #eef2f7;
-  color: #667085;
+  border-color: #d9cdbd;
+  background: #eee7de;
+  color: #8a8076;
 }
 
 .form-grid {
@@ -174,8 +210,9 @@ button.danger:disabled {
 }
 
 .field-note {
-  margin: -6px 0 0;
+  margin: 6px 0 0;
   font-size: 13px;
+  line-height: 1.55;
 }
 
 .hidden {
@@ -183,7 +220,7 @@ button.danger:disabled {
 }
 
 #runState {
-  color: #475467;
+  color: #6f6258;
   font-weight: 600;
 }
 
@@ -194,8 +231,8 @@ pre {
   white-space: pre-wrap;
   overflow: auto;
   border-radius: 8px;
-  background: #101828;
-  color: #dbeafe;
+  background: #19140f;
+  color: #f5efe6;
   padding: 16px;
 }
 
@@ -212,7 +249,7 @@ pre {
 
   .sidebar {
     border-right: 0;
-    border-bottom: 1px solid #dde2ea;
+    border-bottom: 1px solid #e4d8c9;
   }
 
   .form-grid,
@@ -224,5 +261,9 @@ pre {
   .log-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .input-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -601,9 +601,8 @@ transcribe_bilibili_url() {
     # 繁体转简体
     TRANSCRIPT_TEXT_SIMPLIFIED=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
 
-    # 按当前时间组织输出目录（YYYY-MM 格式），文件名保留视频发布时间
-    local TODAY; TODAY=$(date '+%Y-%m')
-    local final_outdir="${OUTPUT_DIR}/${TODAY}"
+    # 直接写入调用方指定的本次输出目录，避免脚本额外追加月份子目录。
+    local final_outdir="${OUTPUT_DIR}"
     mkdir -p "$final_outdir"
 
     local SAFE_TITLE;  SAFE_TITLE=$(echo "$TITLE" | to_safe_name)
@@ -645,7 +644,7 @@ transcribe_local_file() {
     local base_name="${filename%.*}"
     local SAFE_NAME; SAFE_NAME=$(echo "$base_name" | to_safe_name)
     local NOW; NOW=$(date '+%Y-%m-%d')
-    local LOCAL_OUT="${OUTPUT_DIR}/local"
+    local LOCAL_OUT="${OUTPUT_DIR}"
     mkdir -p "$LOCAL_OUT"
 
     # 去重：已有 Markdown 时直接返回，避免重复执行 Whisper/ASR。

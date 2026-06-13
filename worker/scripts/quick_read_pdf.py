@@ -31,7 +31,7 @@ DEFAULTS = {
     "DEFAULT_LLM_API_BASE": "http://127.0.0.1:1234/v1",
     "DEFAULT_LLM_API_KEY": "lm-studio",
     "DEFAULT_LLM_MODEL": "qwen3.6-35b-a3b-nvfp4",
-    "QWEN_QUICKREAD_MAX_CHARS": "90000",
+    "QWEN_QUICKREAD_MAX_CHARS": "128000",
     "QWEN_QUICKREAD_MAX_TOKENS": "80000",
     "QWEN_QUICKREAD_TIMEOUT_SECONDS": "1200",
     "QWEN_QUICKREAD_MAX_RETRIES": "2",
@@ -380,7 +380,7 @@ def write_quickread(
     truncated = False
     input_chars = len(text)
     max_chars = int(cfg["QWEN_QUICKREAD_MAX_CHARS"])
-    if len(text) > max_chars:
+    if max_chars > 0 and len(text) > max_chars:
         text = text[:max_chars].rstrip()
         truncated = True
     if not text.strip() and not prompt_only:

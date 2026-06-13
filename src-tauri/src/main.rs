@@ -223,6 +223,7 @@ fn main() {
             child: Mutex::new(None),
             cancel_requested: AtomicBool::new(false),
         }))
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             run_worker,
             run_worker_stream,

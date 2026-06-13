@@ -3,6 +3,7 @@
 ## Bilibili Single URL
 
 Use this for one video URL. By default, the worker prioritizes `yt-dlp`-confirmed subtitles, then ASR. Web-player subtitles can be selected explicitly from the desktop UI.
+The output file is written directly into `--output-dir`.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -47,6 +48,8 @@ python3 worker/local_note_studio_worker.py \
 
 ## Paper Quick Read
 
+Quick read uses up to `QWEN_QUICKREAD_MAX_CHARS` extracted PDF characters by default. The current default is `128000`; set it to `0` in `worker/env.local` if you want no proactive truncation. The generated note keeps a full-translation section when extractable text is available.
+
 ```bash
 python3 worker/local_note_studio_worker.py \
   --task paper-quickread \
@@ -55,6 +58,8 @@ python3 worker/local_note_studio_worker.py \
 ```
 
 ## Local Video Or Audio
+
+Generated Markdown is written directly into `--output-dir`; the script no longer appends a `local` subdirectory.
 
 ```bash
 python3 worker/local_note_studio_worker.py \

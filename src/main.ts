@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
 type TaskType =
@@ -48,12 +49,12 @@ const taskLabels: Record<TaskType, string> = {
 };
 
 const taskHints: Record<TaskType, string> = {
-  "bilibili-url": "输入一个 Bilibili 视频链接。输出目录会作为 B站笔记根目录，脚本会继续追加月份子目录。",
+  "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
-  "web-url": "输入微信公众号文章或一般网页 URL。",
-  "source-file": "输入本地 .docx 或 .pdf 文件路径，生成 Markdown 草稿。",
-  "paper-quickread": "输入论文 PDF 路径，调用本地 Qwen 兼容 API 生成速读笔记。",
-  "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。",
+  "web-url": "输入微信公众号文章或一般网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
+  "source-file": "输入本地 .docx 或 .pdf 文件路径，Markdown 会直接写入本次输出目录。",
+  "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
+  "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录。",
 };
 
 const outputSubdirs: Record<TaskType, string> = {
@@ -120,8 +121,8 @@ app.innerHTML = `
       </div>
 
       <div class="status-card">
-        <strong>第一阶段目标</strong>
-        <span>先校验环境，再选择输出根目录，最后运行任务。</span>
+        <strong>实用提示</strong>
+        <span>本次输出目录就是最终写入目录；B站收藏夹默认只测试 1 条；长任务可以随时取消。</span>
       </div>
     </aside>
 
@@ -149,7 +150,12 @@ app.innerHTML = `
           </label>
           <label>
             API Key
-            <input id="apiKey" value="${escapeHtml(savedSettings.apiKey)}" />
+            <div class="input-row secret-row">
+              <input id="apiKey" type="password" value="${escapeHtml(savedSettings.apiKey)}" autocomplete="off" />
+              <button id="toggleApiKey" type="button" class="secondary icon-button" title="显示 API Key" aria-label="显示 API Key">
+                ${eyeIcon()}
+              </button>
+            </div>
           </label>
           <label>
             模型
@@ -172,9 +178,12 @@ app.innerHTML = `
         </div>
         <label>
           输出根目录
-          <input id="outputRoot" value="${escapeHtml(savedSettings.outputRoot)}" placeholder="/Users/xxx/Notes" />
+          <div class="input-row">
+            <input id="outputRoot" value="${escapeHtml(savedSettings.outputRoot)}" placeholder="/Users/xxx/Notes" />
+            <button id="chooseOutputRoot" type="button" class="secondary compact-button">选择</button>
+          </div>
         </label>
-        <p class="field-note">建议填写 Obsidian Vault 或长期笔记目录的绝对路径。本次任务目录会按任务类型自动派生，也可以手动覆盖。</p>
+        <p class="field-note">建议填写 Obsidian Vault 或长期笔记目录的绝对路径。切换任务时会帮你带出常用目录；真正写入位置以“本次输出目录”为准。</p>
       </section>
 
       <section class="panel task-panel">
@@ -201,7 +210,10 @@ app.innerHTML = `
           </label>
           <label>
             本次输出目录
-            <input id="outputDir" placeholder="/Users/xxx/Notes/Net/BiliBili" />
+            <div class="input-row">
+              <input id="outputDir" placeholder="/Users/xxx/Notes/Net/BiliBili" />
+              <button id="chooseOutputDir" type="button" class="secondary compact-button">选择</button>
+            </div>
           </label>
           <label>
             字幕/转录优先级
@@ -222,7 +234,11 @@ app.innerHTML = `
 
         <label>
           输入源 URL、文件路径或目录路径
-          <input id="source" placeholder="https://www.bilibili.com/video/BV... 或 /path/to/file.pdf" />
+          <div class="input-row">
+            <input id="source" placeholder="https://www.bilibili.com/video/BV... 或 /path/to/file.pdf" />
+            <button id="chooseSourceFile" type="button" class="secondary compact-button">文件</button>
+            <button id="chooseSourceDir" type="button" class="secondary compact-button">目录</button>
+          </div>
         </label>
         <p id="taskHint" class="field-note"></p>
       </section>
@@ -267,6 +283,11 @@ document.querySelector<HTMLButtonElement>("#checkEnv")?.addEventListener("click"
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
 document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
+document.querySelector<HTMLButtonElement>("#chooseOutputRoot")?.addEventListener("click", () => chooseDirectory("outputRoot"));
+document.querySelector<HTMLButtonElement>("#chooseOutputDir")?.addEventListener("click", () => chooseDirectory("outputDir"));
+document.querySelector<HTMLButtonElement>("#chooseSourceFile")?.addEventListener("click", () => chooseSourceFile());
+document.querySelector<HTMLButtonElement>("#chooseSourceDir")?.addEventListener("click", () => chooseDirectory("source"));
+document.querySelector<HTMLButtonElement>("#toggleApiKey")?.addEventListener("click", () => toggleSecretField("apiKey", "toggleApiKey"));
 
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
@@ -275,6 +296,24 @@ if (!hasTauriRuntime()) {
 
 function inputValue(id: string): string {
   return document.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`)?.value.trim() ?? "";
+}
+
+function setInputValue(id: string, value: string): void {
+  const input = document.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`);
+  if (!input) return;
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function toggleSecretField(inputId: string, buttonId: string): void {
+  const input = document.querySelector<HTMLInputElement>(`#${inputId}`);
+  const button = document.querySelector<HTMLButtonElement>(`#${buttonId}`);
+  if (!input || !button) return;
+  const willShow = input.type === "password";
+  input.type = willShow ? "text" : "password";
+  button.title = willShow ? "隐藏 API Key" : "显示 API Key";
+  button.setAttribute("aria-label", button.title);
+  input.focus();
 }
 
 function currentTask(): TaskType {
@@ -384,6 +423,44 @@ async function cancelWorker(): Promise<void> {
     }
   } catch (error) {
     appendOutput(`取消失败：${errorMessage(error)}\n`);
+  }
+}
+
+async function chooseDirectory(targetId: "outputRoot" | "outputDir" | "source"): Promise<void> {
+  await choosePath(targetId, { directory: true, multiple: false });
+}
+
+async function chooseSourceFile(): Promise<void> {
+  const task = currentTask();
+  const filters =
+    task === "paper-quickread"
+      ? [{ name: "PDF", extensions: ["pdf"] }]
+      : task === "source-file"
+        ? [{ name: "Documents", extensions: ["pdf", "docx"] }]
+        : task === "local-video"
+          ? [{ name: "Media", extensions: ["mp4", "mkv", "mov", "webm", "flv", "mp3", "m4a", "wav"] }]
+          : undefined;
+  await choosePath("source", { multiple: false, filters });
+}
+
+async function choosePath(
+  targetId: "outputRoot" | "outputDir" | "source",
+  options: OpenDialogOptions,
+): Promise<void> {
+  if (!hasTauriRuntime()) {
+    setState("浏览器预览");
+    appendOutput("\n路径选择只能在桌面应用中使用；浏览器预览时请直接手动输入路径。\n");
+    return;
+  }
+  try {
+    const selected = await open(options);
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (typeof path === "string" && path) {
+      setInputValue(targetId, path);
+      if (targetId !== "source") saveSettings();
+    }
+  } catch (error) {
+    appendOutput(`\n路径选择失败：${errorMessage(error)}\n`);
   }
 }
 
@@ -523,4 +600,13 @@ function escapeHtml(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function eyeIcon(): string {
+  return `
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+      <path d="M2.8 12s3.4-6 9.2-6 9.2 6 9.2 6-3.4 6-9.2 6-9.2-6-9.2-6Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
+      <circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="2" />
+    </svg>
+  `;
 }

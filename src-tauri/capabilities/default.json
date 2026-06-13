@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default permissions for the main Local Note Studio window.",
   "windows": ["main"],
-  "permissions": ["core:event:default"]
+  "permissions": ["core:event:default", "dialog:default"]
 }
