@@ -76,8 +76,9 @@ BILIBILI_OUTPUT_DIR="notes/Net/BiliBili" $PY scripts/run_bilibili_transcript.py 
 
 - 迁移后默认读取当前项目 `env.local`。
 - `BILIBILI_DEDUPE_DIRS` 默认是 `notes`，不要只用输出目录做去重，否则迁移目录后会重复处理历史笔记。
-- B 站单视频默认先抓取网页播放器实际字幕：`BILIBILI_PREFER_WEB_SUBTITLE=true`。失败时再回落到 `yt-dlp` CC 字幕、`yt-dlp` AI 字幕和 ASR。
-- 网页播放器字幕使用 B 站播放器接口的 `subtitle.subtitles[].subtitle_url`；如字幕依赖登录态，建议配置 `BILIBILI_COOKIES_FILE` 指向 Netscape 格式 Cookie 文件。
+- B 站单视频默认先用 `yt-dlp` 获取当前视频可确认的 CC 字幕和 AI 字幕，再回落到 ASR。
+- 网页播放器字幕接口可用 `BILIBILI_PREFER_WEB_SUBTITLE=true` 临时开启；该接口偶尔会返回与当前 BV 不匹配的字幕，日常不建议优先使用。
+- 桌面应用的“字幕/转录优先级”下拉框会覆盖上述环境变量：`yt-dlp` 字幕优先、网页播放器字幕优先、ASR 语音转写优先。
 - `VIDEO_MANIFEST_ENABLED=true` 时默认写入 `indexes/video-manifest.json`；命令行 `--no-video-manifest` 优先级更高。
 - Qwen reasoning 模型建议沿用旧项目参数：`SUMMARY_MAX_TOKENS=80000`、`LLM_TIMEOUT=1800`。
 - 长视频的摘要、思维导图、AI 校对会按 `SUMMARY_CHUNK_CHARS` 分块，并使用 `SUMMARY_CHUNK_OVERLAP_CHARS` 保留重叠上下文；分块之间按 `SUMMARY_CHUNK_COOLDOWN_DELAY` 冷却，避免只处理前 20000 字。

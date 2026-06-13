@@ -10,6 +10,8 @@ type TaskType =
   | "paper-quickread"
   | "local-video";
 
+type SubtitleStrategy = "yt-dlp" | "web" | "asr";
+
 type SavedSettings = {
   condaEnv: string;
   pythonBin: string;
@@ -18,6 +20,7 @@ type SavedSettings = {
   model: string;
   cookies: string;
   outputRoot: string;
+  subtitleStrategy: SubtitleStrategy;
 };
 
 type TauriWindow = Window & {
@@ -61,6 +64,12 @@ const outputSubdirs: Record<TaskType, string> = {
   "local-video": "Net/BiliBili",
 };
 
+const subtitleStrategyLabels: Record<SubtitleStrategy, string> = {
+  "yt-dlp": "yt-dlp 字幕优先",
+  web: "网页播放器字幕优先",
+  asr: "ASR 语音转写优先",
+};
+
 const defaults: SavedSettings = {
   condaEnv: "course-whisper",
   pythonBin: "python3",
@@ -69,6 +78,7 @@ const defaults: SavedSettings = {
   model: "qwen3.6-35b-a3b-nvfp4",
   cookies: "",
   outputRoot: "",
+  subtitleStrategy: "yt-dlp",
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -171,6 +181,17 @@ app.innerHTML = `
             本次输出目录
             <input id="outputDir" placeholder="/Users/xxx/Notes/Net/BiliBili" />
           </label>
+          <label>
+            字幕/转录优先级
+            <select id="subtitleStrategy">
+              ${Object.entries(subtitleStrategyLabels)
+                .map(
+                  ([value, label]) =>
+                    `<option value="${value}" ${value === savedSettings.subtitleStrategy ? "selected" : ""}>${label}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
         </div>
 
         <label>
@@ -243,6 +264,7 @@ function payload(dryRun: boolean) {
     api_key: inputValue("apiKey"),
     model: inputValue("model"),
     cookies: inputValue("cookies"),
+    subtitle_strategy: inputValue("subtitleStrategy"),
     dry_run: dryRun,
   };
 }
@@ -379,7 +401,7 @@ function hydrateTaskOutput(): void {
 }
 
 function bindSettingsPersistence(): void {
-  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies"]) {
+  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
 }
@@ -402,6 +424,7 @@ function saveSettings(): void {
     model: inputValue("model") || defaults.model,
     cookies: inputValue("cookies"),
     outputRoot: inputValue("outputRoot"),
+    subtitleStrategy: (inputValue("subtitleStrategy") || defaults.subtitleStrategy) as SubtitleStrategy,
   };
   localStorage.setItem(settingsKey, JSON.stringify(settings));
 }

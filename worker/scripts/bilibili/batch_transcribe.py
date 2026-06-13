@@ -99,7 +99,7 @@ def get_python_cmd():
                 capture_output=True, text=True, timeout=10
             )
             if CONDA_ENV in result.stdout:
-                return ["conda", "run", "-n", CONDA_ENV, "python3"]
+                return ["conda", "run", "--no-capture-output", "-n", CONDA_ENV, "python3", "-u"]
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     return [sys.executable]

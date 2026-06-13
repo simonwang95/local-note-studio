@@ -47,11 +47,14 @@ The worker also supports an environment-check request:
   "api_base": "http://127.0.0.1:1234/v1",
   "api_key": "lm-studio",
   "model": "qwen3.6-35b-a3b-nvfp4",
-  "cookies": "/path/to/bili_cookies.txt"
+  "cookies": "/path/to/bili_cookies.txt",
+  "subtitle_strategy": "yt-dlp"
 }
 ```
 
 This request should not run user content processing. It checks the selected runtime, required Python packages, command-line tools, optional ASR helpers, and local path configuration, then returns actionable hints.
+
+For Bilibili and local video tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. The worker maps these to `BILIBILI_PREFER_WEB_SUBTITLE` and `FORCE_ASR` before calling the migrated scripts.
 
 ## Task Mapping
 

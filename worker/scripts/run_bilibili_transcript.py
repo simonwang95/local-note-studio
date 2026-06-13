@@ -26,6 +26,7 @@ DEFAULTS = {
     "BILIBILI_STATE_DIR": "indexes/bilibili-state",
     "BILIBILI_FAV_MEDIA_ID": "",
     "BILIBILI_COOKIES_FILE": "",
+    "BILIBILI_PREFER_WEB_SUBTITLE": "false",
     "DEFAULT_LLM_API_BASE": "http://127.0.0.1:1234/v1",
     "DEFAULT_LLM_API_KEY": "lm-studio",
     "DEFAULT_LLM_MODEL": "qwen3.6-35b-a3b-nvfp4",
@@ -33,6 +34,7 @@ DEFAULTS = {
     "ASR_ENGINE": "whisper",
     "ASR_LOCAL_MODEL": "",
     "ASR_PROMPT": "以下是中文课程、AI、投资、摄影等学习材料音频，请尽量保留术语。",
+    "FORCE_ASR": "false",
 }
 
 
@@ -155,6 +157,7 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
     if not state_dir.is_absolute():
         state_dir = ROOT / state_dir
     mappings = {
+        "LOCAL_NOTE_STUDIO_ENV_LOADED": "1",
         "OUTPUT_DIR": str(output_dir),
         "NOTES_DIR": cfg["NOTES_DIR"],
         "BILIBILI_DEDUPE_DIRS": cfg["BILIBILI_DEDUPE_DIRS"],
@@ -163,12 +166,14 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
         "BILIBILI_FAV_MEDIA_ID": cfg["BILIBILI_FAV_MEDIA_ID"],
         "BILI_COOKIE_FILE": cfg["BILIBILI_COOKIES_FILE"],
         "BILIBILI_COOKIES_FILE": cfg["BILIBILI_COOKIES_FILE"],
+        "BILIBILI_PREFER_WEB_SUBTITLE": cfg["BILIBILI_PREFER_WEB_SUBTITLE"],
         "SUMMARY_API_URL": cfg["DEFAULT_LLM_API_BASE"],
         "SUMMARY_API_KEY": cfg["DEFAULT_LLM_API_KEY"],
         "SUMMARY_MODEL": cfg["DEFAULT_LLM_MODEL"],
         "ASR_ENGINE": cfg["ASR_ENGINE"],
         "ASR_LOCAL_MODEL": cfg["ASR_LOCAL_MODEL"],
         "ASR_PROMPT": cfg["ASR_PROMPT"],
+        "FORCE_ASR": cfg["FORCE_ASR"],
     }
     for key, value in mappings.items():
         if value:
@@ -178,13 +183,13 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
 
 def python_command(cfg: dict[str, str], script: pathlib.Path) -> list[str]:
     if cfg.get("CONDA_ENV"):
-        return ["conda", "run", "-n", cfg["CONDA_ENV"], "python3", str(script)]
-    return [sys.executable, str(script)]
+        return ["conda", "run", "--no-capture-output", "-n", cfg["CONDA_ENV"], "python3", "-u", str(script)]
+    return [sys.executable, "-u", str(script)]
 
 
 def bash_command(cfg: dict[str, str], script: pathlib.Path, *args: str) -> list[str]:
     if cfg.get("CONDA_ENV"):
-        return ["conda", "run", "-n", cfg["CONDA_ENV"], "bash", str(script), *args]
+        return ["conda", "run", "--no-capture-output", "-n", cfg["CONDA_ENV"], "bash", str(script), *args]
     return ["bash", str(script), *args]
 
 

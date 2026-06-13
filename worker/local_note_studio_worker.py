@@ -52,6 +52,7 @@ class TaskRequest:
     api_key: str = ""
     model: str = ""
     cookies: str = ""
+    subtitle_strategy: str = "yt-dlp"
     dry_run: bool = False
 
     @classmethod
@@ -66,6 +67,7 @@ class TaskRequest:
             api_key=str(data.get("api_key") or ""),
             model=str(data.get("model") or ""),
             cookies=str(data.get("cookies") or ""),
+            subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
             dry_run=bool(data.get("dry_run")),
         )
 
@@ -103,24 +105,34 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["BILI_COOKIE_FILE"] = req.cookies
     if req.output_dir:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
+    subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
+    if subtitle_strategy == "web":
+        env["BILIBILI_PREFER_WEB_SUBTITLE"] = "true"
+        env["FORCE_ASR"] = "false"
+    elif subtitle_strategy == "asr":
+        env["BILIBILI_PREFER_WEB_SUBTITLE"] = "false"
+        env["FORCE_ASR"] = "true"
+    else:
+        env["BILIBILI_PREFER_WEB_SUBTITLE"] = "false"
+        env["FORCE_ASR"] = "false"
     return env
 
 
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "-n", req.conda_env, "python3", "-u", str(script)]
+        return ["conda", "run", "--no-capture-output", "-n", req.conda_env, "python3", "-u", str(script)]
     return [req.python_bin or "python3", "-u", str(script)]
 
 
 def python_eval_cmd(req: TaskRequest, code: str) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "-n", req.conda_env, "python3", "-c", code]
+        return ["conda", "run", "--no-capture-output", "-n", req.conda_env, "python3", "-c", code]
     return [req.python_bin or "python3", "-c", code]
 
 
 def tool_cmd(req: TaskRequest, tool: str, *args: str) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "-n", req.conda_env, tool, *args]
+        return ["conda", "run", "--no-capture-output", "-n", req.conda_env, tool, *args]
     return [tool, *args]
 
 
@@ -418,6 +430,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-key", default="", help="OpenAI-compatible API key.")
     parser.add_argument("--model", default="", help="LLM model name.")
     parser.add_argument("--cookies", default="", help="Bilibili Netscape cookies.txt path.")
+    parser.add_argument(
+        "--subtitle-strategy",
+        default="yt-dlp",
+        choices=["yt-dlp", "web", "asr"],
+        help="Preferred Bilibili transcript source.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
     return parser.parse_args(argv)
 
@@ -435,6 +453,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         api_key=args.api_key,
         model=args.model,
         cookies=args.cookies,
+        subtitle_strategy=args.subtitle_strategy,
         dry_run=args.dry_run,
     )
 

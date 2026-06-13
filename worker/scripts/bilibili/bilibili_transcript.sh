@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # B站视频字幕智能获取脚本 v5.1
-# 功能：CC字幕 → AI字幕 → Qwen3-ASR 转录（三级降级）
+# 功能：CC字幕 → AI字幕 → 本地 ASR 转录（三级降级）
 # 新增：本地目录批量转录（--local-dir）、本地单文件转录（--local-file）、env.local 配置、conda 环境
 # 支持：macOS Chrome/Safari/Firefox、WSL Chromium/Edge Cookie
 #       多语言AI字幕、CUDA/ROCm/MPS/CPU
@@ -16,7 +16,7 @@ COOKIE_ARGS=()
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-if [ -f "$PROJECT_DIR/env.local" ]; then
+if [ "${LOCAL_NOTE_STUDIO_ENV_LOADED:-}" != "1" ] && [ -f "$PROJECT_DIR/env.local" ]; then
     source "$PROJECT_DIR/env.local"
 fi
 
@@ -29,7 +29,7 @@ BROWSER_TYPE="${BROWSER_TYPE:-chromium}"
 CONDA_ENV="${CONDA_ENV:-course-whisper}"
 ENABLE_OPENCC="${ENABLE_OPENCC:-true}"
 FORCE_ASR="${FORCE_ASR:-false}"
-BILIBILI_PREFER_WEB_SUBTITLE="${BILIBILI_PREFER_WEB_SUBTITLE:-true}"
+BILIBILI_PREFER_WEB_SUBTITLE="${BILIBILI_PREFER_WEB_SUBTITLE:-false}"
 BILIBILI_WEB_SUBTITLE_LANGS="${BILIBILI_WEB_SUBTITLE_LANGS:-zh-CN,zh-Hans,zh-Hant,zh-TW,ai-zh,en,ai-en,ja,ai-ja,ko,ai-kr}"
 
 # ===== 解析命令行参数 =====
@@ -84,7 +84,7 @@ get_python() {
 run_python() {
     local py="$(get_python)"
     if [ "$py" = "conda" ]; then
-        conda run -n "$CONDA_ENV" python3 "$@"
+        conda run --no-capture-output -n "$CONDA_ENV" python3 -u "$@"
     else
         "$py" "$@"
     fi
@@ -325,7 +325,7 @@ run_asr_transcribe() {
         fi
 
         if [ "$transcribe_py" = "conda" ]; then
-            conda run -n "$CONDA_ENV" python3 "$wh_script" \
+            conda run --no-capture-output -n "$CONDA_ENV" python3 -u "$wh_script" \
                 --audio "$audio_file" --output-file "$output_file" \
                 --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}" "${progress_arg[@]}"
         else
@@ -355,7 +355,7 @@ run_asr_transcribe() {
         fi
 
         if [ "$transcribe_py" = "conda" ]; then
-            conda run -n "$CONDA_ENV" python3 "$q3_script" --audio "$audio_file" --output-file "$output_file" "${extra_args[@]}"
+            conda run --no-capture-output -n "$CONDA_ENV" python3 -u "$q3_script" --audio "$audio_file" --output-file "$output_file" "${extra_args[@]}"
         else
             "$transcribe_py" "$q3_script" --audio "$audio_file" --output-file "$output_file" "${extra_args[@]}"
         fi
@@ -365,6 +365,8 @@ run_asr_transcribe() {
 # ===== 单个视频转录（B站 URL） =====
 transcribe_bilibili_url() {
     local url="$1"
+
+    cleanup_temp
 
     echo "🔍 正在获取视频信息..."
 
@@ -436,7 +438,12 @@ transcribe_bilibili_url() {
     local HAS_AI_SUBS=false AI_LANG=""
 
     if [ "$FORCE_ASR" = "true" ]; then
-        echo "⚡ FORCE_ASR=true，跳过字幕检测，直接使用 Qwen3-ASR 本地转录"
+        asr_label="${ASR_ENGINE:-qwen3}"
+        if [ "$asr_label" = "whisper" ]; then
+            echo "⚡ FORCE_ASR=true，跳过字幕检测，直接使用 Whisper 本地转录"
+        else
+            echo "⚡ FORCE_ASR=true，跳过字幕检测，直接使用 Qwen3-ASR 本地转录"
+        fi
     else
         echo "🔍 正在检查字幕..."
 
@@ -458,7 +465,8 @@ transcribe_bilibili_url() {
     local TRANSCRIPT_SOURCE=""
     local TRANSCRIPT_TEXT=""
 
-    # 第0级：网页播放器实际字幕
+    # 可选兜底：网页播放器实际字幕
+    # 默认关闭。B 站网页字幕接口偶尔会返回与当前 BV 不匹配的字幕，优先使用 yt-dlp 可确认的视频字幕更稳。
     if [ "$BILIBILI_PREFER_WEB_SUBTITLE" = "true" ] && [ "$FORCE_ASR" != "true" ]; then
         echo "🔍 尝试获取网页播放器字幕..."
         local web_subtitle_file="${CACHE_DIR}/bilibili_web_subtitle.txt"
@@ -611,6 +619,9 @@ transcribe_local_file() {
     local file_path="$1"
     local file_index="${2:-}"
     local file_total="${3:-}"
+
+    cleanup_temp
+
     file_path=$(normalize_existing_path "$file_path")
     local filename
     filename=$(basename "$file_path")

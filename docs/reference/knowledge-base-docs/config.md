@@ -46,7 +46,7 @@
 | `BILIBILI_STATE_DIR` | `indexes/bilibili-state` | B 站处理状态和报告目录 |
 | `BILIBILI_FAV_MEDIA_ID` | 空 | B 站收藏夹 ID，本机配置 |
 | `BILIBILI_COOKIES_FILE` | 空 | B 站 Netscape Cookie 文件路径，本机配置 |
-| `BILIBILI_PREFER_WEB_SUBTITLE` | `true` | B 站视频转写时优先抓取网页播放器实际字幕 |
+| `BILIBILI_PREFER_WEB_SUBTITLE` | `false` | 是否尝试抓取网页播放器字幕；默认关闭，避免网页字幕接口偶发返回错配字幕 |
 | `BILIBILI_WEB_SUBTITLE_LANGS` | `zh-CN,zh-Hans,zh-Hant,zh-TW,ai-zh,en,ai-en,ja,ai-ja,ko,ai-kr` | 网页播放器字幕语言优先级，逗号分隔 |
 | `BROWSER_TYPE` | `chrome` | 未配置 Cookie 文件时尝试读取的浏览器 Cookie |
 | `SUMMARY_API_URL` | `http://127.0.0.1:1234/v1` | B 站后处理使用的 OpenAI-compatible API |
