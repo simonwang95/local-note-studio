@@ -51,7 +51,7 @@ npm install
 npm run tauri:dev
 ```
 
-`npm run dev` starts the Vite web preview only. It is useful for layout checks, but dependency checks and task execution require the Tauri desktop shell because they call the Rust `run_worker` command.
+`npm run dev` starts the Vite web preview only on `http://127.0.0.1:1420`. It is useful for layout checks, but dependency checks and task execution require the Tauri desktop shell because they call the Rust `run_worker` command.
 
 ## Current Status
 
