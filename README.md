@@ -28,6 +28,8 @@ local-note-studio/
 
 ## Quick Start
 
+For a step-by-step Chinese guide, see `docs/user-guide-zh.md`.
+
 1. Copy `worker/env.example` to `worker/env.local`.
 2. Set `CONDA_ENV=course-whisper` or another environment that has `yt-dlp`, `ffmpeg`, Whisper dependencies, and Python packages installed.
 3. Set LLM API fields:
