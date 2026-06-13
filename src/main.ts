@@ -19,6 +19,12 @@ type SavedSettings = {
   outputRoot: string;
 };
 
+type TauriWindow = Window & {
+  __TAURI_INTERNALS__?: unknown;
+};
+
+class TauriRuntimeUnavailableError extends Error {}
+
 const settingsKey = "local-note-studio.settings.v1";
 
 const taskLabels: Record<TaskType, string> = {
@@ -204,6 +210,11 @@ document.querySelector<HTMLButtonElement>("#checkEnv")?.addEventListener("click"
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
 
+if (!hasTauriRuntime()) {
+  setState("浏览器预览");
+  setOutput(tauriRuntimeHint());
+}
+
 function inputValue(id: string): string {
   return document.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`)?.value.trim() ?? "";
 }
@@ -233,12 +244,12 @@ async function runEnvironmentCheck(): Promise<void> {
   setOutput("正在检查所选 conda/Python 环境...");
   try {
     const request = { ...payload(false), task: "env-check", source: "" };
-    const result = await invoke<string>("run_worker", { request: JSON.stringify(request) });
+    const result = await invokeWorker(request);
     setOutput(result);
     setState(result.includes("[MISSING]") ? "依赖缺失" : "依赖检查完成");
   } catch (error) {
-    setOutput(String(error));
-    setState("检查失败");
+    setOutput(errorMessage(error));
+    setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "检查失败");
   }
 }
 
@@ -259,13 +270,39 @@ async function runTask(dryRun: boolean): Promise<void> {
   setState(dryRun ? "生成预览中..." : "任务运行中...");
   setOutput(dryRun ? "正在生成命令预览..." : "任务已启动，等待 worker 返回日志...");
   try {
-    const result = await invoke<string>("run_worker", { request: JSON.stringify(payload(dryRun)) });
+    const result = await invokeWorker(payload(dryRun));
     setOutput(result || "(worker 没有返回输出)");
     setState(dryRun ? "预览完成" : "任务完成");
   } catch (error) {
-    setOutput(String(error));
-    setState("任务失败");
+    setOutput(errorMessage(error));
+    setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "任务失败");
   }
+}
+
+async function invokeWorker(request: object): Promise<string> {
+  if (!hasTauriRuntime()) {
+    throw new TauriRuntimeUnavailableError(tauriRuntimeHint());
+  }
+  return invoke<string>("run_worker", { request: JSON.stringify(request) });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function hasTauriRuntime(): boolean {
+  return Boolean((window as TauriWindow).__TAURI_INTERNALS__);
+}
+
+function tauriRuntimeHint(): string {
+  return [
+    "当前页面运行在普通浏览器预览环境，无法调用 Tauri worker。",
+    "",
+    "请用桌面壳启动后再检查依赖、预览命令或运行任务：",
+    "  npm run tauri:dev",
+    "",
+    "如果只想预览界面，可以继续填写表单；这些配置会保存在当前浏览器的 localStorage 中。",
+  ].join("\n");
 }
 
 function hydrateTaskOutput(): void {

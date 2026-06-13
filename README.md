@@ -51,6 +51,8 @@ npm install
 npm run tauri:dev
 ```
 
+`npm run dev` starts the Vite web preview only. It is useful for layout checks, but dependency checks and task execution require the Tauri desktop shell because they call the Rust `run_worker` command.
+
 ## Current Status
 
 This repository starts as an MVP scaffold. The processing engine is already useful from the Python worker; the Tauri UI is intentionally thin and should grow around stable task contracts.
