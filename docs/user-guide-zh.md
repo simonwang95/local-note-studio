@@ -63,24 +63,49 @@ BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
 
 B站 Cookie 文件用于让脚本读取你自己账号可访问的字幕、公开视频信息、私有收藏夹或受限内容。它不是必须项：只处理公开视频时可以先留空；处理收藏夹、会员可见内容或字幕抓取不稳定时，再补充。
 
-推荐方式是导出 Netscape `cookies.txt` 格式文件：
+推荐方式是使用已经安装好的 `yt-dlp` 从 Chrome 读取登录态并导出 Netscape `cookies.txt` 格式文件：
 
 1. 在 Chrome 或其他浏览器里登录 B站。
-2. 安装一个可信的 `cookies.txt` 导出工具或扩展，选择只导出 `bilibili.com` / `.bilibili.com` 相关 cookie。
-3. 保存为本机文件，例如：
+2. 在项目根目录运行：
+
+```bash
+yt-dlp --cookies-from-browser chrome \
+  --cookies ./bili_cookies.txt \
+  --skip-download \
+  --print title \
+  "https://www.bilibili.com/video/BV1DaGy6GEQK/"
+```
+
+这条命令会：
+
+- 从 Chrome 读取当前登录态。
+- 把 cookie 导出到项目根目录的 `bili_cookies.txt`。
+- 用一个 B站视频链接测试 cookie 是否可用。
+- 只打印标题，不下载视频。
+
+也可以把 cookie 保存到本机私有目录，例如：
 
 ```text
 /Users/xxx/.local/share/local-note-studio/bili_cookies.txt
 ```
 
-4. 在 `worker/env.local` 中填写绝对路径：
+3. 在 `worker/env.local` 中填写绝对路径：
 
 ```bash
 BILIBILI_COOKIES_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
 BILI_COOKIE_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
 ```
 
-5. 在应用界面的“B站 Cookie 文件”输入框中也可以填写同一个路径。
+如果使用项目根目录的 `bili_cookies.txt`，可以写成：
+
+```bash
+BILIBILI_COOKIES_FILE="./bili_cookies.txt"
+BILI_COOKIE_FILE="./bili_cookies.txt"
+```
+
+4. 在应用界面的“B站 Cookie 文件”输入框中也可以填写同一个路径。
+
+备选方式：安装可信的 `cookies.txt` 导出工具或扩展，选择只导出 `bilibili.com` / `.bilibili.com` 相关 cookie，并保存为 Netscape `cookies.txt` 格式。
 
 注意事项：
 
@@ -88,6 +113,7 @@ BILI_COOKIE_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
 - Cookie 等同于一段时间内的登录凭证，不要提交到 git，不要发给别人。
 - 如果 B站退出登录、修改密码或 cookie 过期，需要重新导出。
 - `worker/env.local` 已被 `.gitignore` 忽略，真实 cookie 路径应放在这里。
+- 项目根目录的 `bili_cookies.txt` 和 `*_cookies.txt` 已加入 `.gitignore`。
 
 ## 3. 启动桌面应用
 

@@ -9,5 +9,7 @@ worker/cache/
 worker/indexes/
 worker/notes/
 worker/source/
+bili_cookies.txt
+*_cookies.txt
 *.log
 __pycache__/
