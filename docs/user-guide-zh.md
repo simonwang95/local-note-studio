@@ -59,6 +59,36 @@ BILIBILI_OUTPUT_DIR="/Users/xxx/Notes/Net/BiliBili"
 BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
 ```
 
+### B站 Cookie 文件怎么获取
+
+B站 Cookie 文件用于让脚本读取你自己账号可访问的字幕、公开视频信息、私有收藏夹或受限内容。它不是必须项：只处理公开视频时可以先留空；处理收藏夹、会员可见内容或字幕抓取不稳定时，再补充。
+
+推荐方式是导出 Netscape `cookies.txt` 格式文件：
+
+1. 在 Chrome 或其他浏览器里登录 B站。
+2. 安装一个可信的 `cookies.txt` 导出工具或扩展，选择只导出 `bilibili.com` / `.bilibili.com` 相关 cookie。
+3. 保存为本机文件，例如：
+
+```text
+/Users/xxx/.local/share/local-note-studio/bili_cookies.txt
+```
+
+4. 在 `worker/env.local` 中填写绝对路径：
+
+```bash
+BILIBILI_COOKIES_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
+BILI_COOKIE_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
+```
+
+5. 在应用界面的“B站 Cookie 文件”输入框中也可以填写同一个路径。
+
+注意事项：
+
+- 只导出 B站域名相关 cookie，不要导出全部网站 cookie。
+- Cookie 等同于一段时间内的登录凭证，不要提交到 git，不要发给别人。
+- 如果 B站退出登录、修改密码或 cookie 过期，需要重新导出。
+- `worker/env.local` 已被 `.gitignore` 忽略，真实 cookie 路径应放在这里。
+
 ## 3. 启动桌面应用
 
 ```bash
@@ -114,6 +144,14 @@ conda install -n course-whisper -c conda-forge ffmpeg
 conda run -n course-whisper python3 -m pip install pypdf lxml requests yt-dlp mlx-whisper
 ```
 
+如果检查结果显示 `pypdf` 缺失，只需要给当前 conda 环境补装：
+
+```bash
+conda run -n course-whisper python3 -m pip install pypdf
+```
+
+装完后重新点击“检查依赖”。
+
 ### 第二步：默认输出路径
 
 填写“输出根目录”，建议使用 Obsidian Vault 或长期笔记目录，例如：
@@ -160,6 +198,7 @@ https://www.bilibili.com/video/BVxxxx/
 ```bash
 BILIBILI_FAV_MEDIA_ID="收藏夹ID"
 BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
+BILI_COOKIE_FILE="/path/to/bili_cookies.txt"
 ```
 
 这个功能目前属于 MVP 脚手架阶段。如果收藏夹登录、cookie 或字幕抓取失败，优先用 B站单链接验证环境。
