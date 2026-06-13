@@ -184,7 +184,7 @@ def build_quickread_prompt(title: str, source_path: str, page_count: int, text: 
 1. 用中文输出 Markdown，不要输出思考过程。
 2. 先做“翻译式速读”：保留论文问题、方法、实验、结论、局限和关键术语。
 3. 必须包含这些二级标题：`## 中文速读`、`## 一句话概括`、`## 速读摘要`、`## 思维导图`、`## 值得精读的理由`、`## 待核验`、`## 全文翻译`。
-4. `## 思维导图` 使用 Mermaid mindmap 代码块。
+4. `## 思维导图` 使用纯 Mermaid mindmap 代码块，只保留层级结构；不要输出 `%%{{init}}%%`、`theme`、`style`、`classDef`、`class`、`linkStyle`、颜色、图标或 HTML 样式。
 5. `## 全文翻译` 必须放在文件末尾，按原文顺序保留可读中文翻译；公式、表格、图示或引用不确定时，用 `[公式待核验]`、`[表格待核验]`、`[图示待核验]` 标注，不要编造。
 6. 如果输入内容疑似被截断，在 `## 待核验` 和 `## 全文翻译` 开头说明。
 
@@ -277,6 +277,25 @@ def ensure_full_translation(markdown: str, title: str, source_path: str, page_co
     )
 
 
+def sanitize_mermaid_mindmap(markdown: str) -> str:
+    """Remove decorative Mermaid styling from model-generated mindmaps."""
+
+    def clean_block(match: re.Match[str]) -> str:
+        lines = match.group(0).splitlines()
+        cleaned: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            lowered = stripped.lower()
+            if stripped.startswith("%%{") or stripped.endswith("}%%"):
+                continue
+            if lowered.startswith(("theme ", "style ", "classdef ", "class ", "linkstyle ")):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
+
+    return re.sub(r"```mermaid[\s\S]*?```", clean_block, markdown)
+
+
 def build_manual_prompt(title: str, source_path: str) -> str:
     return f"""# LM Studio 直读 PDF 速读提示词
 
@@ -292,7 +311,7 @@ def build_manual_prompt(title: str, source_path: str) -> str:
 1. 用中文输出 Markdown，不要输出思考过程。
 2. 先做翻译式速读，保留论文核心问题、方法、实验、结论、局限和关键术语。
 3. 必须包含这些二级标题：## 中文速读、## 一句话概括、## 速读摘要、## 思维导图、## 值得精读的理由、## 待核验、## 全文翻译。
-4. ## 思维导图 使用 Mermaid mindmap 代码块。
+4. ## 思维导图 使用纯 Mermaid mindmap 代码块，只保留层级结构；不要输出 %%{init}%%、theme、style、classDef、class、linkStyle、颜色、图标或 HTML 样式。
 5. ## 全文翻译 必须放在文件末尾，按原文顺序保留可读中文翻译；公式、表格、图示或引用不确定时，用 [公式待核验]、[表格待核验]、[图示待核验] 标注，不要编造。
 ```"""
 
@@ -394,6 +413,7 @@ def write_quickread(
         prompt = build_quickread_prompt(title, rel(source), page_count, text)
         body = call_chat_completion(cfg, prompt)
         body = ensure_full_translation(body, title, rel(source), page_count, text, cfg, truncated)
+        body = sanitize_mermaid_mindmap(body)
         status = "quickread"
 
     meta = {

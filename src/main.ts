@@ -432,14 +432,12 @@ async function chooseDirectory(targetId: "outputRoot" | "outputDir" | "source"):
 
 async function chooseSourceFile(): Promise<void> {
   const task = currentTask();
-  const filters =
-    task === "paper-quickread"
-      ? [{ name: "PDF", extensions: ["pdf"] }]
-      : task === "source-file"
-        ? [{ name: "Documents", extensions: ["pdf", "docx"] }]
-        : task === "local-video"
-          ? [{ name: "Media", extensions: ["mp4", "mkv", "mov", "webm", "flv", "mp3", "m4a", "wav"] }]
-          : undefined;
+  let filters: OpenDialogOptions["filters"];
+  if (task === "paper-quickread") {
+    filters = [{ name: "PDF", extensions: ["pdf"] }];
+  } else if (task === "local-video") {
+    filters = [{ name: "Media", extensions: ["mp4", "mkv", "mov", "webm", "flv", "mp3", "m4a", "wav"] }];
+  }
   await choosePath("source", { multiple: false, filters });
 }
 
