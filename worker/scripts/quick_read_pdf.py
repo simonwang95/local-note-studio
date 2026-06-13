@@ -37,6 +37,7 @@ DEFAULTS = {
     "QWEN_QUICKREAD_MAX_RETRIES": "2",
     "QWEN_QUICKREAD_RETRY_DELAY": "5",
     "QWEN_QUICKREAD_COOLDOWN_DELAY": "",
+    "QWEN_QUICKREAD_TRANSLATION_CHARS": "16000",
 }
 
 
@@ -194,6 +195,88 @@ def build_quickread_prompt(title: str, source_path: str, page_count: int, text: 
 ```"""
 
 
+def build_translation_prompt(title: str, source_path: str, page_count: int, text: str, index: int, total: int) -> str:
+    return f"""请把下面论文原文分块完整翻译为中文。
+
+论文标题：{title}
+来源路径：{source_path}
+页数：{page_count}
+分块：{index}/{total}
+
+要求：
+1. 只输出当前分块的中文全文翻译，不要摘要，不要遗漏段落。
+2. 保留原文顺序；术语可在首次出现时保留英文括注。
+3. 公式、表格、图示或引用不确定时，用 `[公式待核验]`、`[表格待核验]`、`[图示待核验]` 标注，不要编造。
+4. 不要输出 YAML frontmatter，不要输出标题 `## 全文翻译`。
+
+论文原文分块：
+
+```text
+{text}
+```"""
+
+
+def chunk_text(text: str, max_chars: int) -> list[str]:
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + max_chars)
+        if end < len(text):
+            split_at = text.rfind("\n\n", start, end)
+            if split_at <= start:
+                split_at = text.rfind("\n", start, end)
+            if split_at > start:
+                end = split_at
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = max(end, start + 1)
+    return chunks
+
+
+def has_full_translation(markdown: str) -> bool:
+    match = re.search(r"(?ms)^##\s+全文翻译\s*$\n(.+?)(?=^##\s+|\Z)", markdown.strip())
+    if not match:
+        return False
+    content = match.group(1).strip()
+    return len(content) >= 200 and "待处理" not in content[:200]
+
+
+def translate_full_text(title: str, source_path: str, page_count: int, text: str, cfg: dict[str, str]) -> str:
+    max_chars = max(2000, int(cfg.get("QWEN_QUICKREAD_TRANSLATION_CHARS") or 16000))
+    chunks = chunk_text(text, max_chars)
+    translations = []
+    for index, chunk in enumerate(chunks, start=1):
+        print(f"translating full text chunk {index}/{len(chunks)}")
+        prompt = build_translation_prompt(title, source_path, page_count, chunk, index, len(chunks))
+        translations.append(call_chat_completion(cfg, prompt).strip())
+    return "\n\n".join(item for item in translations if item).strip()
+
+
+def ensure_full_translation(markdown: str, title: str, source_path: str, page_count: int, text: str, cfg: dict[str, str], truncated: bool) -> str:
+    if has_full_translation(markdown):
+        return markdown.strip()
+    print("quickread output missing full translation; generating fallback translation", file=sys.stderr)
+    translation = translate_full_text(title, source_path, page_count, text, cfg)
+    note = ""
+    if truncated:
+        note = "> 注意：本次全文翻译基于已抽取并截断的输入文本，正式引用请回看原 PDF。\n\n"
+    return "\n\n".join(
+        part
+        for part in [
+            markdown.strip(),
+            "## 全文翻译",
+            note + (translation or "> 全文翻译生成失败，请重新运行或使用 prompt-only 模式。"),
+        ]
+        if part
+    )
+
+
 def build_manual_prompt(title: str, source_path: str) -> str:
     return f"""# LM Studio 直读 PDF 速读提示词
 
@@ -310,6 +393,7 @@ def write_quickread(
     else:
         prompt = build_quickread_prompt(title, rel(source), page_count, text)
         body = call_chat_completion(cfg, prompt)
+        body = ensure_full_translation(body, title, rel(source), page_count, text, cfg, truncated)
         status = "quickread"
 
     meta = {

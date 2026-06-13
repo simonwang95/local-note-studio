@@ -402,6 +402,31 @@ def build_output_path(output_dir: pathlib.Path, title: str, source_type: str) ->
     return output_dir / f"{prefix}-{slugify(title)}.md"
 
 
+def original_source_section(body: str, source_type: str) -> str:
+    if source_type not in {"wechat-article", "webpage", "docx", "lmstudio-conversation"}:
+        return ""
+    original = body.strip()
+    if not original:
+        return ""
+    original_match = re.search(r"(?ms)^##\s+原文抽取\s*$\n(.+)\Z", original)
+    if original_match:
+        original = original_match.group(1).strip()
+    if original.startswith("# "):
+        lines = original.splitlines()
+        original = "\n".join(lines[1:]).lstrip()
+    return "\n\n".join(
+        [
+            "## 原文抽取",
+            "> 以下为转换脚本抽取的完整原文，Qwen 整理内容插入在上方，便于回看与校对。",
+            original,
+        ]
+    )
+
+
+def demote_markdown_headings(markdown: str) -> str:
+    return re.sub(r"(?m)^(#{2,5})(\s+)", r"#\1\2", markdown.strip())
+
+
 def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[str, str]) -> tuple[pathlib.Path, dict[str, Any]]:
     markdown = draft_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(markdown)
@@ -447,7 +472,10 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
     if source_type == "pdf":
         output_parts = [frontmatter(organized_meta), f"# {title}", source_trace, organized_body]
     else:
-        output_parts = [frontmatter(organized_meta), f"# {title}", organized_body, source_trace]
+        output_parts = [frontmatter(organized_meta), f"# {title}", "## Qwen 整理", demote_markdown_headings(organized_body), source_trace]
+        original = original_source_section(body, source_type)
+        if original:
+            output_parts.append(original)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n\n".join(output_parts).rstrip() + "\n", encoding="utf-8")
     item = {

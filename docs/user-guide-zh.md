@@ -321,6 +321,8 @@ https://mp.weixin.qq.com/s/...
 
 运行时会先调用 `convert_sources_to_md.py` 抽取正文和图片资产，再自动调用 `qwen_organize_notes.py` 对刚生成的 Markdown 做 Qwen 整理。整理结果会写回同一个输出目录，并回写 `indexes/source-manifest.json` 的 `organized_*` 字段。
 
+整理后的文件会在上方插入 `## Qwen 整理`，末尾保留完整 `## 原文抽取`，也就是“在原文基础上插入整理”，方便回看原文和核对模型摘要。
+
 ### Word/PDF整理
 
 输入源填写本地文件路径：
@@ -349,6 +351,8 @@ https://mp.weixin.qq.com/s/...
 ```text
 /Users/xxx/Notes/AI/_quickread/AI_paper
 ```
+
+论文速读会要求模型在文件末尾输出 `## 全文翻译`。如果首次速读结果缺少这个章节，程序会自动发起一次“全文翻译”补跑并追加到文件末尾。
 
 ### 本地视频/音频
 
