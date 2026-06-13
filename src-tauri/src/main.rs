@@ -8,8 +8,7 @@ fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> 
         .path()
         .resource_dir()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let project_dir = std::env::current_dir().unwrap_or(resource_dir);
-    let worker = project_dir.join("worker").join("local_note_studio_worker.py");
+    let worker = resolve_worker_path(resource_dir)?;
     let python = std::env::var("LOCAL_NOTE_STUDIO_PYTHON").unwrap_or_else(|_| "python3".to_string());
     let output = Command::new(python)
         .arg(worker)
@@ -24,6 +23,28 @@ fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> 
     } else {
         Err(format!("{}\n{}", stdout, stderr))
     }
+}
+
+fn resolve_worker_path(resource_dir: PathBuf) -> Result<PathBuf, String> {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut candidates = vec![
+        current_dir.join("worker").join("local_note_studio_worker.py"),
+        current_dir
+            .parent()
+            .map(|path| path.join("worker").join("local_note_studio_worker.py"))
+            .unwrap_or_else(|| PathBuf::from("worker").join("local_note_studio_worker.py")),
+        manifest_dir
+            .parent()
+            .map(|path| path.join("worker").join("local_note_studio_worker.py"))
+            .unwrap_or_else(|| PathBuf::from("worker").join("local_note_studio_worker.py")),
+        resource_dir.join("worker").join("local_note_studio_worker.py"),
+    ];
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| "Cannot find worker/local_note_studio_worker.py. In development, run npm run tauri:dev from the project root.".to_string())
 }
 
 fn main() {
