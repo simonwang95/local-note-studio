@@ -98,7 +98,7 @@ cleanup_temp() {
           "$CACHE_DIR"/bilibili_audio*.wav "$CACHE_DIR"/bilibili_audio*.txt \
           "$CACHE_DIR"/.qwen_transcript.txt \
           "$CACHE_DIR"/local_audio*.wav "$CACHE_DIR"/local_audio*.mp3 "$CACHE_DIR"/local_audio*.m4a
-    rm -rf "$CACHE_DIR"/local_work_*
+    rm -rf "$CACHE_DIR"/local_work_* "$CACHE_DIR"/bilibili_work_*
 }
 trap cleanup_temp EXIT
 
@@ -430,6 +430,10 @@ transcribe_bilibili_url() {
     echo "📅 发布: $UPLOAD_DATE_FORMATTED"
     echo "⏱️  时长: $DURATION"
 
+    local VIDEO_SAFE_ID; VIDEO_SAFE_ID=$(printf "%s" "${VIDEO_ID:-bilibili}" | to_safe_name)
+    local task_cache_dir="${CACHE_DIR}/bilibili_work_${VIDEO_SAFE_ID}_${$}_${RANDOM}"
+    mkdir -p "$task_cache_dir"
+
     # ===== 三级降级转录 =====
     echo ""
 
@@ -469,8 +473,8 @@ transcribe_bilibili_url() {
     # 默认关闭。B 站网页字幕接口偶尔会返回与当前 BV 不匹配的字幕，优先使用 yt-dlp 可确认的视频字幕更稳。
     if [ "$BILIBILI_PREFER_WEB_SUBTITLE" = "true" ] && [ "$FORCE_ASR" != "true" ]; then
         echo "🔍 尝试获取网页播放器字幕..."
-        local web_subtitle_file="${CACHE_DIR}/bilibili_web_subtitle.txt"
-        local web_subtitle_meta="${CACHE_DIR}/bilibili_web_subtitle.json"
+        local web_subtitle_file="${task_cache_dir}/web_subtitle.txt"
+        local web_subtitle_meta="${task_cache_dir}/web_subtitle.json"
         local web_cookie_args=()
         if [ -n "${BILI_COOKIE_FILE:-}" ] && [ -f "$BILI_COOKIE_FILE" ]; then
             web_cookie_args=(--cookies "$BILI_COOKIE_FILE")
@@ -496,10 +500,10 @@ transcribe_bilibili_url() {
     if [ -z "$TRANSCRIPT_TEXT" ] && [ "$HAS_CC_SUBS" = true ] && [ "$FORCE_ASR" != "true" ]; then
         echo "✅ 发现人工CC字幕（$CC_SUB_LANG），优先下载..."
         yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --sub-langs "$CC_SUB_LANG" --convert-subs srt \
-            -o "${CACHE_DIR}/bilibili_subtitle.%(ext)s" "$url" 2>&1
+            -o "${task_cache_dir}/bilibili_subtitle.%(ext)s" "$url" 2>&1
 
         local sub_file
-        sub_file=$(find "$CACHE_DIR" -maxdepth 1 -name "bilibili_subtitle*.srt" -type f 2>/dev/null | head -1)
+        sub_file=$(find "$task_cache_dir" -maxdepth 1 -name "bilibili_subtitle*.srt" -type f 2>/dev/null | head -1)
 
         if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
             echo "✅ CC字幕下载成功"
@@ -515,10 +519,10 @@ transcribe_bilibili_url() {
     if [ -z "$TRANSCRIPT_TEXT" ] && [ "$HAS_AI_SUBS" = true ] && [ "$FORCE_ASR" != "true" ]; then
         echo "✅ 发现AI字幕（$AI_LANG），正在下载..."
         yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$AI_LANG" --convert-subs srt \
-            -o "${CACHE_DIR}/bilibili_ai_subtitle.%(ext)s" "$url" 2>&1
+            -o "${task_cache_dir}/bilibili_ai_subtitle.%(ext)s" "$url" 2>&1
 
         local sub_file
-        sub_file=$(find "$CACHE_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
+        sub_file=$(find "$task_cache_dir" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
 
         if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
             echo "✅ AI字幕下载成功"
@@ -535,9 +539,9 @@ transcribe_bilibili_url() {
         echo "🔍 尝试直接下载 AI 字幕（兜底）..."
         for try_lang in "ai-zh" "ai-en" "ai-ja"; do
             yt-dlp "${COOKIE_ARGS[@]}" --skip-download --write-subs --write-auto-subs --sub-langs "$try_lang" --convert-subs srt \
-                -o "${CACHE_DIR}/bilibili_ai_subtitle.%(ext)s" "$url" 2>/dev/null
+                -o "${task_cache_dir}/bilibili_ai_subtitle.%(ext)s" "$url" 2>/dev/null
             local sub_file
-            sub_file=$(find "$CACHE_DIR" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
+            sub_file=$(find "$task_cache_dir" -maxdepth 1 -name "bilibili_ai_subtitle*.srt" -type f 2>/dev/null | head -1)
             if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
                 echo "✅ 兜底成功！AI字幕已下载（$try_lang）"
                 TRANSCRIPT_SOURCE="B站AI字幕 ($try_lang)"
@@ -558,11 +562,11 @@ transcribe_bilibili_url() {
         echo "⏳ 这可能需要一些时间，请耐心等待..."
 
         echo "   ⬇️ 下载音频..."
-        yt-dlp "${COOKIE_ARGS[@]}" -x --audio-format mp3 -o "${CACHE_DIR}/bilibili_audio.%(ext)s" "$url" 2>&1 || \
-        yt-dlp -x --audio-format mp3 -o "${CACHE_DIR}/bilibili_audio.%(ext)s" "$url" 2>&1
+        yt-dlp "${COOKIE_ARGS[@]}" -x --audio-format mp3 -o "${task_cache_dir}/bilibili_audio.%(ext)s" "$url" 2>&1 || \
+        yt-dlp -x --audio-format mp3 -o "${task_cache_dir}/bilibili_audio.%(ext)s" "$url" 2>&1
 
         local audio_file
-        audio_file=$(find "$CACHE_DIR" -maxdepth 1 \( -name "bilibili_audio*.mp3" -o -name "bilibili_audio*.m4a" \) 2>/dev/null | head -1)
+        audio_file=$(find "$task_cache_dir" -maxdepth 1 \( -name "bilibili_audio*.mp3" -o -name "bilibili_audio*.m4a" \) 2>/dev/null | head -1)
 
         if [ -z "$audio_file" ]; then
             echo "❌ 音频下载失败"
@@ -570,7 +574,7 @@ transcribe_bilibili_url() {
         fi
 
         echo "   🔄 音频格式优化（16kHz 单声道）..."
-        local wav_file="${CACHE_DIR}/bilibili_audio.wav"
+        local wav_file="${task_cache_dir}/bilibili_audio.wav"
         ffmpeg -y -i "$audio_file" -ar 16000 -ac 1 "$wav_file" 2>/dev/null
 
         if [ -f "$wav_file" ] && [ -s "$wav_file" ]; then
@@ -578,7 +582,7 @@ transcribe_bilibili_url() {
             echo "   ✅ 音频已优化"
         fi
 
-        local q3_output="${CACHE_DIR}/.asr_transcript.txt"
+        local q3_output="${task_cache_dir}/asr_transcript.txt"
         echo "   🎤 开始语音转文字..."
         run_asr_transcribe "$audio_file" "$q3_output"
 
