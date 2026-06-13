@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import sys
@@ -405,9 +406,57 @@ def command_for(req: TaskRequest) -> list[str]:
 
 
 def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
-    rendered = " ".join(shlex.quote(part) for part in command)
     if dry_run:
-        return rendered + "\n"
+        return render_command(command) + "\n"
+    run_process(command, env)
+    return ""
+
+
+def run_web_url_task(req: TaskRequest, env: dict[str, str]) -> str:
+    convert_command = command_for(req)
+    if req.dry_run:
+        organize_preview = [
+            *python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py"),
+            "--source",
+            "<converted-markdown-path>",
+            "--output-dir",
+            req.output_dir,
+            "--overwrite",
+        ]
+        return "\n".join(
+            [
+                render_command(convert_command),
+                "",
+                "then organize converted Markdown:",
+                render_command(organize_preview),
+            ]
+        ) + "\n"
+
+    output = run_process(convert_command, env)
+    converted_paths = extract_converted_paths(output)
+    if not converted_paths:
+        print("未从转换输出中识别到 Markdown 路径，跳过 Qwen 整理。", file=sys.stderr)
+        return ""
+
+    organize_command = [
+        *python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py"),
+        "--source",
+        converted_paths[-1],
+        "--output-dir",
+        req.output_dir,
+        "--overwrite",
+    ]
+    print("")
+    print("organize:", render_command(organize_command))
+    run_process(organize_command, env)
+    return ""
+
+
+def render_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def run_process(command: list[str], env: dict[str, str]) -> str:
     process = subprocess.Popen(
         command,
         cwd=str(WORKER_DIR),
@@ -426,8 +475,23 @@ def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
     returncode = process.wait()
     output = "".join(lines)
     if returncode != 0:
-        raise RuntimeError(f"command failed ({returncode}):\n{rendered}\n\n{output}")
-    return ""
+        raise RuntimeError(f"command failed ({returncode}):\n{render_command(command)}\n\n{output}")
+    return output
+
+
+def extract_converted_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    seen = set()
+    for line in output.splitlines():
+        match = re.search(r"\bconverted\s+.+?\s+->\s+(.+\.md)$", line.strip())
+        if not match:
+            continue
+        path = match.group(1).strip()
+        if path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -478,6 +542,9 @@ def main(argv: list[str] | None = None) -> int:
     env = build_env(req)
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
+        return 0
+    if req.task == "web-url":
+        sys.stdout.write(run_web_url_task(req, env))
         return 0
     command = command_for(req)
     sys.stdout.write(run_command(command, env, req.dry_run))

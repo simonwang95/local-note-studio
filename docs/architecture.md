@@ -63,7 +63,7 @@ For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For l
 | `bilibili-url` | `worker/scripts/run_bilibili_transcript.py --url` |
 | `bilibili-favorite` | `worker/scripts/run_bilibili_transcript.py --favorite --limit N` |
 | `local-video` | `worker/scripts/run_bilibili_transcript.py --local-file/--local-dir` |
-| `web-url` | `worker/scripts/convert_sources_to_md.py --url` |
+| `web-url` | `worker/scripts/convert_sources_to_md.py --url`, then `worker/scripts/qwen_organize_notes.py --source` |
 | `source-file` | `worker/scripts/convert_sources_to_md.py --source` |
 | `paper-quickread` | `worker/scripts/quick_read_pdf.py --source` |
 | `env-check` | internal worker dependency validation |

@@ -27,6 +27,8 @@ python3 worker/local_note_studio_worker.py \
 
 ## WeChat Article Or Web Page
 
+This task first converts the page to Markdown, then organizes the just-converted draft with Qwen into the same output directory.
+
 ```bash
 python3 worker/local_note_studio_worker.py \
   --task web-url \
