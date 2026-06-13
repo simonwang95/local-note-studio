@@ -54,14 +54,14 @@ The worker also supports an environment-check request:
 
 This request should not run user content processing. It checks the selected runtime, required Python packages, command-line tools, optional ASR helpers, and local path configuration, then returns actionable hints.
 
-For Bilibili and local video tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. The worker maps these to `BILIBILI_PREFER_WEB_SUBTITLE` and `FORCE_ASR` before calling the migrated scripts.
+For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For local video tasks, the desktop UI only exposes local subtitle-first and ASR-first choices. The worker maps these to `BILIBILI_PREFER_WEB_SUBTITLE` and `FORCE_ASR` before calling the migrated scripts. `favorite_limit` defaults to `1` for safe favorite-list testing; `0` means full favorite processing.
 
 ## Task Mapping
 
 | Task | Worker script |
 | --- | --- |
 | `bilibili-url` | `worker/scripts/run_bilibili_transcript.py --url` |
-| `bilibili-favorite` | `worker/scripts/run_bilibili_transcript.py --favorite` |
+| `bilibili-favorite` | `worker/scripts/run_bilibili_transcript.py --favorite --limit N` |
 | `local-video` | `worker/scripts/run_bilibili_transcript.py --local-file/--local-dir` |
 | `web-url` | `worker/scripts/convert_sources_to_md.py --url` |
 | `source-file` | `worker/scripts/convert_sources_to_md.py --source` |

@@ -178,6 +178,10 @@ button.danger:disabled {
   font-size: 13px;
 }
 
+.hidden {
+  display: none;
+}
+
 #runState {
   color: #475467;
   font-weight: 600;

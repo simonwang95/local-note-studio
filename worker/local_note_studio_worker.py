@@ -53,6 +53,7 @@ class TaskRequest:
     model: str = ""
     cookies: str = ""
     subtitle_strategy: str = "yt-dlp"
+    favorite_limit: int = 1
     dry_run: bool = False
 
     @classmethod
@@ -68,6 +69,7 @@ class TaskRequest:
             model=str(data.get("model") or ""),
             cookies=str(data.get("cookies") or ""),
             subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
+            favorite_limit=parse_int(data.get("favorite_limit"), 1),
             dry_run=bool(data.get("dry_run")),
         )
 
@@ -83,6 +85,13 @@ def load_env_file(path: pathlib.Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip('"').strip("'")
     return values
+
+
+def parse_int(value: object, default: int = 0) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def build_env(req: TaskRequest) -> dict[str, str]:
@@ -354,10 +363,13 @@ def command_for(req: TaskRequest) -> list[str]:
             req.source,
         ]
     if req.task == "bilibili-favorite":
-        return [
+        command = [
             *python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"),
             "--favorite",
         ]
+        if req.favorite_limit > 0:
+            command.extend(["--limit", str(req.favorite_limit)])
+        return command
     if req.task == "local-video":
         source_path = pathlib.Path(req.source)
         args = ["--local-dir" if source_path.is_dir() else "--local-file", req.source]
@@ -436,6 +448,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["yt-dlp", "web", "asr"],
         help="Preferred Bilibili transcript source.",
     )
+    parser.add_argument("--favorite-limit", type=int, default=1, help="Maximum videos to process in favorite mode. Use 0 for full run.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
     return parser.parse_args(argv)
 
@@ -454,6 +467,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         model=args.model,
         cookies=args.cookies,
         subtitle_strategy=args.subtitle_strategy,
+        favorite_limit=args.favorite_limit,
         dry_run=args.dry_run,
     )
 

@@ -2,7 +2,7 @@
 
 ## Bilibili Single URL
 
-Use this for one video URL. The worker prioritizes web-player subtitles, then `yt-dlp` subtitles, then ASR.
+Use this for one video URL. By default, the worker prioritizes `yt-dlp`-confirmed subtitles, then ASR. Web-player subtitles can be selected explicitly from the desktop UI.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -15,12 +15,14 @@ python3 worker/local_note_studio_worker.py \
 ## Bilibili Favorites Or Series
 
 The migrated scripts already support favorites through configured `BILIBILI_FAV_MEDIA_ID`. The desktop UI should later add QR login and favorite selection.
+The desktop UI uses `--limit 1` by default for safe testing. Set the favorite test count to `0` for a full incremental run.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
   --task bilibili-favorite \
   --output-dir "/path/to/notes/Net/BiliBili" \
-  --conda-env course-whisper
+  --conda-env course-whisper \
+  --favorite-limit 1
 ```
 
 ## WeChat Article Or Web Page

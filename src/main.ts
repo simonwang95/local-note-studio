@@ -21,6 +21,7 @@ type SavedSettings = {
   cookies: string;
   outputRoot: string;
   subtitleStrategy: SubtitleStrategy;
+  favoriteLimit: string;
 };
 
 type TauriWindow = Window & {
@@ -70,6 +71,26 @@ const subtitleStrategyLabels: Record<SubtitleStrategy, string> = {
   asr: "ASR 语音转写优先",
 };
 
+const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy; label: string }>> = {
+  "bilibili-url": [
+    { value: "yt-dlp", label: "yt-dlp 字幕优先" },
+    { value: "web", label: "网页播放器字幕优先" },
+    { value: "asr", label: "ASR 语音转写优先" },
+  ],
+  "bilibili-favorite": [
+    { value: "yt-dlp", label: "yt-dlp 字幕优先" },
+    { value: "web", label: "网页播放器字幕优先" },
+    { value: "asr", label: "ASR 语音转写优先" },
+  ],
+  "local-video": [
+    { value: "yt-dlp", label: "同目录 SRT 字幕优先" },
+    { value: "asr", label: "ASR 语音转写优先" },
+  ],
+  "web-url": [{ value: "yt-dlp", label: "不适用" }],
+  "source-file": [{ value: "yt-dlp", label: "不适用" }],
+  "paper-quickread": [{ value: "yt-dlp", label: "不适用" }],
+};
+
 const defaults: SavedSettings = {
   condaEnv: "course-whisper",
   pythonBin: "python3",
@@ -79,6 +100,7 @@ const defaults: SavedSettings = {
   cookies: "",
   outputRoot: "",
   subtitleStrategy: "yt-dlp",
+  favoriteLimit: "1",
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -192,6 +214,10 @@ app.innerHTML = `
                 .join("")}
             </select>
           </label>
+          <label id="favoriteLimitField" class="hidden">
+            收藏夹测试数量
+            <input id="favoriteLimit" type="number" min="0" step="1" value="${escapeHtml(savedSettings.favoriteLimit)}" placeholder="1" />
+          </label>
         </div>
 
         <label>
@@ -217,10 +243,12 @@ const outputRoot = document.querySelector<HTMLInputElement>("#outputRoot");
 const outputDir = document.querySelector<HTMLInputElement>("#outputDir");
 const taskHint = document.querySelector<HTMLParagraphElement>("#taskHint");
 
+hydrateTaskControls();
 hydrateTaskOutput();
 bindSettingsPersistence();
 
 taskType?.addEventListener("change", () => {
+  hydrateTaskControls();
   hydrateTaskOutput();
   saveSettings();
 });
@@ -265,6 +293,7 @@ function payload(dryRun: boolean) {
     model: inputValue("model"),
     cookies: inputValue("cookies"),
     subtitle_strategy: inputValue("subtitleStrategy"),
+    favorite_limit: inputValue("favoriteLimit"),
     dry_run: dryRun,
   };
 }
@@ -400,8 +429,29 @@ function hydrateTaskOutput(): void {
   outputDir.dataset.derived = derived;
 }
 
+function hydrateTaskControls(): void {
+  const task = currentTask();
+  hydrateSubtitleStrategy(task);
+  const favoriteLimitField = document.querySelector<HTMLElement>("#favoriteLimitField");
+  if (favoriteLimitField) {
+    favoriteLimitField.classList.toggle("hidden", task !== "bilibili-favorite");
+  }
+}
+
+function hydrateSubtitleStrategy(task: TaskType): void {
+  const select = document.querySelector<HTMLSelectElement>("#subtitleStrategy");
+  if (!select) return;
+  const options = subtitleStrategyOptions[task];
+  const previous = (select.value || savedSettings.subtitleStrategy || defaults.subtitleStrategy) as SubtitleStrategy;
+  const selected = options.some((option) => option.value === previous) ? previous : options[0].value;
+  select.innerHTML = options
+    .map((option) => `<option value="${option.value}" ${option.value === selected ? "selected" : ""}>${option.label}</option>`)
+    .join("");
+  select.disabled = options.length === 1 && options[0].label === "不适用";
+}
+
 function bindSettingsPersistence(): void {
-  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy"]) {
+  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy", "favoriteLimit"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
 }
@@ -425,6 +475,7 @@ function saveSettings(): void {
     cookies: inputValue("cookies"),
     outputRoot: inputValue("outputRoot"),
     subtitleStrategy: (inputValue("subtitleStrategy") || defaults.subtitleStrategy) as SubtitleStrategy,
+    favoriteLimit: inputValue("favoriteLimit") || defaults.favoriteLimit,
   };
   localStorage.setItem(settingsKey, JSON.stringify(settings));
 }
