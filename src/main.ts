@@ -26,6 +26,7 @@ type TauriWindow = Window & {
 class TauriRuntimeUnavailableError extends Error {}
 
 const settingsKey = "local-note-studio.settings.v1";
+let isWorkerRunning = false;
 
 const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
@@ -239,6 +240,8 @@ function payload(dryRun: boolean) {
 }
 
 async function runEnvironmentCheck(): Promise<void> {
+  if (isWorkerRunning) return;
+  setWorkerRunning(true);
   saveSettings();
   setState("检查依赖中...");
   setOutput("正在检查所选 conda/Python 环境...");
@@ -250,10 +253,13 @@ async function runEnvironmentCheck(): Promise<void> {
   } catch (error) {
     setOutput(errorMessage(error));
     setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "检查失败");
+  } finally {
+    setWorkerRunning(false);
   }
 }
 
 async function runTask(dryRun: boolean): Promise<void> {
+  if (isWorkerRunning) return;
   saveSettings();
   const task = currentTask();
   if (!inputValue("outputDir")) {
@@ -267,6 +273,7 @@ async function runTask(dryRun: boolean): Promise<void> {
     return;
   }
 
+  setWorkerRunning(true);
   setState(dryRun ? "生成预览中..." : "任务运行中...");
   setOutput(dryRun ? "正在生成命令预览..." : "任务已启动，等待 worker 返回日志...");
   try {
@@ -276,6 +283,8 @@ async function runTask(dryRun: boolean): Promise<void> {
   } catch (error) {
     setOutput(errorMessage(error));
     setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "任务失败");
+  } finally {
+    setWorkerRunning(false);
   }
 }
 
@@ -356,6 +365,14 @@ function setOutput(text: string): void {
 function setState(text: string): void {
   const state = document.querySelector<HTMLSpanElement>("#runState");
   if (state) state.textContent = text;
+}
+
+function setWorkerRunning(running: boolean): void {
+  isWorkerRunning = running;
+  for (const id of ["checkEnv", "runDry", "runTask"]) {
+    const button = document.querySelector<HTMLButtonElement>(`#${id}`);
+    if (button) button.disabled = running;
+  }
 }
 
 function joinPath(root: string, subdir: string): string {

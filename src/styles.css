@@ -141,6 +141,11 @@ button {
   white-space: nowrap;
 }
 
+button:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
 button.secondary {
   background: white;
   color: #2563eb;

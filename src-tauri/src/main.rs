@@ -3,7 +3,13 @@ use std::process::Command;
 use tauri::Manager;
 
 #[tauri::command]
-fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> {
+async fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || run_worker_blocking(app, request))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+fn run_worker_blocking(app: tauri::AppHandle, request: String) -> Result<String, String> {
     let resource_dir = app
         .path()
         .resource_dir()
