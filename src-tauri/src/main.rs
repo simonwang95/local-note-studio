@@ -155,9 +155,9 @@ fn run_worker_streaming(
     if status.success() {
         Ok(output)
     } else if state.cancel_requested.load(Ordering::SeqCst) {
-        Err(format!("Task cancelled.\n{}", output))
+        Err("Task cancelled. See log above.".to_string())
     } else {
-        Err(format!("worker failed ({status}):\n{output}"))
+        Err(format!("worker failed ({status}). See log above."))
     }
 }
 

@@ -38,6 +38,8 @@ OPTIONAL_COMMANDS = {
     "opencc": "Install opencc if you want traditional-to-simplified conversion.",
 }
 
+ASR_MODEL_HINT = "Set ASR_LOCAL_MODEL in worker/env.local when videos have no usable subtitles."
+
 
 @dataclass
 class TaskRequest:
@@ -271,6 +273,37 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
                 required=False,
             )
         )
+
+    asr_engine = (env.get("ASR_ENGINE") or "whisper").strip().lower()
+    asr_model = (env.get("ASR_LOCAL_MODEL") or "").strip()
+    if asr_engine == "whisper":
+        if asr_model:
+            asr_model_path = pathlib.Path(asr_model).expanduser()
+            if not asr_model_path.is_absolute():
+                asr_model_path = WORKER_DIR / asr_model_path
+            ok = asr_model_path.exists()
+            if not ok:
+                warning_count += 1
+            lines.append(
+                status_line(
+                    ok,
+                    "ASR local model",
+                    str(asr_model_path),
+                    "Set ASR_LOCAL_MODEL to an existing local Whisper model directory.",
+                    required=False,
+                )
+            )
+        else:
+            warning_count += 1
+            lines.append(status_line(False, "ASR local model", "", ASR_MODEL_HINT, required=False))
+    elif asr_engine == "qwen3":
+        ok, output = probe(python_eval_cmd(req, "import qwen_asr; print('import ok')"), env)
+        if not ok:
+            warning_count += 1
+        lines.append(status_line(ok, "Qwen3-ASR package", first_line(output), "pip install qwen-asr", required=False))
+    else:
+        warning_count += 1
+        lines.append(status_line(False, "ASR engine", asr_engine, "Use ASR_ENGINE=whisper or ASR_ENGINE=qwen3.", required=False))
 
     lines.append("")
     if required_ok:

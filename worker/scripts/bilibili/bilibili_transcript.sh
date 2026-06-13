@@ -539,9 +539,14 @@ transcribe_bilibili_url() {
         done
     fi
 
-    # 第3级：Qwen3-ASR
+    # 第3级：本地 ASR
     if [ -z "$TRANSCRIPT_TEXT" ]; then
-        echo "🎤 未发现字幕，使用 Qwen3-ASR 本地语音转文字..."
+        asr_label="${ASR_ENGINE:-qwen3}"
+        if [ "$asr_label" = "whisper" ]; then
+            echo "🎤 未发现字幕，使用 Whisper 本地语音转文字..."
+        else
+            echo "🎤 未发现字幕，使用 Qwen3-ASR 本地语音转文字..."
+        fi
         echo "⏳ 这可能需要一些时间，请耐心等待..."
 
         echo "   ⬇️ 下载音频..."
@@ -565,7 +570,7 @@ transcribe_bilibili_url() {
             echo "   ✅ 音频已优化"
         fi
 
-        local q3_output="${CACHE_DIR}/.qwen_transcript.txt"
+        local q3_output="${CACHE_DIR}/.asr_transcript.txt"
         echo "   🎤 开始语音转文字..."
         run_asr_transcribe "$audio_file" "$q3_output"
 
@@ -575,7 +580,7 @@ transcribe_bilibili_url() {
             rm -f "$q3_output"
             echo "✅ 转录完成"
         else
-            echo "❌ Qwen3-ASR 转录失败"
+            echo "❌ 本地 ASR 转录失败"
             rm -f "$q3_output"
             return 1
         fi

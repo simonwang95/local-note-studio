@@ -162,6 +162,7 @@ Waiting for your frontend dev server...
 - `ffmpeg`
 - 可选：`mlx-whisper`
 - 可选：`opencc`
+- 条件需要：`ASR_LOCAL_MODEL`，当 B站视频没有字幕、需要本地语音转文字时使用
 
 如果使用 conda，可参考：
 
@@ -177,6 +178,34 @@ conda run -n course-whisper python3 -m pip install pypdf
 ```
 
 装完后重新点击“检查依赖”。
+
+### 本地 ASR 模型怎么配置
+
+B站任务会优先找网页播放器字幕和 B站/yt-dlp 字幕。若视频没有可用字幕，就会回落到本地 ASR 语音转文字。
+
+默认配置是：
+
+```bash
+ASR_ENGINE="whisper"
+ASR_LOCAL_MODEL=""
+```
+
+`ASR_ENGINE=whisper` 时，必须把 `ASR_LOCAL_MODEL` 指向本机已有的 Whisper 模型目录，例如：
+
+```bash
+ASR_ENGINE="whisper"
+ASR_LOCAL_MODEL="/Users/xxx/Models/whisper-large-v3-turbo"
+```
+
+如果这个路径为空，带字幕的视频仍可能成功；但没有字幕的视频会在下载音频后失败，并提示需要设置 `ASR_LOCAL_MODEL`。
+
+也可以使用 Qwen3-ASR：
+
+```bash
+ASR_ENGINE="qwen3"
+```
+
+这种方式需要当前 conda 环境安装 `qwen-asr`，首次运行可能需要下载模型权重。若你已经有本地 Qwen3-ASR 模型，也可以继续设置 `ASR_LOCAL_MODEL` 指向该模型目录。
 
 ### 第二步：默认输出路径
 

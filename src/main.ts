@@ -293,7 +293,11 @@ async function runTask(dryRun: boolean): Promise<void> {
     setState(dryRun ? "预览完成" : "任务完成");
   } catch (error) {
     const message = errorMessage(error);
-    if (!message.startsWith("Task cancelled.")) {
+    if (message.startsWith("Task cancelled.")) {
+      appendOutput("\n任务已取消。\n");
+    } else if (currentOutput().trim()) {
+      appendOutput(`\n任务失败：${message}\n`);
+    } else {
       setOutput(message);
     }
     setState(
