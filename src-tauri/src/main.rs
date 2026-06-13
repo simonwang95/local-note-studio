@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::Manager;
 
 #[tauri::command]
 fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> {
