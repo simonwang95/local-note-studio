@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type TaskType =
@@ -23,10 +24,15 @@ type TauriWindow = Window & {
   __TAURI_INTERNALS__?: unknown;
 };
 
+type WorkerLogPayload = {
+  line: string;
+};
+
 class TauriRuntimeUnavailableError extends Error {}
 
 const settingsKey = "local-note-studio.settings.v1";
 let isWorkerRunning = false;
+let workerLogListenerReady: Promise<void> | null = null;
 
 const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
@@ -148,6 +154,7 @@ app.innerHTML = `
           <div class="actions">
             <button id="runDry" type="button" class="secondary">预览命令</button>
             <button id="runTask" type="button">运行任务</button>
+            <button id="cancelTask" type="button" class="danger" disabled>取消任务</button>
           </div>
         </div>
 
@@ -210,6 +217,7 @@ document.querySelector<HTMLButtonElement>("#saveSettings")?.addEventListener("cl
 document.querySelector<HTMLButtonElement>("#checkEnv")?.addEventListener("click", () => runEnvironmentCheck());
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
+document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
 
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
@@ -244,14 +252,16 @@ async function runEnvironmentCheck(): Promise<void> {
   setWorkerRunning(true);
   saveSettings();
   setState("检查依赖中...");
-  setOutput("正在检查所选 conda/Python 环境...");
+  setOutput("");
+  appendOutput("正在检查所选 conda/Python 环境...\n");
   try {
     const request = { ...payload(false), task: "env-check", source: "" };
     const result = await invokeWorker(request);
-    setOutput(result);
+    if (!currentOutput().trim()) setOutput(result);
     setState(result.includes("[MISSING]") ? "依赖缺失" : "依赖检查完成");
   } catch (error) {
-    setOutput(errorMessage(error));
+    const message = errorMessage(error);
+    setOutput(message);
     setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "检查失败");
   } finally {
     setWorkerRunning(false);
@@ -275,14 +285,24 @@ async function runTask(dryRun: boolean): Promise<void> {
 
   setWorkerRunning(true);
   setState(dryRun ? "生成预览中..." : "任务运行中...");
-  setOutput(dryRun ? "正在生成命令预览..." : "任务已启动，等待 worker 返回日志...");
+  setOutput("");
+  appendOutput(dryRun ? "正在生成命令预览...\n" : "任务已启动，日志会实时追加到这里。\n");
   try {
     const result = await invokeWorker(payload(dryRun));
-    setOutput(result || "(worker 没有返回输出)");
+    if (!currentOutput().trim()) setOutput(result || "(worker 没有返回输出)");
     setState(dryRun ? "预览完成" : "任务完成");
   } catch (error) {
-    setOutput(errorMessage(error));
-    setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "任务失败");
+    const message = errorMessage(error);
+    if (!message.startsWith("Task cancelled.")) {
+      setOutput(message);
+    }
+    setState(
+      error instanceof TauriRuntimeUnavailableError
+        ? "浏览器预览"
+        : message.startsWith("Task cancelled.")
+          ? "已取消"
+          : "任务失败",
+    );
   } finally {
     setWorkerRunning(false);
   }
@@ -292,7 +312,32 @@ async function invokeWorker(request: object): Promise<string> {
   if (!hasTauriRuntime()) {
     throw new TauriRuntimeUnavailableError(tauriRuntimeHint());
   }
-  return invoke<string>("run_worker", { request: JSON.stringify(request) });
+  await ensureWorkerLogListener();
+  return invoke<string>("run_worker_stream", { request: JSON.stringify(request) });
+}
+
+async function cancelWorker(): Promise<void> {
+  if (!isWorkerRunning || !hasTauriRuntime()) return;
+  const cancelButton = document.querySelector<HTMLButtonElement>("#cancelTask");
+  if (cancelButton) cancelButton.disabled = true;
+  setState("正在取消...");
+  appendOutput("\n正在请求取消当前任务...\n");
+  try {
+    const didCancel = await invoke<boolean>("cancel_worker");
+    if (!didCancel) {
+      appendOutput("当前没有正在运行的 worker。\n");
+    }
+  } catch (error) {
+    appendOutput(`取消失败：${errorMessage(error)}\n`);
+  }
+}
+
+async function ensureWorkerLogListener(): Promise<void> {
+  if (workerLogListenerReady) return workerLogListenerReady;
+  workerLogListenerReady = listen<WorkerLogPayload>("worker-log", (event) => {
+    appendOutput(event.payload.line);
+  }).then(() => undefined);
+  return workerLogListenerReady;
 }
 
 function errorMessage(error: unknown): string {
@@ -362,6 +407,17 @@ function setOutput(text: string): void {
   if (output) output.textContent = text;
 }
 
+function appendOutput(text: string): void {
+  const output = document.querySelector<HTMLPreElement>("#output");
+  if (!output) return;
+  output.textContent += text;
+  output.scrollTop = output.scrollHeight;
+}
+
+function currentOutput(): string {
+  return document.querySelector<HTMLPreElement>("#output")?.textContent ?? "";
+}
+
 function setState(text: string): void {
   const state = document.querySelector<HTMLSpanElement>("#runState");
   if (state) state.textContent = text;
@@ -373,6 +429,8 @@ function setWorkerRunning(running: boolean): void {
     const button = document.querySelector<HTMLButtonElement>(`#${id}`);
     if (button) button.disabled = running;
   }
+  const cancelButton = document.querySelector<HTMLButtonElement>("#cancelTask");
+  if (cancelButton) cancelButton.disabled = !running;
 }
 
 function joinPath(root: string, subdir: string): string {

@@ -151,6 +151,18 @@ button.secondary {
   color: #2563eb;
 }
 
+button.danger {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #ffffff;
+}
+
+button.danger:disabled {
+  border-color: #cbd5e1;
+  background: #eef2f7;
+  color: #667085;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

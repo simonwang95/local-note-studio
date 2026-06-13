@@ -205,6 +205,8 @@ conda run -n course-whisper python3 -m pip install pypdf
 
 确认命令没问题后，再点“运行任务”。
 
+任务运行时，日志会实时追加到“日志”区域。长任务运行中可以点击“取消任务”；取消会尝试停止当前 Python worker。某些由外部工具启动的子进程可能需要几秒钟才完全退出。
+
 ## 5. 各任务怎么填
 
 ### B站单链接

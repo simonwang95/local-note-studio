@@ -84,6 +84,7 @@ def load_env_file(path: pathlib.Path) -> dict[str, str]:
 def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
+    env["PYTHONUNBUFFERED"] = "1"
     if req.conda_env:
         env["CONDA_ENV"] = req.conda_env
     if req.api_base:
@@ -105,8 +106,8 @@ def build_env(req: TaskRequest) -> dict[str, str]:
 
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "-n", req.conda_env, "python3", str(script)]
-    return [req.python_bin or "python3", str(script)]
+        return ["conda", "run", "-n", req.conda_env, "python3", "-u", str(script)]
+    return [req.python_bin or "python3", "-u", str(script)]
 
 
 def python_eval_cmd(req: TaskRequest, code: str) -> list[str]:
@@ -350,19 +351,26 @@ def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
     rendered = " ".join(shlex.quote(part) for part in command)
     if dry_run:
         return rendered + "\n"
-    process = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=str(WORKER_DIR),
         env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        check=False,
+        bufsize=1,
     )
-    output = process.stdout or ""
-    if process.returncode != 0:
-        raise RuntimeError(f"command failed ({process.returncode}):\n{rendered}\n\n{output}")
-    return output
+    lines: list[str] = []
+    if process.stdout:
+        for line in process.stdout:
+            lines.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    returncode = process.wait()
+    output = "".join(lines)
+    if returncode != 0:
+        raise RuntimeError(f"command failed ({returncode}):\n{rendered}\n\n{output}")
+    return ""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
