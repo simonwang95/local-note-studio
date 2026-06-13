@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+dist/
+target/
+src-tauri/target/
+worker/env.local
+worker/cache/
+worker/indexes/
+worker/notes/
+worker/source/
+*.log
+__pycache__/
