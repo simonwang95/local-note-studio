@@ -386,7 +386,11 @@ async function runEnvironmentCheck(): Promise<void> {
     setState(result.includes("[MISSING]") ? "依赖缺失" : "依赖检查完成");
   } catch (error) {
     const message = errorMessage(error);
-    setOutput(message);
+    if (currentOutput().trim()) {
+      appendOutput(`\n检查失败：${message}\n`);
+    } else {
+      setOutput(message);
+    }
     setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "检查失败");
   } finally {
     setWorkerRunning(false);

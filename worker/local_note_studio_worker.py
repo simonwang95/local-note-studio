@@ -104,6 +104,10 @@ def parse_int(value: object, default: int = 0) -> int:
         return default
 
 
+def parse_bool(value: object) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
