@@ -766,7 +766,7 @@ def generate_summary(filepath, progress_label=None):
                 "只写结论，不要输出标题、编号或解释。",
                 "请为当前分块写一句话概括，突出主题和结论。",
                 "请综合所有分块概括，写成一句不超过 80 字的总概括。",
-                max_tokens=512,
+                max_tokens=SUMMARY_MAX_TOKENS,
             )
             content, did = _replace_placeholder(content, "one_line", one_line)
             changed = changed or did
@@ -865,7 +865,7 @@ def generate_summary(filepath, progress_label=None):
                 "如果没有足够精彩的原话，就提取关键判断句。不要编造时间戳。",
                 "请从当前分块提取 2-5 条重要原话或关键判断句。",
                 "请综合所有分块，保留 5-10 条最有复习价值的原话/判断句；用 Markdown 列表输出。",
-                max_tokens=4096,
+                max_tokens=SUMMARY_MAX_TOKENS,
             )
             content, did = _replace_placeholder(content, "quotes", quotes)
             changed = changed or did
@@ -886,7 +886,7 @@ def generate_summary(filepath, progress_label=None):
                 "优先使用问题、判断点、操作项和需要二次查证的事项。",
                 "请为当前分块生成可复习清单。",
                 "请综合所有分块，生成 6-12 条可复习清单；用 Markdown 任务列表或普通列表均可。",
-                max_tokens=4096,
+                max_tokens=SUMMARY_MAX_TOKENS,
             )
             content, did = _replace_placeholder(content, "review", review)
             changed = changed or did
@@ -907,7 +907,7 @@ def generate_summary(filepath, progress_label=None):
                 "每条用「术语：解释」格式；如果内容没有明显术语，写「本视频没有明显需要单独整理的术语。」",
                 "请提取当前分块中的术语与概念。",
                 "请综合所有分块，去重后输出术语与概念列表。",
-                max_tokens=4096,
+                max_tokens=SUMMARY_MAX_TOKENS,
             )
             content, did = _replace_placeholder(content, "terms", terms)
             changed = changed or did

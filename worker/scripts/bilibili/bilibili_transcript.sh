@@ -762,6 +762,8 @@ write_output_file() {
     cat > "$out" << EOF
 # $title
 
+## 视频信息
+
 > **链接**：$link
 > **作者**：$author
 > **发布时间**：$date

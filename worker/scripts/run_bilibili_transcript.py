@@ -450,6 +450,8 @@ def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: b
         print("未从输出中识别到 Markdown 路径，跳过 summary-only")
         return 0
 
+    postprocess_video_notes(paths[-1:], cfg)
+
     failures = 0
     for path in paths[-1:]:
         summary_command = python_command(cfg, batch) + ["--summary-only", path]
@@ -480,6 +482,8 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
     if not paths:
         print("未从输出中识别到 Markdown 路径，跳过 summary-only")
         return 0
+
+    postprocess_video_notes(paths[-1:], cfg)
 
     summary_command = python_command(cfg, batch) + ["--summary-only", paths[-1]]
     print("\nsummary:", " ".join(summary_command))
@@ -534,12 +538,6 @@ def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: 
             print("未从输出中识别到 Markdown 路径，跳过 summary-only")
             continue
         for path in paths[-1:]:
-            summary_command = python_command(cfg, batch) + ["--summary-only", path]
-            print("\nsummary:", " ".join(summary_command))
-            summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=7200)
-            if summary_code != 0:
-                failures += 1
-            processed_paths.append(path)
             extras[path] = {
                 "avid": avid,
                 "bvid": bvid,
@@ -547,6 +545,13 @@ def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: 
                 "author": video.get("upper", ""),
                 "duration": video.get("duration", ""),
             }
+            postprocess_video_notes([path], cfg, extras)
+            summary_command = python_command(cfg, batch) + ["--summary-only", path]
+            print("\nsummary:", " ".join(summary_command))
+            summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=7200)
+            if summary_code != 0:
+                failures += 1
+            processed_paths.append(path)
     postprocess_video_notes(processed_paths, cfg, extras)
     return 1 if failures else 0
 
