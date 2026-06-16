@@ -124,12 +124,13 @@ def _extract_frame(video_path: pathlib.Path, timestamp: float, out_path: pathlib
 
 
 def _extract_transcript_text(markdown: str) -> str:
-    details_match = re.search(r"(?ms)<details>\s*<summary>📄 完整原文</summary>\s*(.+?)\s*</details>", markdown)
-    if details_match:
-        return details_match.group(1).strip()
-    full_match = re.search(r"(?ms)^##\s+完整原文\s*$\n(.+)\Z", markdown)
-    if full_match:
-        return full_match.group(1).strip()
+    for title in ("原始字幕", "完整原文"):
+        details_match = re.search(rf"(?ms)<details>\s*<summary>📄 {title}</summary>\s*(.+?)\s*</details>", markdown)
+        if details_match:
+            return details_match.group(1).strip()
+        full_match = re.search(rf"(?ms)^##\s+{title}\s*$\n(.+)\Z", markdown)
+        if full_match:
+            return full_match.group(1).strip()
     return ""
 
 
@@ -176,7 +177,7 @@ def _replace_or_insert_keyframe_section(markdown: str, section: str) -> str:
     pattern = r"(?ms)^##\s+关键帧图文笔记\s*$\n.+?(?=^##\s+|<details>|\Z)"
     if re.search(pattern, markdown):
         return re.sub(pattern, section + "\n\n", markdown, count=1)
-    for marker in ("\n<details>", "\n## 完整原文"):
+    for marker in ("\n<details>", "\n## 原始字幕", "\n## 完整原文"):
         index = markdown.find(marker)
         if index != -1:
             return markdown[:index].rstrip() + "\n\n" + section + "\n\n" + markdown[index:].lstrip()

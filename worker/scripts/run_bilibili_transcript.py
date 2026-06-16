@@ -39,6 +39,7 @@ DEFAULTS = {
     "FORCE_ASR": "false",
     "EXTRACT_KEYFRAMES": "false",
     "KEYFRAME_MAX_COUNT": "4",
+    "KEEP_ORIGINAL_SUBTITLES": "true",
 }
 
 
@@ -178,6 +179,9 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
         "ASR_LOCAL_MODEL": cfg["ASR_LOCAL_MODEL"],
         "ASR_PROMPT": cfg["ASR_PROMPT"],
         "FORCE_ASR": cfg["FORCE_ASR"],
+        "EXTRACT_KEYFRAMES": cfg["EXTRACT_KEYFRAMES"],
+        "KEYFRAME_MAX_COUNT": cfg["KEYFRAME_MAX_COUNT"],
+        "KEEP_ORIGINAL_SUBTITLES": cfg["KEEP_ORIGINAL_SUBTITLES"],
     }
     for key, value in mappings.items():
         if value:

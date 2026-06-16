@@ -24,6 +24,7 @@ type SavedSettings = {
   subtitleStrategy: SubtitleStrategy;
   favoriteLimit: string;
   extractKeyframes: boolean;
+  keepOriginalSubtitles: boolean;
   stockTerms: boolean;
   enableOcr: boolean;
 };
@@ -52,12 +53,12 @@ const taskLabels: Record<TaskType, string> = {
 };
 
 const taskHints: Record<TaskType, string> = {
-  "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记。",
+  "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
   "web-url": "输入微信公众号文章或一般网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
   "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html 或图片文件。支持扫描版 PDF 的 OCR 回退；抽取后会调用 Qwen 整理，并在末尾保留原文。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
-  "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记。",
+  "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
 };
 
 const outputSubdirs: Record<TaskType, string> = {
@@ -106,6 +107,7 @@ const defaults: SavedSettings = {
   subtitleStrategy: "yt-dlp",
   favoriteLimit: "1",
   extractKeyframes: false,
+  keepOriginalSubtitles: true,
   stockTerms: false,
   enableOcr: false,
 };
@@ -241,6 +243,10 @@ app.innerHTML = `
             <span>关键帧图文笔记</span>
             <input id="extractKeyframes" type="checkbox" ${savedSettings.extractKeyframes ? "checked" : ""} />
           </label>
+          <label id="keepOriginalSubtitlesField" class="checkbox-field hidden">
+            <span>保留原始字幕</span>
+            <input id="keepOriginalSubtitles" type="checkbox" ${savedSettings.keepOriginalSubtitles ? "checked" : ""} />
+          </label>
           <label id="stockTermsField" class="checkbox-field">
             <span>A股术语校验</span>
             <input id="stockTerms" type="checkbox" ${savedSettings.stockTerms ? "checked" : ""} />
@@ -365,6 +371,7 @@ function payload(dryRun: boolean) {
     subtitle_strategy: inputValue("subtitleStrategy"),
     favorite_limit: inputValue("favoriteLimit"),
     extract_keyframes: checkboxChecked("extractKeyframes"),
+    keep_original_subtitles: checkboxChecked("keepOriginalSubtitles"),
     stock_terms: checkboxChecked("stockTerms"),
     enable_ocr: checkboxChecked("enableOcr"),
     dry_run: dryRun,
@@ -561,6 +568,10 @@ function hydrateTaskControls(): void {
   if (extractKeyframesField) {
     extractKeyframesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
   }
+  const keepOriginalSubtitlesField = document.querySelector<HTMLElement>("#keepOriginalSubtitlesField");
+  if (keepOriginalSubtitlesField) {
+    keepOriginalSubtitlesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
+  }
   const stockTermsField = document.querySelector<HTMLElement>("#stockTermsField");
   if (stockTermsField) {
     stockTermsField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video", "web-url", "source-file"].includes(task));
@@ -587,7 +598,7 @@ function bindSettingsPersistence(): void {
   for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy", "favoriteLimit"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
-  for (const id of ["extractKeyframes", "stockTerms", "enableOcr"]) {
+  for (const id of ["extractKeyframes", "keepOriginalSubtitles", "stockTerms", "enableOcr"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
 }
@@ -613,6 +624,7 @@ function saveSettings(): void {
     subtitleStrategy: (inputValue("subtitleStrategy") || defaults.subtitleStrategy) as SubtitleStrategy,
     favoriteLimit: inputValue("favoriteLimit") || defaults.favoriteLimit,
     extractKeyframes: checkboxChecked("extractKeyframes"),
+    keepOriginalSubtitles: checkboxChecked("keepOriginalSubtitles"),
     stockTerms: checkboxChecked("stockTerms"),
     enableOcr: checkboxChecked("enableOcr"),
   };

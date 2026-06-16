@@ -62,6 +62,7 @@ class TaskRequest:
     subtitle_strategy: str = "yt-dlp"
     favorite_limit: int = 1
     extract_keyframes: bool = False
+    keep_original_subtitles: bool = True
     stock_terms: bool = False
     enable_ocr: bool = False
     dry_run: bool = False
@@ -81,6 +82,7 @@ class TaskRequest:
             subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
             favorite_limit=parse_int(data.get("favorite_limit"), 1),
             extract_keyframes=parse_bool(data.get("extract_keyframes")),
+            keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", True)),
             stock_terms=parse_bool(data.get("stock_terms")),
             enable_ocr=parse_bool(data.get("enable_ocr")),
             dry_run=bool(data.get("dry_run")),
@@ -132,6 +134,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     if req.output_dir:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
     env["EXTRACT_KEYFRAMES"] = "true" if req.extract_keyframes else "false"
+    env["KEEP_ORIGINAL_SUBTITLES"] = "true" if req.keep_original_subtitles else "false"
     env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
     env["ENABLE_OCR"] = "true" if req.enable_ocr else "false"
     subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
@@ -618,6 +621,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--favorite-limit", type=int, default=1, help="Maximum videos to process in favorite mode. Use 0 for full run.")
     parser.add_argument("--extract-keyframes", action="store_true", help="Extract key frames for Bilibili or local video notes.")
+    parser.add_argument("--no-keep-original-subtitles", action="store_true", help="Do not keep the raw subtitle section in video notes.")
     parser.add_argument("--stock-terms", action="store_true", help="Enable A-share stock terminology validation.")
     parser.add_argument("--enable-ocr", action="store_true", help="Enable OCR for images and scanned PDFs in source conversion.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
@@ -640,6 +644,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         subtitle_strategy=args.subtitle_strategy,
         favorite_limit=args.favorite_limit,
         extract_keyframes=args.extract_keyframes,
+        keep_original_subtitles=not args.no_keep_original_subtitles,
         stock_terms=args.stock_terms,
         enable_ocr=args.enable_ocr,
         dry_run=args.dry_run,

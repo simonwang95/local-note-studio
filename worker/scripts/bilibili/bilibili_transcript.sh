@@ -771,9 +771,15 @@ write_output_file() {
 
 ---
 
-## 视频摘要
+## 一句话概括
 
-【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成结构化摘要】
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成一句话概括】
+
+---
+
+## 速读摘要
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成速读摘要】
 
 ---
 
@@ -783,18 +789,42 @@ write_output_file() {
 
 ---
 
-## AI校对
+## 结构化正文
 
-【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成校对版本】
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成结构化正文】
+
+---
+
+## 金句/重要原话
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以提取金句/重要原话】
+
+---
+
+## 可复习清单
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成可复习清单】
+
+---
+
+## 术语与概念
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以提取术语与概念】
+
+---
+
+## 校对正文
+
+【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成校对正文】
 
 ---
 EOF
 
-    # 完整原文在末尾，默认折叠（LLM 处理时需要，用户查看时可收起）
+    # 原始字幕在末尾，默认折叠；LLM 后处理可按用户设置移除。
     if [ "$include_full" = "true" ]; then
         cat >> "$out" << EOF
 
-## 完整原文
+## 原始字幕
 
 $text
 EOF
@@ -802,7 +832,7 @@ EOF
         cat >> "$out" << EOF
 
 <details>
-<summary>📄 完整原文</summary>
+<summary>📄 原始字幕</summary>
 
 $text
 
