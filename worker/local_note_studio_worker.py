@@ -36,8 +36,11 @@ OPTIONAL_PYTHON_PACKAGES = {
     "mlx_whisper": "pip install mlx-whisper",
 }
 
-OPTIONAL_COMMANDS = {
+OPTIONAL_INFO_COMMANDS = {
     "opencc": "Install opencc if you want traditional-to-simplified conversion.",
+}
+
+OCR_FALLBACK_COMMANDS = {
     "tesseract": "Install tesseract if you want OCR for images and scanned PDFs.",
     "pdftoppm": "Install poppler if you want OCR fallback for scanned PDFs.",
 }
@@ -216,6 +219,16 @@ def status_line(ok: bool, label: str, detail: str = "", hint: str = "", required
     return " ".join(parts)
 
 
+def info_line(ok: bool, label: str, detail: str = "", hint: str = "") -> str:
+    status = "[OK]" if ok else "[INFO]"
+    parts = [f"{status} {label}"]
+    if detail:
+        parts.append(f"- {detail}")
+    if not ok and hint:
+        parts.append(f"Hint: {hint}")
+    return " ".join(parts)
+
+
 def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
     lines: list[str] = []
     lines.append("Local Note Studio environment check")
@@ -261,16 +274,34 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         lines.append(status_line(ok, f"Command `{command}`", first_line(output), hint))
 
     for package, hint in OPTIONAL_PYTHON_PACKAGES.items():
-        ok, output = probe(python_eval_cmd(req, f"import {package}; print('import ok')"), env)
+        ok, output = probe(
+            python_eval_cmd(
+                req,
+                f"import importlib.util, sys; "
+                f"found = importlib.util.find_spec('{package}') is not None; "
+                f"print('installed' if found else 'not installed'); "
+                f"raise SystemExit(0 if found else 1)",
+            ),
+            env,
+        )
         if not ok:
             warning_count += 1
         lines.append(status_line(ok, f"Optional Python package `{package}`", first_line(output), hint, required=False))
 
-    for command, hint in OPTIONAL_COMMANDS.items():
+    for command, hint in OPTIONAL_INFO_COMMANDS.items():
         ok, output = probe(tool_cmd(req, command, "--version"), env)
-        if not ok:
-            warning_count += 1
-        lines.append(status_line(ok, f"Optional command `{command}`", first_line(output), hint, required=False))
+        lines.append(info_line(ok, f"Optional command `{command}`", first_line(output), hint))
+
+    for command, hint in OCR_FALLBACK_COMMANDS.items():
+        ok, output = probe(tool_cmd(req, command, "--version"), env)
+        lines.append(
+            info_line(
+                ok,
+                f"Optional OCR fallback command `{command}`",
+                first_line(output) if ok else first_line(output),
+                hint,
+            )
+        )
 
     textutil = "/usr/bin/textutil" if pathlib.Path("/usr/bin/textutil").exists() else "textutil"
     ok, output = probe([textutil, "-help"], env)
