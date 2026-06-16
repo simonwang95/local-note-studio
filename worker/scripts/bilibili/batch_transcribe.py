@@ -15,12 +15,16 @@
 import csv
 import hashlib
 import os
+import re
 import select
 import subprocess
 import sys
 import time
 
 import requests
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from stock_reference import build_stock_reference_prompt, build_stock_validation_section
 
 # ===== 加载 env.local 配置 =====
 def _load_env_local():
@@ -84,6 +88,7 @@ LLM_MAX_RETRIES = max(0, int(_env.get("LLM_MAX_RETRIES", "2")))
 LLM_RETRY_DELAY = max(0.0, float(_env.get("LLM_RETRY_DELAY", "3")))
 PROOFREAD_DOMAINS = _env.get("PROOFREAD_DOMAINS", "").strip()
 ENABLE_DIALOGUE_DETECTION = _env.get("ENABLE_DIALOGUE_DETECTION", "false").strip().lower() == "true"
+A_SHARE_TERMS_ENABLED = _env.get("A_SHARE_TERMS_ENABLED", "false").strip().lower() == "true"
 
 os.makedirs(STATE_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -751,6 +756,7 @@ def generate_summary(filepath, progress_label=None):
 
             # 构建领域专有名词提示
             domain_terms = _build_domain_prompt(PROOFREAD_DOMAINS)
+            stock_terms = build_stock_reference_prompt(transcript_text, A_SHARE_TERMS_ENABLED)
 
             if is_dialogue:
                 proofread_prompt = (
@@ -765,7 +771,8 @@ def generate_summary(filepath, progress_label=None):
                     "   格式使用「角色名：」或「说话人：」前缀（如「主持人：」「嘉宾：」）。\n"
                     "   如果无法确定具体角色名，使用「说话人A：」「说话人B：」区分。\n"
                     "   连续同一角色的发言合并为一段，角色切换时另起新段。\n"
-                    + domain_terms +
+                    + domain_terms
+                    + stock_terms +
                     "7) 输出完整的校对后文本（含角色标注）"
                 )
             else:
@@ -777,7 +784,8 @@ def generate_summary(filepath, progress_label=None):
                     "3) 去除口语填充词（如过多的「嗯」「啊」「就是说」）\n"
                     "4) 修正标点符号，使文本更易读\n"
                     "5) 严禁增删实质性内容，严禁改变原意和说话风格\n"
-                    + domain_terms +
+                    + domain_terms
+                    + stock_terms +
                     "6) 输出完整的校对后文本"
                 )
 
@@ -798,6 +806,12 @@ def generate_summary(filepath, progress_label=None):
             print(f"   ⚠️ {label}: AI校对失败: {e}")
 
     if changed:
+        stock_section = build_stock_validation_section(content, A_SHARE_TERMS_ENABLED)
+        if stock_section:
+            if re.search(r"(?ms)^##\s+A股术语校验\s*$\n.+?(?=^##\s+|\Z)", content):
+                content = re.sub(r"(?ms)^##\s+A股术语校验\s*$\n.+?(?=^##\s+|\Z)", stock_section + "\n\n", content, count=1)
+            else:
+                content = content.rstrip() + "\n\n" + stock_section + "\n"
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
 

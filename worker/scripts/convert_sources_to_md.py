@@ -9,6 +9,7 @@ than final organized notes; Qwen can refine these drafts later.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import html as html_lib
@@ -48,6 +49,21 @@ DOCX_NS = {
     "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
 }
 
+XLSX_NS = {
+    "s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+}
+
+PPTX_NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+}
+
+IMAGE_SOURCE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".bmp", ".tif", ".tiff", ".gif"}
+
 
 DEFAULTS = {
     "NOTES_DIR": "notes",
@@ -68,6 +84,7 @@ DEFAULTS = {
     "WEB_FETCH_TIMEOUT_SECONDS": "30",
     "WEB_DOWNLOAD_ASSETS": "true",
     "WEB_ASSET_MAX_BYTES": str(50 * 1024 * 1024),
+    "ENABLE_OCR": "false",
     "WEB_USER_AGENT": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -223,6 +240,26 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def compact_error_detail(value: Any, max_lines: int = 10) -> str:
+    text = clean_text(str(value or ""))
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        return "\n".join(lines[:max_lines]) + "\n..."
+    return text
+
+
+def read_text_with_fallback(path: pathlib.Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8", "utf-8-sig", "gb18030", "big5"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) -> str:
     api_base = cfg["DEFAULT_LLM_API_BASE"].rstrip("/")
     url = f"{api_base}/chat/completions"
@@ -251,6 +288,45 @@ def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) ->
         return str(data["choices"][0]["message"]["content"]).strip()
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"unexpected LLM response: {data}") from exc
+
+
+def image_to_data_url(path: pathlib.Path) -> str:
+    suffix = path.suffix.lower()
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".heic": "image/heic",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+    }.get(suffix, "application/octet-stream")
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def vision_ocr_image(cfg: dict[str, str], path: pathlib.Path) -> str:
+    prompt = (
+        "请对这张文档页面做 OCR 文本提取。"
+        "要求：1. 尽量按阅读顺序逐行输出；2. 不要总结；3. 保留标题、列表、表格和数字；"
+        "4. 无法确认的字符用 [待核验] 标记；5. 只输出正文，不要解释。"
+    )
+    return clean_qwen_markdown(
+        call_chat_completion(
+            cfg,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_to_data_url(path)}},
+                    ],
+                }
+            ],
+        )
+    )
 
 
 def chunk_pages(page_texts: list[tuple[int, str]], max_chars: int, overlap_pages: int = 0) -> list[tuple[str, str]]:
@@ -769,16 +845,27 @@ def download_markdown_assets(
     def replace(match: re.Match[str]) -> str:
         alt = match.group(1)
         url = match.group(2).strip()
-        if urllib.parse.urlparse(url).scheme not in {"http", "https"}:
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https", "file"}:
             return match.group(0)
         if url in seen:
             return f"![{alt}]({seen[url]})"
 
         asset_index = len([item for item in assets if item.get("status") == "downloaded"]) + 1
         try:
-            data, content_type, final_url = fetch_asset(url, referer, cfg)
+            if scheme == "file":
+                local_path = pathlib.Path(urllib.request.url2pathname(parsed.path))
+                if not local_path.exists():
+                    raise FileNotFoundError(local_path)
+                data = local_path.read_bytes()
+                content_type = ""
+                final_url = url
+                ext = local_path.suffix.lower() or ".bin"
+            else:
+                data, content_type, final_url = fetch_asset(url, referer, cfg)
+                ext = asset_extension(final_url or url, content_type)
             digest = sha256_bytes(data)
-            ext = asset_extension(final_url or url, content_type)
             filename = f"image-{asset_index:03d}-{digest[:12]}{ext}"
             asset_dir.mkdir(parents=True, exist_ok=True)
             asset_path = asset_dir / filename
@@ -991,6 +1078,107 @@ def convert_webpage(
     return out_path, item, False
 
 
+def convert_local_html(
+    path: pathlib.Path,
+    output_dir: pathlib.Path,
+    model: str,
+    cfg: dict[str, str],
+    manifest: dict[str, Any],
+    overwrite: bool,
+    download_assets: bool,
+) -> tuple[pathlib.Path, dict[str, Any], bool]:
+    raw_html = read_text_with_fallback(path)
+    source_hash = sha256_file(path)
+    doc = parse_html(raw_html)
+    final_url = path.resolve().as_uri()
+    article_node = select_article_node(doc, raw_html, final_url)
+    metadata = webpage_metadata(doc, raw_html, final_url, final_url)
+    title = metadata["title"] or path.stem
+    extracted = webpage_markdown(article_node, final_url)
+    if not extracted:
+        raise RuntimeError("未能从本地 HTML 中抽取到正文")
+    source_bytes = extracted.encode("utf-8")
+    out_path = output_dir / f"HTML-{slugify(title, path.stem)}.md"
+    has_assets = "file://" in extracted or bool(markdown_image_urls(extracted))
+    if should_skip(manifest, path, out_path, source_hash, overwrite, download_assets and has_assets):
+        return out_path, {}, True
+
+    extracted, assets = download_markdown_assets(extracted, out_path, final_url, cfg, download_assets)
+    downloaded_assets = [item for item in assets if item.get("status") == "downloaded"]
+    failed_assets = [item for item in assets if item.get("status") == "failed"]
+    assets_downloaded = bool(download_assets) and not failed_assets
+    asset_dir = ""
+    if downloaded_assets:
+        first_asset = pathlib.Path(str(downloaded_assets[0]["path"]))
+        asset_dir = first_asset.parent.as_posix()
+
+    meta = {
+        "title": title,
+        "type": "source-conversion",
+        "source_type": "local-html",
+        "source_path": rel(path),
+        "source_url": "",
+        "created": today(),
+        "updated": today(),
+        "status": "draft",
+        "model": model,
+        "tags": ["source/local-html", "status/draft"],
+        "source_hash": source_hash,
+        "assets_downloaded": assets_downloaded,
+        "asset_count": len(downloaded_assets),
+        "asset_failed": len(failed_assets),
+    }
+    markdown = [
+        frontmatter(meta),
+        "",
+        f"# {title}",
+        "",
+        "## 来源信息",
+        "",
+        f"- 源文件：`{rel(path)}`",
+        "- 文件类型：本地 HTML",
+        f"- 作者：{metadata['author'] or '未知'}",
+        f"- 发布时间：{metadata['published'] or '未知'}",
+        f"- 描述：{metadata['description'] or '无'}",
+        f"- SHA256：`{source_hash}`",
+        f"- 转换时间：{now_iso()}",
+        "- 转换工具：`lxml` + `convert_sources_to_md.py`",
+        f"- 图片资产：{'已本地化' if assets_downloaded else ('部分失败' if failed_assets else '未本地化')}",
+        f"- 资产目录：`{asset_dir or '无'}`",
+        "",
+        "## 待整理区",
+        "",
+        "> 这是本地 HTML 转换草稿。Qwen 整理建议重点核对标题层级、图片说明、表格和外部引用。",
+        "",
+        "## 原文抽取",
+        "",
+        extracted,
+        "",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(markdown), encoding="utf-8")
+    item = {
+        "source_path": rel(path),
+        "source_url": "",
+        "source_type": "local-html",
+        "source_hash": source_hash,
+        "source_size": path.stat().st_size,
+        "output_path": rel(out_path),
+        "status": "converted",
+        "converted_at": now_iso(),
+        "model": model,
+        "title": title,
+        "author": metadata["author"],
+        "published": metadata["published"],
+        "assets_downloaded": assets_downloaded,
+        "asset_count": len(downloaded_assets),
+        "asset_failed": len(failed_assets),
+        "assets": assets,
+        "error": "",
+    }
+    return out_path, item, False
+
+
 def pdf_title(reader: Any, path: pathlib.Path) -> str:
     metadata = getattr(reader, "metadata", None)
     title = ""
@@ -1006,6 +1194,7 @@ def convert_pdf(
     max_pages: int | None,
     cfg: dict[str, str],
     qwen_polish: bool = False,
+    enable_ocr: bool = False,
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     if PdfReader is None:
         raise RuntimeError("pypdf is not available in the current Python environment")
@@ -1019,7 +1208,29 @@ def convert_pdf(
     for page_number in range(pages_to_extract):
         text = clean_text(reader.pages[page_number].extract_text() or "")
         page_texts.append((page_number + 1, text))
-        body.append(f"## Page {page_number + 1}\n\n{text or '> 本页未抽取到可读文本。'}")
+
+    ocr_used = False
+    ocr_error = ""
+    extracted_chars = sum(len(re.sub(r"\s+", "", text)) for _, text in page_texts)
+    sparse_pages = sum(1 for _, text in page_texts if len(re.sub(r"\s+", "", text)) < 30)
+    if enable_ocr and page_texts and (extracted_chars < 160 or sparse_pages >= max(1, len(page_texts) // 2)):
+        try:
+            ocr_page_texts = ocr_document(path, cfg, max_pages=pages_to_extract)
+            if ocr_page_texts:
+                replaced_pages: list[tuple[int, str]] = []
+                for index, (page_number, text) in enumerate(page_texts):
+                    ocr_text = ocr_page_texts[index] if index < len(ocr_page_texts) else ""
+                    if len(re.sub(r"\s+", "", text)) < 30 and len(re.sub(r"\s+", "", ocr_text)) >= 30:
+                        replaced_pages.append((page_number, clean_text(ocr_text)))
+                        ocr_used = True
+                    else:
+                        replaced_pages.append((page_number, text))
+                page_texts = replaced_pages
+        except Exception as exc:
+            ocr_error = str(exc)
+
+    for page_number, text in page_texts:
+        body.append(f"## Page {page_number}\n\n{text or '> 本页未抽取到可读文本。'}")
 
     if pages_to_extract < page_count:
         body.append(f"## 转换截断说明\n\n样稿仅抽取前 {pages_to_extract} 页，全文共 {page_count} 页。正式转换可设置更大的 `SOURCE_CONVERSION_MAX_PDF_PAGES` 或使用 `--all-pages`。")
@@ -1074,6 +1285,7 @@ def convert_pdf(
         f"- SHA256：`{source_hash}`",
         f"- 转换时间：{now_iso()}",
         "- 转换工具：`pypdf`",
+        f"- OCR 回退：{'已启用并生效' if ocr_used else ('已尝试但未生效' if enable_ocr and ocr_error else ('已启用但无需回退' if enable_ocr else '未启用'))}",
         "",
         "## 待整理区",
         "",
@@ -1099,9 +1311,143 @@ def convert_pdf(
         "model": model,
         "llm_polished": bool(qwen_polish and not qwen_error),
         "llm_error": qwen_error,
+        "ocr_used": ocr_used,
+        "ocr_error": ocr_error,
         "error": "",
     }
     return out_path, item
+
+
+def extract_pdf_page_images(path: pathlib.Path, max_pages: int | None = None) -> list[pathlib.Path]:
+    if PdfReader is None:
+        raise RuntimeError("pypdf is not available for scanned PDF image extraction")
+    reader = PdfReader(str(path))
+    image_paths: list[pathlib.Path] = []
+    temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="local-note-pdf-images-"))
+    limit = min(len(reader.pages), max_pages or len(reader.pages))
+    for page_index in range(limit):
+        page = reader.pages[page_index]
+        images = list(getattr(page, "images", []) or [])
+        if not images:
+            continue
+        image = max(images, key=lambda item: len(getattr(item, "data", b"") or b""))
+        name = getattr(image, "name", f"page-{page_index + 1}.jpg")
+        suffix = pathlib.Path(name).suffix.lower() or ".jpg"
+        out_path = temp_dir / f"page-{page_index + 1:03d}{suffix}"
+        out_path.write_bytes(image.data)
+        image_paths.append(out_path)
+    return image_paths
+
+
+def ocr_document(path: pathlib.Path, cfg: dict[str, str], max_pages: int | None = None) -> list[str]:
+    errors: list[str] = []
+    try:
+        return ocr_with_qwen(cfg, path, max_pages=max_pages)
+    except Exception as exc:
+        errors.append(f"qwen vision backend failed: {compact_error_detail(exc)}")
+    if shutil.which("tesseract"):
+        try:
+            return ocr_with_tesseract(path, max_pages=max_pages)
+        except Exception as exc:
+            errors.append(f"tesseract backend failed: {compact_error_detail(exc)}")
+    try:
+        return ocr_with_swift(path, max_pages=max_pages)
+    except Exception as exc:
+        errors.append(f"macOS Vision backend failed: {compact_error_detail(exc)}")
+    raise RuntimeError(
+        "OCR backend unavailable. "
+        "Enable a multimodal Qwen/OpenAI-compatible model, or install `tesseract` (and `pdftoppm` for scanned PDFs), or fix local Xcode/Swift toolchain for the Vision fallback. "
+        + " | ".join(errors)
+    )
+
+
+def ocr_with_qwen(cfg: dict[str, str], path: pathlib.Path, max_pages: int | None = None) -> list[str]:
+    api_base = cfg.get("DEFAULT_LLM_API_BASE", "").strip()
+    model = cfg.get("DEFAULT_LLM_MODEL", "").strip()
+    if not api_base or not model:
+        raise RuntimeError("LLM API base or model is not configured")
+    if path.suffix.lower() in IMAGE_SOURCE_EXTS:
+        return [vision_ocr_image(cfg, path)]
+    if path.suffix.lower() != ".pdf":
+        raise RuntimeError(f"unsupported Qwen OCR source: {path}")
+    image_paths = extract_pdf_page_images(path, max_pages=max_pages)
+    if not image_paths:
+        raise RuntimeError("no page images found in PDF; cannot run vision OCR")
+    try:
+        return [vision_ocr_image(cfg, image_path) for image_path in image_paths]
+    finally:
+        temp_dir = image_paths[0].parent if image_paths else None
+        if temp_dir and temp_dir.name.startswith("local-note-pdf-images-"):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def ocr_with_tesseract(path: pathlib.Path, max_pages: int | None = None) -> list[str]:
+    langs = os.environ.get("OCR_LANGS", "chi_sim+eng")
+    if path.suffix.lower() in IMAGE_SOURCE_EXTS:
+        result = subprocess.run(
+            ["tesseract", str(path), "stdout", "-l", langs],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(compact_error_detail(result.stderr or result.stdout or "tesseract failed"))
+        return [clean_text(result.stdout)]
+    if path.suffix.lower() != ".pdf":
+        raise RuntimeError(f"unsupported tesseract OCR source: {path}")
+    if not shutil.which("pdftoppm"):
+        raise RuntimeError("pdftoppm not found for scanned PDF rasterization")
+
+    with tempfile.TemporaryDirectory(prefix="local-note-ocr-") as temp_dir:
+        temp_path = pathlib.Path(temp_dir)
+        prefix = temp_path / "page"
+        command = ["pdftoppm", "-png"]
+        if max_pages:
+            command.extend(["-f", "1", "-l", str(max_pages)])
+        command.extend([str(path), str(prefix)])
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(compact_error_detail(result.stderr or result.stdout or "pdftoppm failed"))
+        pages: list[str] = []
+        for image_path in sorted(temp_path.glob("page-*.png")):
+            text = ocr_with_tesseract(image_path)[0]
+            pages.append(text)
+        return pages
+
+
+def ocr_with_swift(path: pathlib.Path, max_pages: int | None = None) -> list[str]:
+    script = pathlib.Path(__file__).with_name("macos_ocr.swift")
+    if not script.exists():
+        raise RuntimeError(f"OCR script not found: {script}")
+    with tempfile.TemporaryDirectory(prefix="local-note-swift-ocr-") as temp_dir:
+        temp_path = pathlib.Path(temp_dir)
+        binary_path = temp_path / "macos-ocr"
+        module_cache = temp_path / "module-cache"
+        module_cache.mkdir(parents=True, exist_ok=True)
+        compile_command = [
+            "xcrun",
+            "swiftc",
+            "-module-cache-path",
+            str(module_cache),
+            str(script),
+            "-o",
+            str(binary_path),
+        ]
+        compile_result = subprocess.run(compile_command, capture_output=True, text=True, check=False)
+        if compile_result.returncode != 0:
+            raise RuntimeError(compact_error_detail(compile_result.stderr or compile_result.stdout or "swift compile failed"))
+        command = [str(binary_path), "--source", str(path)]
+        if max_pages:
+            command.extend(["--max-pages", str(max_pages)])
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(compact_error_detail(result.stderr or result.stdout or "OCR command failed"))
+        payload = json.loads(result.stdout or "{}")
+        pages = payload.get("pages")
+        if isinstance(pages, list):
+            return [clean_text(str(item.get("text") or "")) for item in pages if isinstance(item, dict)]
+        text = clean_text(str(payload.get("text") or ""))
+        return [text] if text else []
 
 
 def docx_relationships(docx: zipfile.ZipFile) -> dict[str, dict[str, str]]:
@@ -1390,6 +1736,397 @@ def convert_doc(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tup
         )
 
 
+def markdown_table(rows: list[list[str]]) -> str:
+    if not rows:
+        return "> 未抽取到表格数据。"
+    width = max(len(row) for row in rows)
+    normalized = [[cell.replace("|", "\\|") for cell in row] + [""] * (width - len(row)) for row in rows]
+    header = normalized[0]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * width) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in normalized[1:])
+    return "\n".join(lines)
+
+
+def convert_csv_like(
+    path: pathlib.Path,
+    output_dir: pathlib.Path,
+    model: str,
+    delimiter: str,
+    source_type: str,
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    source_hash = sha256_file(path)
+    text = read_text_with_fallback(path)
+    rows = [row for row in csv_reader(text, delimiter)]
+    out_name = f"{source_type.upper()}-{slugify(path.stem)}.md"
+    out_path = output_dir / out_name
+    title = path.stem
+    meta = {
+        "title": title,
+        "type": "source-conversion",
+        "source_type": source_type,
+        "source_path": rel(path),
+        "source_url": "",
+        "created": today(),
+        "updated": today(),
+        "status": "draft",
+        "model": model,
+        "tags": [f"source/{source_type}", "status/draft"],
+        "source_hash": source_hash,
+    }
+    markdown = [
+        frontmatter(meta),
+        "",
+        f"# {title}",
+        "",
+        "## 来源信息",
+        "",
+        f"- 源文件：`{rel(path)}`",
+        f"- 文件类型：{source_type.upper()}",
+        f"- 行数：{len(rows)}",
+        f"- 列数：{max((len(row) for row in rows), default=0)}",
+        f"- SHA256：`{source_hash}`",
+        f"- 转换时间：{now_iso()}",
+        "- 转换工具：`csv`",
+        "",
+        "## 待整理区",
+        "",
+        "> 这是表格源文件转换草稿。Qwen 整理时建议提炼字段含义、业务口径、异常值和可复用结论。",
+        "",
+        "## 原文抽取",
+        "",
+        markdown_table(rows),
+        "",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(markdown), encoding="utf-8")
+    item = {
+        "source_path": rel(path),
+        "source_type": source_type,
+        "source_hash": source_hash,
+        "source_size": path.stat().st_size,
+        "output_path": rel(out_path),
+        "status": "converted",
+        "converted_at": now_iso(),
+        "model": model,
+        "title": title,
+        "error": "",
+    }
+    return out_path, item
+
+
+def csv_reader(text: str, delimiter: str) -> list[list[str]]:
+    import csv
+
+    reader = csv.reader(text.splitlines(), delimiter=delimiter)
+    rows: list[list[str]] = []
+    for row in reader:
+        cleaned = [clean_text(cell) for cell in row]
+        if any(cell for cell in cleaned):
+            rows.append(cleaned)
+    return rows
+
+
+def xlsx_shared_strings(book: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in book.namelist():
+        return []
+    root = ET.fromstring(book.read("xl/sharedStrings.xml"))
+    return [compact_text("".join(node.itertext())) for node in root.findall(".//s:si", XLSX_NS)]
+
+
+def xlsx_sheet_targets(book: zipfile.ZipFile) -> list[tuple[str, str]]:
+    workbook = ET.fromstring(book.read("xl/workbook.xml"))
+    rels_root = ET.fromstring(book.read("xl/_rels/workbook.xml.rels"))
+    rels = {
+        rel.attrib.get("Id", ""): rel.attrib.get("Target", "")
+        for rel in rels_root.findall("rel:Relationship", XLSX_NS)
+    }
+    sheets: list[tuple[str, str]] = []
+    for sheet in workbook.findall("s:sheets/s:sheet", XLSX_NS):
+        name = sheet.attrib.get("name", "Sheet")
+        rid = sheet.attrib.get(f"{{{XLSX_NS['r']}}}id", "")
+        target = rels.get(rid, "")
+        if target:
+            sheets.append((name, "xl/" + target.lstrip("/")))
+    return sheets
+
+
+def xlsx_cell_value(cell: ET.Element, shared: list[str]) -> str:
+    cell_type = cell.attrib.get("t", "")
+    if cell_type == "inlineStr":
+        return compact_text("".join(node.text or "" for node in cell.findall(".//s:t", XLSX_NS)))
+    value = compact_text(cell.findtext("s:v", default="", namespaces=XLSX_NS))
+    if cell_type == "s":
+        try:
+            return shared[int(value)]
+        except Exception:
+            return value
+    if cell_type == "b":
+        return "TRUE" if value == "1" else "FALSE"
+    return value
+
+
+def xlsx_col_index(cell_ref: str) -> int:
+    letters = "".join(ch for ch in cell_ref if ch.isalpha()).upper()
+    total = 0
+    for ch in letters:
+        total = total * 26 + (ord(ch) - ord("A") + 1)
+    return max(total - 1, 0)
+
+
+def xlsx_rows(path: pathlib.Path) -> list[tuple[str, list[list[str]]]]:
+    with zipfile.ZipFile(path) as book:
+        shared = xlsx_shared_strings(book)
+        sheets = xlsx_sheet_targets(book)
+        output: list[tuple[str, list[list[str]]]] = []
+        for sheet_name, sheet_target in sheets:
+            if sheet_target not in book.namelist():
+                continue
+            root = ET.fromstring(book.read(sheet_target))
+            rows: list[list[str]] = []
+            for row in root.findall(".//s:sheetData/s:row", XLSX_NS):
+                values: list[str] = []
+                for cell in row.findall("s:c", XLSX_NS):
+                    index = xlsx_col_index(cell.attrib.get("r", "A1"))
+                    while len(values) < index:
+                        values.append("")
+                    values.append(xlsx_cell_value(cell, shared))
+                if any(value.strip() for value in values):
+                    rows.append(values)
+            output.append((sheet_name, rows))
+        return output
+
+
+def convert_xlsx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+    source_hash = sha256_file(path)
+    sheets = xlsx_rows(path)
+    out_path = output_dir / f"XLSX-{slugify(path.stem)}.md"
+    title = path.stem
+    meta = {
+        "title": title,
+        "type": "source-conversion",
+        "source_type": "xlsx",
+        "source_path": rel(path),
+        "source_url": "",
+        "created": today(),
+        "updated": today(),
+        "status": "draft",
+        "model": model,
+        "tags": ["source/xlsx", "status/draft"],
+        "source_hash": source_hash,
+    }
+    body = ["## 原文抽取", ""]
+    for sheet_name, rows in sheets:
+        body.extend([f"### 工作表：{sheet_name}", "", markdown_table(rows), ""])
+    if len(body) == 2:
+        body.append("> 未抽取到工作表内容。")
+    markdown = [
+        frontmatter(meta),
+        "",
+        f"# {title}",
+        "",
+        "## 来源信息",
+        "",
+        f"- 源文件：`{rel(path)}`",
+        "- 文件类型：XLSX",
+        f"- 工作表数量：{len(sheets)}",
+        f"- SHA256：`{source_hash}`",
+        f"- 转换时间：{now_iso()}",
+        "- 转换工具：`zipfile` + `ElementTree`",
+        "",
+        "## 待整理区",
+        "",
+        "> 这是 Excel 转换草稿。Qwen 整理时建议说明各工作表之间的关系、关键字段和异常数据。",
+        "",
+        *body,
+        "",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(markdown), encoding="utf-8")
+    item = {
+        "source_path": rel(path),
+        "source_type": "xlsx",
+        "source_hash": source_hash,
+        "source_size": path.stat().st_size,
+        "output_path": rel(out_path),
+        "status": "converted",
+        "converted_at": now_iso(),
+        "model": model,
+        "title": title,
+        "error": "",
+    }
+    return out_path, item
+
+
+def pptx_slide_targets(book: zipfile.ZipFile) -> list[str]:
+    presentation = ET.fromstring(book.read("ppt/presentation.xml"))
+    rels_root = ET.fromstring(book.read("ppt/_rels/presentation.xml.rels"))
+    rels = {
+        rel.attrib.get("Id", ""): rel.attrib.get("Target", "")
+        for rel in rels_root.findall("rel:Relationship", PPTX_NS)
+    }
+    targets: list[str] = []
+    for slide in presentation.findall("p:sldIdLst/p:sldId", PPTX_NS):
+        rid = slide.attrib.get(f"{{{PPTX_NS['r']}}}id", "")
+        target = rels.get(rid, "")
+        if target:
+            targets.append("ppt/" + target.lstrip("/"))
+    return targets
+
+
+def pptx_slide_texts(path: pathlib.Path) -> list[tuple[int, str]]:
+    with zipfile.ZipFile(path) as book:
+        output: list[tuple[int, str]] = []
+        for index, target in enumerate(pptx_slide_targets(book), 1):
+            if target not in book.namelist():
+                continue
+            root = ET.fromstring(book.read(target))
+            texts = [compact_text(node.text or "") for node in root.findall(".//a:t", PPTX_NS)]
+            text = "\n".join(part for part in texts if part)
+            output.append((index, clean_text(text)))
+        return output
+
+
+def convert_pptx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+    source_hash = sha256_file(path)
+    slides = pptx_slide_texts(path)
+    out_path = output_dir / f"PPTX-{slugify(path.stem)}.md"
+    title = path.stem
+    meta = {
+        "title": title,
+        "type": "source-conversion",
+        "source_type": "pptx",
+        "source_path": rel(path),
+        "source_url": "",
+        "created": today(),
+        "updated": today(),
+        "status": "draft",
+        "model": model,
+        "tags": ["source/pptx", "status/draft"],
+        "source_hash": source_hash,
+    }
+    body = ["## 原文抽取", ""]
+    for slide_number, text in slides:
+        body.extend([f"### Slide {slide_number}", "", text or "> 本页未抽取到文本。", ""])
+    if len(body) == 2:
+        body.append("> 未抽取到幻灯片文本。")
+    markdown = [
+        frontmatter(meta),
+        "",
+        f"# {title}",
+        "",
+        "## 来源信息",
+        "",
+        f"- 源文件：`{rel(path)}`",
+        "- 文件类型：PPTX",
+        f"- 幻灯片数量：{len(slides)}",
+        f"- SHA256：`{source_hash}`",
+        f"- 转换时间：{now_iso()}",
+        "- 转换工具：`zipfile` + `ElementTree`",
+        "",
+        "## 待整理区",
+        "",
+        "> 这是 PowerPoint 转换草稿。Qwen 整理时建议补出每页主旨、演示顺序和结论。",
+        "",
+        *body,
+        "",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(markdown), encoding="utf-8")
+    item = {
+        "source_path": rel(path),
+        "source_type": "pptx",
+        "source_hash": source_hash,
+        "source_size": path.stat().st_size,
+        "output_path": rel(out_path),
+        "status": "converted",
+        "converted_at": now_iso(),
+        "model": model,
+        "title": title,
+        "error": "",
+    }
+    return out_path, item
+
+
+def copy_source_image(path: pathlib.Path, out_path: pathlib.Path) -> str:
+    asset_dir_rel = pathlib.Path("assets") / out_path.stem
+    asset_dir = out_path.parent / asset_dir_rel
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    target = asset_dir / f"source{path.suffix.lower()}"
+    if not target.exists():
+        shutil.copy2(path, target)
+    return (asset_dir_rel / target.name).as_posix()
+
+
+def convert_image_ocr(path: pathlib.Path, output_dir: pathlib.Path, model: str, cfg: dict[str, str]) -> tuple[pathlib.Path, dict[str, Any]]:
+    source_hash = sha256_file(path)
+    out_path = output_dir / f"IMAGE-{slugify(path.stem)}.md"
+    image_md_path = copy_source_image(path, out_path)
+    ocr_pages = ocr_document(path, cfg, max_pages=1)
+    ocr_text = ocr_pages[0] if ocr_pages else ""
+    if not ocr_text:
+        raise RuntimeError("OCR 未抽取到可用文本")
+    title = path.stem
+    meta = {
+        "title": title,
+        "type": "source-conversion",
+        "source_type": "image-ocr",
+        "source_path": rel(path),
+        "source_url": "",
+        "created": today(),
+        "updated": today(),
+        "status": "draft",
+        "model": model,
+        "tags": ["source/image", "status/draft"],
+        "source_hash": source_hash,
+        "asset_count": 1,
+    }
+    markdown = [
+        frontmatter(meta),
+        "",
+        f"# {title}",
+        "",
+        "## 来源信息",
+        "",
+        f"- 源文件：`{rel(path)}`",
+        "- 文件类型：图片 OCR",
+        f"- SHA256：`{source_hash}`",
+        f"- 转换时间：{now_iso()}",
+        "- 转换工具：`Vision OCR`",
+        "",
+        "## 待整理区",
+        "",
+        "> 这是图片 OCR 转换草稿。Qwen 整理时建议核对专有名词、数字、表格边界和版式顺序。",
+        "",
+        "## 原图",
+        "",
+        f"![原图]({image_md_path})",
+        "",
+        "## 原文抽取",
+        "",
+        ocr_text,
+        "",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(markdown), encoding="utf-8")
+    item = {
+        "source_path": rel(path),
+        "source_type": "image-ocr",
+        "source_hash": source_hash,
+        "source_size": path.stat().st_size,
+        "output_path": rel(out_path),
+        "status": "converted",
+        "converted_at": now_iso(),
+        "model": model,
+        "title": title,
+        "asset_count": 1,
+        "error": "",
+    }
+    return out_path, item
+
+
 def text_from_content(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -1534,11 +2271,19 @@ def discover_sources(source_dir: pathlib.Path, sample: bool, cfg: dict[str, str]
     pdfs = sorted(source_dir.glob("AI_paper/*.pdf"))
     conversations = sorted(source_dir.glob("AI-Chat/LM-Studio/**/*.conversation.json"))
     docx_files = sorted([*source_dir.glob("**/*.docx"), *source_dir.glob("**/*.doc")])
+    tabular_files = sorted([*source_dir.glob("**/*.csv"), *source_dir.glob("**/*.tsv"), *source_dir.glob("**/*.xlsx")])
+    slides = sorted(source_dir.glob("**/*.pptx"))
+    local_html = sorted([*source_dir.glob("**/*.html"), *source_dir.glob("**/*.htm")])
+    images = sorted([path for ext in IMAGE_SOURCE_EXTS for path in source_dir.glob(f"**/*{ext}")])
     if sample:
         pdfs = pdfs[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_PDF"])]
         conversations = conversations[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_JSON"])]
         docx_files = docx_files[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_DOCX"])]
-    return [*pdfs, *conversations, *docx_files]
+        tabular_files = tabular_files[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_DOCX"])]
+        slides = slides[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_DOCX"])]
+        local_html = local_html[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_DOCX"])]
+        images = images[: int(cfg["SOURCE_CONVERSION_SAMPLE_LIMIT_DOCX"])]
+    return [*pdfs, *conversations, *docx_files, *tabular_files, *slides, *local_html, *images]
 
 
 def main() -> int:
@@ -1601,7 +2346,15 @@ def main() -> int:
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_pdf(source, output_dir, model, max_pages, cfg, args.qwen_polish_pdf)
+                out_path, item = convert_pdf(
+                    source,
+                    output_dir,
+                    model,
+                    max_pages,
+                    cfg,
+                    args.qwen_polish_pdf,
+                    parse_bool(cfg.get("ENABLE_OCR", "false")),
+                )
             elif source.name.endswith(".conversation.json"):
                 title = str(json.loads(source.read_text(encoding="utf-8")).get("name") or source.stem)
                 output_path = output_dir / f"CHAT-{slugify(title, source.stem)}.md"
@@ -1624,6 +2377,48 @@ def main() -> int:
                     print(f"skip {rel(source)}")
                     continue
                 out_path, item = convert_doc(source, output_dir, model)
+            elif source.suffix.lower() == ".csv":
+                output_path = output_dir / f"CSV-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item = convert_csv_like(source, output_dir, model, ",", "csv")
+            elif source.suffix.lower() == ".tsv":
+                output_path = output_dir / f"TSV-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item = convert_csv_like(source, output_dir, model, "\t", "tsv")
+            elif source.suffix.lower() == ".xlsx":
+                output_path = output_dir / f"XLSX-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item = convert_xlsx(source, output_dir, model)
+            elif source.suffix.lower() == ".pptx":
+                output_path = output_dir / f"PPTX-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item = convert_pptx(source, output_dir, model)
+            elif source.suffix.lower() in {".html", ".htm"}:
+                output_path = output_dir / f"HTML-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item, _ = convert_local_html(source, output_dir, model, cfg, manifest, args.overwrite, download_assets)
+            elif source.suffix.lower() in IMAGE_SOURCE_EXTS:
+                output_path = output_dir / f"IMAGE-{slugify(source.stem)}.md"
+                if should_skip(manifest, source, output_path, source_hash, args.overwrite):
+                    skipped += 1
+                    print(f"skip {rel(source)}")
+                    continue
+                out_path, item = convert_image_ocr(source, output_dir, model, cfg)
             else:
                 raise ValueError(f"unsupported source type: {source}")
             update_manifest(manifest, item)

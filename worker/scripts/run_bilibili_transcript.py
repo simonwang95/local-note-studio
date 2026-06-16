@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 
+from video_keyframes import add_keyframes_to_note
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -35,6 +37,8 @@ DEFAULTS = {
     "ASR_LOCAL_MODEL": "",
     "ASR_PROMPT": "以下是中文课程、AI、投资、摄影等学习材料音频，请尽量保留术语。",
     "FORCE_ASR": "false",
+    "EXTRACT_KEYFRAMES": "false",
+    "KEYFRAME_MAX_COUNT": "4",
 }
 
 
@@ -342,6 +346,23 @@ def postprocess_video_note(path: pathlib.Path, cfg: dict[str, str], extra: dict[
     }
     path.write_text("\n\n".join([frontmatter(meta), body]).rstrip() + "\n", encoding="utf-8")
 
+    keyframe_info: dict[str, object] = {"enabled": False, "status": "disabled", "assets": []}
+    if parse_bool(cfg.get("EXTRACT_KEYFRAMES", "false")):
+        try:
+            keyframe_info = add_keyframes_to_note(
+                path,
+                meta,
+                max_frames=max(1, int(cfg.get("KEYFRAME_MAX_COUNT") or 4)),
+                cookie_file=str(cfg.get("BILIBILI_COOKIES_FILE") or ""),
+            )
+            if keyframe_info.get("status") == "generated":
+                print(f"keyframes: {rel(path)} -> {len(keyframe_info.get('assets', []))} 张")
+            elif keyframe_info.get("reason"):
+                print(f"keyframes skipped: {rel(path)} ({keyframe_info['reason']})")
+        except Exception as exc:
+            keyframe_info = {"enabled": True, "status": "failed", "reason": str(exc), "assets": []}
+            print(f"keyframes failed: {rel(path)} ({exc})", file=sys.stderr)
+
     return {
         "source_path": fields.get("source_path", ""),
         "source_url": fields.get("source_url", ""),
@@ -360,6 +381,9 @@ def postprocess_video_note(path: pathlib.Path, cfg: dict[str, str], extra: dict[
         "duration": fields.get("duration", ""),
         "transcript_source": fields.get("transcript_source", ""),
         "transcribed_at": fields.get("transcribed_at", ""),
+        "keyframe_status": keyframe_info.get("status", "disabled"),
+        "keyframe_assets": keyframe_info.get("assets", []),
+        "keyframe_error": keyframe_info.get("reason", ""),
         "error": "",
     }
 

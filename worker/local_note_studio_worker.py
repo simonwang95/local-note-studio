@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import pathlib
@@ -37,6 +38,8 @@ OPTIONAL_PYTHON_PACKAGES = {
 
 OPTIONAL_COMMANDS = {
     "opencc": "Install opencc if you want traditional-to-simplified conversion.",
+    "tesseract": "Install tesseract if you want OCR for images and scanned PDFs.",
+    "pdftoppm": "Install poppler if you want OCR fallback for scanned PDFs.",
 }
 
 ASR_MODEL_HINT = "Set ASR_LOCAL_MODEL in worker/env.local when videos have no usable subtitles."
@@ -55,6 +58,9 @@ class TaskRequest:
     cookies: str = ""
     subtitle_strategy: str = "yt-dlp"
     favorite_limit: int = 1
+    extract_keyframes: bool = False
+    stock_terms: bool = False
+    enable_ocr: bool = False
     dry_run: bool = False
 
     @classmethod
@@ -71,6 +77,9 @@ class TaskRequest:
             cookies=str(data.get("cookies") or ""),
             subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
             favorite_limit=parse_int(data.get("favorite_limit"), 1),
+            extract_keyframes=parse_bool(data.get("extract_keyframes")),
+            stock_terms=parse_bool(data.get("stock_terms")),
+            enable_ocr=parse_bool(data.get("enable_ocr")),
             dry_run=bool(data.get("dry_run")),
         )
 
@@ -115,6 +124,9 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["BILI_COOKIE_FILE"] = req.cookies
     if req.output_dir:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
+    env["EXTRACT_KEYFRAMES"] = "true" if req.extract_keyframes else "false"
+    env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
+    env["ENABLE_OCR"] = "true" if req.enable_ocr else "false"
     subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
     if subtitle_strategy == "web":
         env["BILIBILI_PREFER_WEB_SUBTITLE"] = "true"
@@ -126,6 +138,21 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["BILIBILI_PREFER_WEB_SUBTITLE"] = "false"
         env["FORCE_ASR"] = "false"
     return env
+
+
+def inspect_cookie_file(path: pathlib.Path) -> str:
+    bilibili_lines = 0
+    total_lines = 0
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        total_lines += 1
+        if "bilibili.com" in line:
+            bilibili_lines += 1
+    stat = path.stat()
+    modified = dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+    return f"{path} (B站域 cookie {bilibili_lines}/{total_lines}，更新于 {modified})"
 
 
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
@@ -255,6 +282,33 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         )
     )
 
+    qlmanage = "/usr/bin/qlmanage" if pathlib.Path("/usr/bin/qlmanage").exists() else "qlmanage"
+    ok, output = probe([qlmanage, "-h"], env)
+    if not ok:
+        warning_count += 1
+    lines.append(
+        status_line(
+            ok,
+            "Optional command `qlmanage`",
+            "available for macOS previews and OCR page rendering" if ok else first_line(output),
+            "qlmanage helps render previews for scanned PDFs and OCR workflows on macOS.",
+            required=False,
+        )
+    )
+
+    ok, output = probe(["xcrun", "swift", "--version"], env)
+    if not ok:
+        warning_count += 1
+    lines.append(
+        status_line(
+            ok,
+            "Optional command `swift`",
+            first_line(output) if ok else "",
+            "Swift is used for the macOS Vision OCR fallback.",
+            required=False,
+        )
+    )
+
     lines.append("")
     lines.append("Configuration checks")
     api_base = req.api_base or env.get("DEFAULT_LLM_API_BASE", "")
@@ -269,8 +323,9 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         required_ok = required_ok and ok
         lines.append(status_line(ok, label, value if ok and label != "LLM API key" else ("set" if ok else ""), hint))
 
-    if req.cookies:
-        cookie_path = pathlib.Path(req.cookies).expanduser()
+    cookie_value = req.cookies or env.get("BILIBILI_COOKIES_FILE") or env.get("BILI_COOKIE_FILE") or ""
+    if cookie_value:
+        cookie_path = pathlib.Path(cookie_value).expanduser()
         ok = cookie_path.exists()
         if not ok:
             warning_count += 1
@@ -278,7 +333,7 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
             status_line(
                 ok,
                 "Bilibili cookie file",
-                str(cookie_path) if ok else "",
+                inspect_cookie_file(cookie_path) if ok else str(cookie_path),
                 "Export a Netscape cookies.txt file and set its absolute path.",
                 required=False,
             )
@@ -527,6 +582,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Preferred Bilibili transcript source.",
     )
     parser.add_argument("--favorite-limit", type=int, default=1, help="Maximum videos to process in favorite mode. Use 0 for full run.")
+    parser.add_argument("--extract-keyframes", action="store_true", help="Extract key frames for Bilibili or local video notes.")
+    parser.add_argument("--stock-terms", action="store_true", help="Enable A-share stock terminology validation.")
+    parser.add_argument("--enable-ocr", action="store_true", help="Enable OCR for images and scanned PDFs in source conversion.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
     return parser.parse_args(argv)
 
@@ -546,6 +604,9 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         cookies=args.cookies,
         subtitle_strategy=args.subtitle_strategy,
         favorite_limit=args.favorite_limit,
+        extract_keyframes=args.extract_keyframes,
+        stock_terms=args.stock_terms,
+        enable_ocr=args.enable_ocr,
         dry_run=args.dry_run,
     )
 

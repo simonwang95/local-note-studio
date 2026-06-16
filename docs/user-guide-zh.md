@@ -163,6 +163,7 @@ Waiting for your frontend dev server...
 - 可选：`mlx-whisper`
 - 可选：`opencc`
 - 可选：`textutil`，macOS 通常自带；转换旧版 `.doc` 文件时需要
+- 可选：`tesseract` 和 `pdftoppm`，当你希望在没有多模态 Qwen 时做图片 / 扫描 PDF OCR 备用
 - 条件需要：`ASR_LOCAL_MODEL`，当 B站视频没有字幕、需要本地语音转文字时使用
 
 如果使用 conda，可参考：
@@ -179,6 +180,8 @@ conda run -n course-whisper python3 -m pip install pypdf
 ```
 
 装完后重新点击“检查依赖”。
+
+如果你已经在 LM Studio 或其他 OpenAI-compatible 服务里加载了支持视觉输入的 `qwen3.6` 模型，那么图片 OCR 和扫描版 PDF OCR 会优先直接走当前 LLM 接口，不依赖本机 Swift OCR。`tesseract` / `pdftoppm` 只是备用兜底。
 
 ### B站字幕和 ASR 的优先级
 
@@ -272,6 +275,8 @@ ASR_ENGINE="qwen3"
 
 点击“保存配置”后，界面配置会保存到本机 `localStorage`。
 
+“运行环境”区域里的 `API Key` 默认是星号隐藏，可以点击右侧眼睛按钮临时显示；`B站 Cookie 文件` 下方会显示当前 cookie 的状态提示。
+
 ### 第三步：任务执行
 
 选择任务类型，填写输入源，然后先点“预览命令”。
@@ -293,6 +298,14 @@ https://www.bilibili.com/video/BVxxxx/
 ```
 
 输出文件会直接写入“本次输出目录”。如果希望按月份归档，请直接把“本次输出目录”填成类似 `/Users/xxx/Notes/Net/BiliBili/2026-06` 的路径。
+
+如果勾选“关键帧图文笔记”，任务完成后会额外：
+
+- 抽取少量代表性关键帧
+- 保存到当前笔记目录下的 `assets/`
+- 在 Markdown 中插入 `## 关键帧图文笔记`
+
+如果勾选“A股术语校验”，Qwen 在整理和校对时会尽量保留股票名称/代码，并在结果里附带 `## A股术语校验` 小节。
 
 ### B站收藏夹/系列
 
@@ -334,11 +347,29 @@ https://mp.weixin.qq.com/s/...
 /path/to/file.doc
 /path/to/file.docx
 /path/to/file.pdf
+/path/to/file.pptx
+/path/to/file.xlsx
+/path/to/file.csv
+/path/to/file.tsv
+/path/to/file.html
+/path/to/file.png
 ```
 
 旧版 `.doc` 会先通过 macOS 自带 `textutil` 转成临时 `.docx`，再进入 Markdown 抽取流程；如果转换结果层级或表格不理想，建议用 Word/WPS 另存为 `.docx` 后再运行一次。
 
+虽然当前任务名称还是“Word/PDF整理”，但这一项现在已经覆盖：
+
+- Word：`.doc` / `.docx`
+- PDF：普通 PDF、扫描版 PDF（勾选“启用 OCR”时）
+- 表格：`.csv` / `.tsv` / `.xlsx`
+- 演示文稿：`.pptx`
+- 本地网页：`.html` / `.htm`
+- 图片：`.png` / `.jpg` / `.jpeg` / `.webp` / `.heic` / `.bmp` / `.gif` / `.tif` / `.tiff`
+
 运行时会先生成转换草稿，再自动调用 `qwen_organize_notes.py` 做正式整理。整理后的文件会在上方插入 `## Qwen 整理`，末尾保留完整 `## 原文抽取`，也就是“在原文基础上插入整理”，方便回看原文和核对模型摘要。
+
+如果输入的是图片，程序会直接调用当前多模态 Qwen 做 OCR。
+如果输入的是扫描版 PDF，勾选“启用 OCR”后，程序会优先把 PDF 页图交给当前多模态 Qwen 做识别。
 
 输出目录通常为：
 

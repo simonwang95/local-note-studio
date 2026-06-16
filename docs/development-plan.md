@@ -43,9 +43,9 @@ Goal: make Bilibili and local video notes more useful when visual context matter
 
 Candidate work:
 
-- Add an option for Bilibili and local video tasks to extract key frames based on transcript/content structure.
-- Save key frames as local assets next to the generated Markdown.
-- Insert selected frames into the note at relevant transcript sections to create image-text notes.
+- Add an option for Bilibili and local video tasks to extract key frames based on transcript/content structure. (Done for the first pass.)
+- Save key frames as local assets next to the generated Markdown. (Done for the first pass.)
+- Insert selected frames into the note at relevant transcript sections to create image-text notes. (Done for the first pass.)
 - Avoid excessive screenshots by deduplicating visually similar frames and limiting frames per section/video.
 - Record extracted frame paths in `video-manifest.json` for later cleanup or regeneration.
 
@@ -67,7 +67,8 @@ Candidate work:
 - Add task history and recovery: persisted logs, generated file paths, status, retry, and failure diagnostics.
 - Add output actions: open generated Markdown, open output folder, and copy output path.
 - Surface manifest/index status in the UI instead of relying only on logs.
-- Add more source converters: PPT, spreadsheet/CSV, local HTML, images, and OCR for scanned PDFs.
+- Improve OCR ergonomics: page-level progress, better fallback diagnostics, and larger scanned-PDF batch handling.
+- Consider legacy binary office support (`.xls`, `.ppt`) when there is a reliable local conversion path.
 - Enhance web capture for pages that require login, dynamic rendering, or browser state.
 - Observe longer real batches to tune Qwen timeouts, cooldowns, chunk sizes, and output stability.
 - Package the desktop app for daily use, including icon, signing/notarization path, and release build workflow.

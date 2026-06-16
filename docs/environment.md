@@ -37,6 +37,7 @@ The selected environment should provide:
 - Whisper runtime used by the migrated scripts.
 - Python packages used by source conversion, including `pypdf` and `lxml`.
 - Optional `opencc` support for traditional-to-simplified conversion.
+- Optional `tesseract` and `pdftoppm` as OCR fallback tools.
 
 ## Existing Environment Check
 
@@ -64,6 +65,8 @@ SUMMARY_API_URL
 SUMMARY_API_KEY
 SUMMARY_MODEL
 ```
+
+For image OCR and scanned-PDF OCR, the app now prefers the configured multimodal Qwen/OpenAI-compatible model. Local OCR tools are only fallbacks when a vision-capable model is unavailable.
 
 ## Bilibili Cookie
 

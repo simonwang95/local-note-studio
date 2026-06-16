@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from stock_reference import build_stock_reference_prompt, build_stock_validation_section
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -33,6 +35,7 @@ DEFAULTS = {
     "QWEN_ORGANIZE_MAX_RETRIES": "2",
     "QWEN_ORGANIZE_RETRY_DELAY": "3",
     "QWEN_ORGANIZE_COOLDOWN_DELAY": "",
+    "A_SHARE_TERMS_ENABLED": "false",
 }
 
 
@@ -146,10 +149,14 @@ def note_type_for(source_type: str) -> str:
         return "paper-note"
     if source_type == "lmstudio-conversation":
         return "chat-note"
-    if source_type in {"doc", "docx"}:
+    if source_type in {"doc", "docx", "image-ocr"}:
         return "document-note"
-    if source_type in {"webpage", "wechat-article"}:
+    if source_type in {"webpage", "wechat-article", "local-html"}:
         return "article-note"
+    if source_type in {"csv", "tsv", "xlsx"}:
+        return "spreadsheet-note"
+    if source_type == "pptx":
+        return "presentation-note"
     if source_type in {"video", "bilibili"}:
         return "video-note"
     return "organized-note"
@@ -294,6 +301,7 @@ def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: 
             "按当前分块的论文正文或按页抽取文本顺序保留可读中文翻译；"
             "不要翻译转换说明、待整理提示、已有整理草稿等元信息，也不要把翻译压缩成摘要。"
         )
+    stock_requirement = build_stock_reference_prompt(chunk, str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true")
     user = f"""请整理下面的 Markdown 草稿分块。
 
 标题：{title}
@@ -310,6 +318,7 @@ def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: 
 - 如果这是论文材料，提炼摘要、方法、实验、贡献、局限和公式线索。
 - 分块之间可能包含少量重叠上下文；重叠部分仅用于衔接，不要重复沉淀为新信息。
 {pdf_translation_requirement}
+{stock_requirement}
 
 草稿分块：
 
@@ -330,6 +339,7 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
             "请按分块顺序合并各分块的 `## 全文翻译`，对 overlap 重叠内容去重，"
             "但不要把全文翻译改写成摘要。"
         )
+    stock_requirement = build_stock_reference_prompt(joined, str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true")
     user = f"""请综合下面的分块整理，生成一篇正式知识笔记。
 
 标题：{title}
@@ -342,6 +352,7 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
 - 合并重复内容，保留关键数据、公式线索、结论和不确定性。
 - 分块之间可能包含少量重叠上下文；请去重后综合，不要把重叠内容重复写入。
 {pdf_translation_requirement}
+{stock_requirement}
 
 分块整理：
 
@@ -397,14 +408,34 @@ def build_output_path(output_dir: pathlib.Path, title: str, source_type: str) ->
         "docx": "DOCX",
         "webpage": "WEB",
         "wechat-article": "WECHAT",
+        "local-html": "HTML",
+        "csv": "CSV",
+        "tsv": "TSV",
+        "xlsx": "XLSX",
+        "pptx": "PPTX",
+        "image-ocr": "IMAGE",
         "video": "VIDEO",
         "bilibili": "BILI",
+        "local-video": "VIDEO",
     }.get(source_type, "NOTE")
     return output_dir / f"{prefix}-{slugify(title)}.md"
 
 
 def original_source_section(body: str, source_type: str) -> str:
-    if source_type not in {"wechat-article", "webpage", "doc", "docx", "pdf", "lmstudio-conversation"}:
+    if source_type not in {
+        "wechat-article",
+        "webpage",
+        "local-html",
+        "doc",
+        "docx",
+        "pdf",
+        "lmstudio-conversation",
+        "csv",
+        "tsv",
+        "xlsx",
+        "pptx",
+        "image-ocr",
+    }:
         return ""
     original = body.strip()
     if not original:
@@ -474,6 +505,9 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
     original = original_source_section(body, source_type)
     if original:
         output_parts.append(original)
+    stock_validation = build_stock_validation_section("\n\n".join(part for part in [organized_body, body] if part), str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true")
+    if stock_validation:
+        output_parts.append(stock_validation)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n\n".join(output_parts).rstrip() + "\n", encoding="utf-8")
     item = {

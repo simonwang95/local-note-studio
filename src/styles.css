@@ -121,6 +121,16 @@ label {
   font-weight: 600;
 }
 
+.checkbox-field {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  min-height: 42px;
+}
+
+.checkbox-field span {
+  line-height: 1.3;
+}
+
 .input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) repeat(2, auto);
@@ -145,6 +155,12 @@ select {
   padding: 10px 12px;
   background: #fffefa;
   color: #241f1a;
+}
+
+input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #b85b32;
 }
 
 input:focus,

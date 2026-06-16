@@ -23,6 +23,9 @@ type SavedSettings = {
   outputRoot: string;
   subtitleStrategy: SubtitleStrategy;
   favoriteLimit: string;
+  extractKeyframes: boolean;
+  stockTerms: boolean;
+  enableOcr: boolean;
 };
 
 type TauriWindow = Window & {
@@ -49,12 +52,12 @@ const taskLabels: Record<TaskType, string> = {
 };
 
 const taskHints: Record<TaskType, string> = {
-  "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录。",
+  "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
   "web-url": "输入微信公众号文章或一般网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
-  "source-file": "输入本地 .doc、.docx 或 .pdf 文件路径，抽取后会调用 Qwen 整理，并在末尾保留原文。",
+  "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html 或图片文件。支持扫描版 PDF 的 OCR 回退；抽取后会调用 Qwen 整理，并在末尾保留原文。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
-  "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录。",
+  "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记。",
 };
 
 const outputSubdirs: Record<TaskType, string> = {
@@ -102,6 +105,9 @@ const defaults: SavedSettings = {
   outputRoot: "",
   subtitleStrategy: "yt-dlp",
   favoriteLimit: "1",
+  extractKeyframes: false,
+  stockTerms: false,
+  enableOcr: false,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -164,6 +170,7 @@ app.innerHTML = `
           <label>
             B站 Cookie 文件
             <input id="cookies" value="${escapeHtml(savedSettings.cookies)}" placeholder="/path/to/bili_cookies.txt" />
+            <p id="cookieStatus" class="field-note">Cookie 状态：待检查</p>
           </label>
         </div>
       </section>
@@ -230,6 +237,18 @@ app.innerHTML = `
             收藏夹测试数量
             <input id="favoriteLimit" type="number" min="0" step="1" value="${escapeHtml(savedSettings.favoriteLimit)}" placeholder="1" />
           </label>
+          <label id="extractKeyframesField" class="checkbox-field hidden">
+            <span>关键帧图文笔记</span>
+            <input id="extractKeyframes" type="checkbox" ${savedSettings.extractKeyframes ? "checked" : ""} />
+          </label>
+          <label id="stockTermsField" class="checkbox-field">
+            <span>A股术语校验</span>
+            <input id="stockTerms" type="checkbox" ${savedSettings.stockTerms ? "checked" : ""} />
+          </label>
+          <label id="enableOcrField" class="checkbox-field hidden">
+            <span>启用 OCR</span>
+            <input id="enableOcr" type="checkbox" ${savedSettings.enableOcr ? "checked" : ""} />
+          </label>
         </div>
 
         <label>
@@ -278,6 +297,10 @@ document.querySelector<HTMLButtonElement>("#saveSettings")?.addEventListener("cl
   saveSettings();
   setState("配置已保存");
 });
+document.querySelector<HTMLInputElement>("#cookies")?.addEventListener("input", () => {
+  const el = document.querySelector<HTMLParagraphElement>("#cookieStatus");
+  if (el) el.textContent = "Cookie 状态：待检查";
+});
 
 document.querySelector<HTMLButtonElement>("#checkEnv")?.addEventListener("click", () => runEnvironmentCheck());
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
@@ -300,6 +323,10 @@ if (!hasTauriRuntime()) {
 
 function inputValue(id: string): string {
   return document.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`)?.value.trim() ?? "";
+}
+
+function checkboxChecked(id: string): boolean {
+  return Boolean(document.querySelector<HTMLInputElement>(`#${id}`)?.checked);
 }
 
 function setInputValue(id: string, value: string): void {
@@ -337,6 +364,9 @@ function payload(dryRun: boolean) {
     cookies: inputValue("cookies"),
     subtitle_strategy: inputValue("subtitleStrategy"),
     favorite_limit: inputValue("favoriteLimit"),
+    extract_keyframes: checkboxChecked("extractKeyframes"),
+    stock_terms: checkboxChecked("stockTerms"),
+    enable_ocr: checkboxChecked("enableOcr"),
     dry_run: dryRun,
   };
 }
@@ -351,6 +381,7 @@ async function runEnvironmentCheck(): Promise<void> {
   try {
     const request = { ...payload(false), task: "env-check", source: "" };
     const result = await invokeWorker(request);
+    updateCookieStatus(result);
     if (!currentOutput().trim()) setOutput(result);
     setState(result.includes("[MISSING]") ? "依赖缺失" : "依赖检查完成");
   } catch (error) {
@@ -441,6 +472,13 @@ async function chooseSourceFile(): Promise<void> {
     filters = [{ name: "PDF", extensions: ["pdf"] }];
   } else if (task === "local-video") {
     filters = [{ name: "Media", extensions: ["mp4", "mkv", "mov", "webm", "flv", "mp3", "m4a", "wav"] }];
+  } else if (task === "source-file") {
+    filters = [
+      {
+        name: "Supported Sources",
+        extensions: ["doc", "docx", "pdf", "pptx", "xlsx", "csv", "tsv", "html", "htm", "png", "jpg", "jpeg", "webp", "heic", "bmp", "gif", "tif", "tiff"],
+      },
+    ];
   }
   await choosePath("source", { multiple: false, filters });
 }
@@ -515,6 +553,18 @@ function hydrateTaskControls(): void {
   if (favoriteLimitField) {
     favoriteLimitField.classList.toggle("hidden", task !== "bilibili-favorite");
   }
+  const extractKeyframesField = document.querySelector<HTMLElement>("#extractKeyframesField");
+  if (extractKeyframesField) {
+    extractKeyframesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
+  }
+  const stockTermsField = document.querySelector<HTMLElement>("#stockTermsField");
+  if (stockTermsField) {
+    stockTermsField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video", "web-url", "source-file"].includes(task));
+  }
+  const enableOcrField = document.querySelector<HTMLElement>("#enableOcrField");
+  if (enableOcrField) {
+    enableOcrField.classList.toggle("hidden", task !== "source-file");
+  }
 }
 
 function hydrateSubtitleStrategy(task: TaskType): void {
@@ -532,6 +582,9 @@ function hydrateSubtitleStrategy(task: TaskType): void {
 function bindSettingsPersistence(): void {
   for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy", "favoriteLimit"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
+  }
+  for (const id of ["extractKeyframes", "stockTerms", "enableOcr"]) {
+    document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
 }
 
@@ -555,8 +608,26 @@ function saveSettings(): void {
     outputRoot: inputValue("outputRoot"),
     subtitleStrategy: (inputValue("subtitleStrategy") || defaults.subtitleStrategy) as SubtitleStrategy,
     favoriteLimit: inputValue("favoriteLimit") || defaults.favoriteLimit,
+    extractKeyframes: checkboxChecked("extractKeyframes"),
+    stockTerms: checkboxChecked("stockTerms"),
+    enableOcr: checkboxChecked("enableOcr"),
   };
   localStorage.setItem(settingsKey, JSON.stringify(settings));
+}
+
+function updateCookieStatus(result: string): void {
+  const el = document.querySelector<HTMLParagraphElement>("#cookieStatus");
+  if (!el) return;
+  const line = result
+    .split("\n")
+    .find((entry) => entry.includes("Bilibili cookie file"));
+  if (!line) {
+    el.textContent = "Cookie 状态：待检查";
+    return;
+  }
+  const status = line.startsWith("[OK]") ? "可用" : line.startsWith("[WARN]") ? "未配置或需关注" : "异常";
+  const detail = line.includes(" - ") ? line.split(" - ", 2)[1].split(" Hint:", 1)[0].trim() : "";
+  el.textContent = detail ? `Cookie 状态：${status}，${detail}` : `Cookie 状态：${status}`;
 }
 
 function setOutput(text: string): void {
