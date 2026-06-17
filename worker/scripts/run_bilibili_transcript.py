@@ -445,7 +445,7 @@ def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: b
         print("then run summary-only for the generated Markdown")
         return 0
 
-    code, output = stream_command(transcribe_command, project_dir, env, timeout=7200)
+    code, output = stream_command(transcribe_command, project_dir, env, timeout=36000)
     if code != 0:
         return code
 
@@ -460,7 +460,7 @@ def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: b
     for path in paths[-1:]:
         summary_command = python_command(cfg, batch) + ["--summary-only", path]
         print("\nsummary:", " ".join(summary_command))
-        summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=7200)
+        summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=36000)
         if summary_code != 0:
             failures += 1
     postprocess_video_notes(paths[-1:], cfg)
@@ -480,7 +480,7 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
         print("then run summary-only for the generated Markdown")
         return 0
 
-    code, output = stream_command(transcribe_command, project_dir, env, timeout=7200)
+    code, output = stream_command(transcribe_command, project_dir, env, timeout=36000)
     if code != 0:
         return code
 
@@ -493,7 +493,7 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
 
     summary_command = python_command(cfg, batch) + ["--summary-only", paths[-1]]
     print("\nsummary:", " ".join(summary_command))
-    summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=7200)
+    summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=36000)
     postprocess_video_notes(paths[-1:], cfg)
     return summary_code
 
@@ -533,7 +533,7 @@ def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: 
             continue
         print(f"\n[{index}/{len(selected)}] {title} ({bvid})")
         transcribe_command = bash_command(cfg, transcript, f"https://www.bilibili.com/video/{bvid}/")
-        code, output = stream_command(transcribe_command, project_dir, env, timeout=7200)
+        code, output = stream_command(transcribe_command, project_dir, env, timeout=36000)
         if code != 0:
             failures += 1
             continue
@@ -554,7 +554,7 @@ def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: 
             postprocess_video_notes([path], cfg, extras)
             summary_command = python_command(cfg, batch) + ["--summary-only", path]
             print("\nsummary:", " ".join(summary_command))
-            summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=7200)
+            summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=36000)
             if summary_code != 0:
                 failures += 1
             processed_paths.append(path)
@@ -619,7 +619,7 @@ def main() -> int:
     print(" ".join(command))
     if args.dry_run:
         return 0
-    code, output = stream_command(command, project_dir, env, timeout=7200)
+    code, output = stream_command(command, project_dir, env, timeout=36000)
     paths = extract_markdown_paths(output)
     postprocess_video_notes(paths, cfg)
     return code

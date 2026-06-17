@@ -324,7 +324,7 @@ def transcribe_video(bvid, attempt=1, max_retries=1):
 
     result = _safe_subprocess(
         ["bash", TRANSCRIPT_SH, url],
-        cwd=PROJECT_DIR, timeout=7200,
+        cwd=PROJECT_DIR, timeout=36000,
     )
 
     if result.stdout:
@@ -364,7 +364,7 @@ def transcribe_local_dir(local_dir, recursive=False):
 
     result = _stream_subprocess(
         cmd,
-        cwd=PROJECT_DIR, timeout=7200,
+        cwd=PROJECT_DIR, timeout=36000,
     )
 
     return _extract_output_paths(result.stdout), result.returncode
