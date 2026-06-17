@@ -13,6 +13,7 @@ import base64
 import datetime as dt
 import hashlib
 import html as html_lib
+import http.cookiejar
 import json
 import os
 import pathlib
@@ -89,6 +90,8 @@ DEFAULTS = {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
     ),
+    "BILIBILI_COOKIES_FILE": "",
+    "BILI_COOKIE_FILE": "",
 }
 
 
@@ -493,6 +496,157 @@ def fetch_webpage(url: str, cfg: dict[str, str]) -> tuple[str, bytes, str]:
         charset = response.headers.get_content_charset() or "utf-8"
         final_url = response.geturl()
     return body.decode(charset, errors="replace"), body, final_url
+
+
+def is_bilibili_opus_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.netloc.lower().endswith("bilibili.com") and re.search(r"/opus/([0-9]+)", parsed.path) is not None
+
+
+def bilibili_opus_id(url: str) -> str:
+    match = re.search(r"/opus/([0-9]+)", urllib.parse.urlparse(url).path)
+    if not match:
+        raise ValueError(f"not a Bilibili opus URL: {url}")
+    return match.group(1)
+
+
+def bilibili_cookie_path(cfg: dict[str, str]) -> pathlib.Path | None:
+    raw = (cfg.get("BILIBILI_COOKIES_FILE") or cfg.get("BILI_COOKIE_FILE") or "").strip()
+    if not raw:
+        return None
+    path = pathlib.Path(os.path.expanduser(os.path.expandvars(raw)))
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def build_cookie_opener(cookie_path: pathlib.Path | None) -> urllib.request.OpenerDirector:
+    handlers: list[urllib.request.BaseHandler] = []
+    if cookie_path:
+        if not cookie_path.exists():
+            raise FileNotFoundError(f"B站 Cookie 文件不存在: {cookie_path}")
+        jar = http.cookiejar.MozillaCookieJar()
+        jar.load(str(cookie_path), ignore_discard=True, ignore_expires=True)
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
+    return urllib.request.build_opener(*handlers)
+
+
+def fetch_json_with_cookies(url: str, referer: str, cfg: dict[str, str]) -> dict[str, Any]:
+    opener = build_cookie_opener(bilibili_cookie_path(cfg))
+    headers = {
+        "User-Agent": cfg["WEB_USER_AGENT"],
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.bilibili.com",
+        "Referer": referer,
+    }
+    request = urllib.request.Request(url, headers=headers)
+    timeout = int(cfg["WEB_FETCH_TIMEOUT_SECONDS"])
+    with opener.open(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
+def rich_text(nodes: Any) -> str:
+    if not isinstance(nodes, list):
+        return ""
+    return "".join(str(node.get("text") or "") for node in nodes if isinstance(node, dict)).strip()
+
+
+def text_value(value: Any) -> str:
+    if isinstance(value, str):
+        return compact_text(value)
+    if isinstance(value, dict):
+        return compact_text(value.get("text") or rich_text(value.get("rich_text_nodes")) or value.get("summary") or "")
+    if isinstance(value, list):
+        return compact_text("\n".join(text_value(item) for item in value))
+    return ""
+
+
+def append_unique(lines: list[str], value: str) -> None:
+    text = compact_text(value)
+    if not text or text in {"充电可见", "充电专属", "该内容仅充电可见"}:
+        return
+    if text not in lines:
+        lines.append(text)
+
+
+def collect_opus_images(value: Any) -> list[str]:
+    urls: list[str] = []
+    seen = set()
+
+    def add(url: str) -> None:
+        if url.startswith("//"):
+            url = "https:" + url
+        if not urllib.parse.urlparse(url).scheme or url in seen:
+            return
+        seen.add(url)
+        urls.append(url)
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, raw in node.items():
+                if key in {"url", "src", "img_src", "cover"} and isinstance(raw, str):
+                    parsed = urllib.parse.urlparse(raw if not raw.startswith("//") else "https:" + raw)
+                    target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+                    if parsed.netloc and re.search(r"\.(jpg|jpeg|png|webp|gif|avif)(?:$|[?&])", target, re.I):
+                        add(raw)
+                else:
+                    walk(raw)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(value)
+    return urls
+
+
+def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, Any]:
+    if payload.get("code") != 0:
+        raise RuntimeError(f"B站动态接口返回错误: code={payload.get('code')} message={payload.get('message')}")
+    item = ((payload.get("data") or {}).get("item") or {})
+    if not isinstance(item, dict) or not item:
+        raise RuntimeError("B站动态接口没有返回动态内容，可能是 cookie 无权限、内容不存在或接口风控。")
+
+    modules = item.get("modules") or {}
+    author = modules.get("module_author") or {}
+    dynamic = modules.get("module_dynamic") or {}
+    major = dynamic.get("major") or {}
+    opus = major.get("opus") if isinstance(major, dict) else {}
+    opus = opus if isinstance(opus, dict) else {}
+
+    title = text_value(opus.get("title")) or text_value(dynamic.get("topic")) or f"B站动态 {bilibili_opus_id(url)}"
+    lines: list[str] = []
+    append_unique(lines, text_value(dynamic.get("desc")))
+    append_unique(lines, text_value(opus.get("title")))
+    append_unique(lines, text_value(opus.get("summary")))
+    append_unique(lines, text_value(opus.get("content")))
+    append_unique(lines, text_value(opus.get("paragraphs")))
+
+    def collect_text_nodes(node: Any) -> None:
+        if isinstance(node, dict):
+            if "rich_text_nodes" in node:
+                append_unique(lines, rich_text(node.get("rich_text_nodes")))
+            for child in node.values():
+                collect_text_nodes(child)
+        elif isinstance(node, list):
+            for child in node:
+                collect_text_nodes(child)
+
+    collect_text_nodes(dynamic)
+    content = "\n\n".join(lines).strip()
+    if not content:
+        raise RuntimeError("未读取到 B站动态正文。请确认 cookie 对该充电动态有权限，并重新导出 B站 cookie。")
+
+    pub_ts = author.get("pub_ts")
+    published = unix_seconds_to_iso(str(pub_ts)) if str(pub_ts or "").isdigit() else str(author.get("pub_time") or "")
+    return {
+        "item": item,
+        "title": title,
+        "author": str(author.get("name") or author.get("uname") or ""),
+        "author_mid": str(author.get("mid") or ""),
+        "published": published,
+        "content": content,
+        "images": collect_opus_images(dynamic),
+    }
 
 
 def parse_html(raw_html: str) -> Any:
@@ -1064,6 +1218,103 @@ def convert_webpage(
         "title": title,
         "author": metadata["author"],
         "published": metadata["published"],
+        "assets_downloaded": assets_downloaded,
+        "asset_count": len(downloaded_assets),
+        "asset_failed": len(failed_assets),
+        "assets": assets,
+        "error": "",
+    }
+    return out_path, item, False
+
+
+def convert_bilibili_opus(
+    url: str,
+    output_dir: pathlib.Path,
+    model: str,
+    cfg: dict[str, str],
+    manifest: dict[str, Any],
+    overwrite: bool,
+    download_assets: bool,
+) -> tuple[pathlib.Path, dict[str, Any], bool]:
+    opus_id = bilibili_opus_id(url)
+    if bilibili_cookie_path(cfg) is None:
+        raise RuntimeError("B站动态/充电动态需要配置 BILIBILI_COOKIES_FILE 或 BILI_COOKIE_FILE。")
+    api_url = (
+        "https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?"
+        + urllib.parse.urlencode({"id": opus_id, "features": "itemOpusStyle"})
+    )
+    payload = fetch_json_with_cookies(api_url, url, cfg)
+    parsed = parse_bilibili_opus_payload(payload, url)
+    source_hash = sha256_bytes(json.dumps(parsed["item"], ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    title = parsed["title"]
+    out_path = output_dir / f"BILI-OPUS-{slugify(title, opus_id)}.md"
+    if should_skip_url(manifest, url, out_path, source_hash, overwrite, download_assets and bool(parsed["images"])):
+        return out_path, {}, True
+
+    body_lines = [parsed["content"]]
+    for index, image_url in enumerate(parsed["images"], 1):
+        body_lines.extend(["", f"![动态图片 {index}]({image_url})"])
+    extracted = "\n".join(body_lines).strip()
+    extracted, assets = download_markdown_assets(extracted, out_path, url, cfg, download_assets)
+    downloaded_assets = [item for item in assets if item.get("status") == "downloaded"]
+    failed_assets = [item for item in assets if item.get("status") == "failed"]
+    assets_downloaded = bool(download_assets) and not failed_assets
+    asset_dir = ""
+    if downloaded_assets:
+        first_asset = pathlib.Path(str(downloaded_assets[0]["path"]))
+        asset_dir = first_asset.parent.as_posix()
+
+    meta = {
+        "title": title,
+        "type": "source-conversion",
+        "source_type": "bilibili-opus",
+        "source_path": "",
+        "source_url": url,
+        "created": today(),
+        "updated": today(),
+        "status": "draft",
+        "model": model,
+        "tags": ["source/bilibili", "source/bilibili-opus", "status/draft"],
+        "source_hash": source_hash,
+        "assets_downloaded": assets_downloaded,
+        "asset_count": len(downloaded_assets),
+        "asset_failed": len(failed_assets),
+    }
+    markdown = [
+        frontmatter(meta),
+        "",
+        f"# {title}",
+        "",
+        "## 来源信息",
+        "",
+        f"- 动态链接：{url}",
+        f"- 动态 ID：`{opus_id}`",
+        f"- 作者/账号：{parsed['author'] or '未知'}",
+        f"- 作者 MID：`{parsed['author_mid'] or '未知'}`",
+        f"- 发布时间：{parsed['published'] or '未知'}",
+        f"- SHA256：`{source_hash}`",
+        f"- 转换时间：{now_iso()}",
+        "- 转换工具：`Bilibili dynamic API` + `convert_sources_to_md.py`",
+        f"- 图片资产：{'已下载' if assets_downloaded else ('部分失败' if failed_assets else '未下载')}",
+        f"- 资产目录：`{asset_dir or '无'}`",
+        "",
+        "## 原文抽取",
+        "",
+        extracted,
+        "",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(markdown), encoding="utf-8")
+    item = {
+        "source_path": "",
+        "source_url": url,
+        "source_type": "bilibili-opus",
+        "source_hash": source_hash,
+        "source_size": len(extracted.encode("utf-8")),
+        "output_path": rel(out_path),
+        "status": "converted",
+        "converted_at": now_iso(),
+        "model": model,
         "assets_downloaded": assets_downloaded,
         "asset_count": len(downloaded_assets),
         "asset_failed": len(failed_assets),
@@ -2434,7 +2685,10 @@ def main() -> int:
             print(f"failed {rel(source)}: {exc}", file=sys.stderr)
     for url in urls:
         try:
-            out_path, item, did_skip = convert_webpage(url, output_dir, model, cfg, manifest, args.overwrite, download_assets)
+            if is_bilibili_opus_url(url):
+                out_path, item, did_skip = convert_bilibili_opus(url, output_dir, model, cfg, manifest, args.overwrite, download_assets)
+            else:
+                out_path, item, did_skip = convert_webpage(url, output_dir, model, cfg, manifest, args.overwrite, download_assets)
             if did_skip:
                 skipped += 1
                 print(f"skip {url}")
@@ -2444,10 +2698,11 @@ def main() -> int:
             print(f"converted {url} -> {rel(out_path)}")
         except Exception as exc:
             failed += 1
+            source_type = "bilibili-opus" if is_bilibili_opus_url(url) else "webpage"
             error_item = {
                 "source_path": "",
                 "source_url": url,
-                "source_type": "webpage",
+                "source_type": source_type,
                 "source_hash": "",
                 "source_size": 0,
                 "output_path": "",

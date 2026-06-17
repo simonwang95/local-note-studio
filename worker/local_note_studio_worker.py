@@ -496,7 +496,7 @@ def command_for(req: TaskRequest) -> list[str]:
         if req.overwrite_outputs:
             args.append("--overwrite")
         return [*python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"), *args]
-    if req.task == "web-url":
+    if req.task in {"web-url", "bilibili-opus"}:
         command = [
             *python_cmd(req, SCRIPTS_DIR / "convert_sources_to_md.py"),
             "--url",
@@ -684,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
         return 0
-    if req.task in {"web-url", "source-file"}:
+    if req.task in {"web-url", "bilibili-opus", "source-file"}:
         sys.stdout.write(run_convert_and_organize_task(req, env))
         return 0
     command = command_for(req)

@@ -345,7 +345,6 @@ BILI_COOKIE_FILE="/path/to/bili_cookies.txt"
 
 ```text
 https://mp.weixin.qq.com/s/...
-https://www.bilibili.com/opus/1214533678103789602
 ```
 
 输出目录通常为：
@@ -358,7 +357,21 @@ https://www.bilibili.com/opus/1214533678103789602
 
 整理后的文件会在上方插入 `## Qwen 整理`，末尾保留完整 `## 原文抽取`，也就是“在原文基础上插入整理”，方便回看原文和核对模型摘要。
 
-B站动态、充电动态目前按网页任务处理，不走 B站视频转录链路。
+### B站动态/充电动态
+
+输入源填写 B站动态 URL，例如：
+
+```text
+https://www.bilibili.com/opus/1214533678103789602
+```
+
+这个任务会使用“运行环境”里的 `B站 Cookie 文件` 请求 B站动态接口，而不是普通网页抽取。账号确实有权限时，可以读取动态正文和图片；如果 cookie 未配置、已过期，或当前账号无权查看充电内容，任务会报错提示权限问题，而不会只保存“充电可见”。
+
+输出目录通常为：
+
+```text
+/Users/xxx/Notes/Net/BiliBili
+```
 
 ### AI-Chat JSON
 

@@ -6,6 +6,7 @@ import "./styles.css";
 type TaskType =
   | "bilibili-url"
   | "bilibili-favorite"
+  | "bilibili-opus"
   | "web-url"
   | "source-file"
   | "ai-chat"
@@ -49,6 +50,7 @@ let workerLogListenerReady: Promise<void> | null = null;
 const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
   "bilibili-favorite": "B站收藏夹/系列",
+  "bilibili-opus": "B站动态/充电动态",
   "web-url": "微信公众号/网页",
   "source-file": "Word/PDF整理",
   "ai-chat": "AI-Chat JSON",
@@ -59,7 +61,8 @@ const taskLabels: Record<TaskType, string> = {
 const taskHints: Record<TaskType, string> = {
   "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
-  "web-url": "输入微信公众号文章、普通网页 URL，或 B站动态/充电动态 URL。Qwen 整理会插入原文之上，并保留完整原文。",
+  "bilibili-opus": "输入 B站动态或充电动态链接。会使用 B站 Cookie 调接口抓取正文，账号无权限时会明确报错。",
+  "web-url": "输入微信公众号文章或普通网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
   "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html 或图片文件。支持扫描版 PDF 的 OCR 回退；抽取后会调用 Qwen 整理，并在末尾保留原文。",
   "ai-chat": "输入 LM Studio 导出的 .conversation.json 文件，转换为 Markdown 对话笔记。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
@@ -69,6 +72,7 @@ const taskHints: Record<TaskType, string> = {
 const outputSubdirs: Record<TaskType, string> = {
   "bilibili-url": "Net/BiliBili",
   "bilibili-favorite": "Net/BiliBili",
+  "bilibili-opus": "Net/BiliBili",
   "web-url": "Net/WeChat",
   "source-file": "Inbox",
   "ai-chat": "AI/AI-Chat",
@@ -93,6 +97,7 @@ const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy;
     { value: "web", label: "网页播放器字幕优先" },
     { value: "asr", label: "ASR 语音转写优先" },
   ],
+  "bilibili-opus": [{ value: "yt-dlp", label: "不适用" }],
   "local-video": [
     { value: "yt-dlp", label: "同目录 SRT 字幕优先" },
     { value: "asr", label: "ASR 语音转写优先" },
