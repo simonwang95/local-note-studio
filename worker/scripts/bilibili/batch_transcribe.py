@@ -48,6 +48,9 @@ def _load_env_local():
     return config
 
 _env = _load_env_local()
+for _key, _value in os.environ.items():
+    if _value:
+        _env[_key] = _value
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -365,6 +368,20 @@ def transcribe_local_dir(local_dir, recursive=False):
     )
 
     return _extract_output_paths(result.stdout), result.returncode
+
+
+def apply_original_subtitle_preference(filepath):
+    """Apply the keep/remove raw subtitle preference even when LLM work is skipped."""
+    if KEEP_ORIGINAL_SUBTITLES or not os.path.exists(filepath):
+        return False
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    updated = _remove_original_subtitles_section(content)
+    if updated == content:
+        return False
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(updated)
+    return True
 
 
 def _is_retryable_http_status(status_code):
@@ -1082,10 +1099,13 @@ def run_summary_only(target_path=None):
 
 
 def main():
+    global OUTPUT_DIR
+
     import argparse
     parser = argparse.ArgumentParser(description="B站收藏夹批量转录")
     parser.add_argument("--local-dir", default=None, help="转录本地目录中的媒体文件")
     parser.add_argument("--recursive", action="store_true", help="本地目录模式下递归扫描子目录")
+    parser.add_argument("--output-dir", default="", help="Markdown 输出目录，覆盖 env.local 中的 OUTPUT_DIR/BILIBILI_OUTPUT_DIR")
     parser.add_argument(
         "--summary-only",
         nargs="?",
@@ -1094,6 +1114,9 @@ def main():
         help="只为已有 Markdown 补齐 LLM 后处理，可选指定文件或目录（默认 OUTPUT_DIR/local）",
     )
     args = parser.parse_args()
+    if args.output_dir:
+        OUTPUT_DIR = _expand_path(args.output_dir)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ===== 模式：仅补齐 LLM 后处理 =====
     if args.summary_only is not None:
@@ -1128,6 +1151,13 @@ def main():
                 if changed and COOLDOWN_DELAY > 0 and i < len(output_files):
                     print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                     time.sleep(COOLDOWN_DELAY)
+        if output_files and not KEEP_ORIGINAL_SUBTITLES:
+            cleaned = 0
+            for f in output_files:
+                if apply_original_subtitle_preference(f):
+                    cleaned += 1
+            if cleaned:
+                print(f"\n🧹 已按设置移除原始字幕: {cleaned} 个文件")
 
         total_time = time.time() - start_time
         print(f"\n⏱️  总耗时: {int(total_time // 60)}分{int(total_time % 60)}秒")

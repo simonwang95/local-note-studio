@@ -742,13 +742,20 @@ transcribe_local_file() {
     if echo "$video_exts" | grep -qw "$ext"; then
         echo "   🎬 $file_label: 检测到视频格式，提取音频..."
         local audio_out="${work_dir}/audio.wav"
+        local ffmpeg_log="${work_dir}/ffmpeg_extract.log"
         rm -f "$audio_out"
-        ffmpeg -y -i "$file_path" -vn -ar 16000 -ac 1 "$audio_out" 2>/dev/null
+        ffmpeg -nostdin -y -i "$file_path" -vn -ar 16000 -ac 1 "$audio_out" >"$ffmpeg_log" 2>&1
         if [ -f "$audio_out" ] && [ -s "$audio_out" ]; then
             audio_input="$audio_out"
             echo "   ✅ $file_label: 音频已提取"
         else
-            echo "   ⚠️  $file_label: ffmpeg 提取音频失败，尝试直接输入"
+            echo "   ❌ $file_label: ffmpeg 提取音频失败，已停止该文件"
+            if [ -s "$ffmpeg_log" ]; then
+                echo "   ffmpeg 诊断:"
+                tail -5 "$ffmpeg_log" | sed 's/^/      /'
+            fi
+            rm -rf "$work_dir"
+            return 1
         fi
     elif [ "$ext" = "wav" ]; then
         # 检查是否需要重新采样

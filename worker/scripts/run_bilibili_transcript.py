@@ -607,7 +607,7 @@ def main() -> int:
     if args.local_dir:
         if args.output_filename:
             parser.error("--output-filename cannot be used with --local-dir")
-        command.extend(["--local-dir", args.local_dir])
+        command.extend(["--local-dir", args.local_dir, "--output-dir", cfg["BILIBILI_OUTPUT_DIR"]])
         if args.recursive:
             command.append("--recursive")
     elif args.summary_only:
