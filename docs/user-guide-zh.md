@@ -287,6 +287,8 @@ ASR_ENGINE="qwen3"
 
 任务运行时，日志会实时追加到“日志”区域。长任务运行中可以点击“取消任务”；取消会尝试停止当前 Python worker。某些由外部工具启动的子进程可能需要几秒钟才完全退出。
 
+默认不会覆盖同名输出文件。需要重跑并替换已有 Markdown 时，勾选“覆盖同名文件”。
+
 ## 5. 各任务怎么填
 
 ### B站单链接
@@ -304,6 +306,8 @@ https://www.bilibili.com/video/BVxxxx/
 - 抽取少量代表性关键帧
 - 保存到当前笔记目录下的 `assets/`
 - 在 Markdown 中插入 `## 关键帧图文笔记`
+
+当前关键帧保存为 JPEG，截图命令不做额外缩放。本地视频会按源视频分辨率截图；B站视频为了节省下载和处理时间，会临时下载最高约 480p 的视频，因此关键帧通常不超过 480p。
 
 视频笔记会按更通用的结构生成：
 
@@ -341,6 +345,7 @@ BILI_COOKIE_FILE="/path/to/bili_cookies.txt"
 
 ```text
 https://mp.weixin.qq.com/s/...
+https://www.bilibili.com/opus/1214533678103789602
 ```
 
 输出目录通常为：
@@ -352,6 +357,24 @@ https://mp.weixin.qq.com/s/...
 运行时会先调用 `convert_sources_to_md.py` 抽取正文和图片资产，再自动调用 `qwen_organize_notes.py` 对刚生成的 Markdown 做 Qwen 整理。整理结果会写回同一个输出目录，并回写 `indexes/source-manifest.json` 的 `organized_*` 字段。
 
 整理后的文件会在上方插入 `## Qwen 整理`，末尾保留完整 `## 原文抽取`，也就是“在原文基础上插入整理”，方便回看原文和核对模型摘要。
+
+B站动态、充电动态目前按网页任务处理，不走 B站视频转录链路。
+
+### AI-Chat JSON
+
+输入源填写 LM Studio 导出的 `.conversation.json` 文件，例如：
+
+```text
+/path/to/example.conversation.json
+```
+
+输出目录通常为：
+
+```text
+/Users/xxx/Notes/AI/AI-Chat
+```
+
+这一任务会把对话 JSON 转成 Markdown，保留来源信息、模型信息、消息数和完整对话正文。它当前主要做“转写/归档”，不会默认再跑 Qwen 深度整理。
 
 ### Word/PDF整理
 
@@ -424,6 +447,8 @@ https://mp.weixin.qq.com/s/...
 需要 `ffmpeg`、`yt-dlp` 和 ASR 相关依赖可用。
 
 本地视频/音频使用和 B站单链接相同的笔记结构，也支持“关键帧图文笔记”和“保留原始字幕”。如果媒体文件旁边已有同名 `.srt`，可以选择“同目录 SRT 字幕优先”；如果字幕质量差，可以切换为“ASR 语音转写优先”。
+
+目录输入默认只扫描当前目录。需要扫描子目录时，勾选“递归扫描目录”。
 
 ## 6. 常见问题
 

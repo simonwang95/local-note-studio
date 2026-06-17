@@ -946,12 +946,7 @@ def should_skip_url(
 ) -> bool:
     if overwrite or not output.exists():
         return False
-    for item in manifest.get("items", []):
-        if item.get("source_url") == url and item.get("source_hash") == source_hash:
-            if require_assets and not manifest_assets_present(item):
-                return False
-            return True
-    return False
+    return True
 
 
 def manifest_assets_present(item: dict[str, Any]) -> bool:
@@ -2259,12 +2254,7 @@ def should_skip(
 ) -> bool:
     if overwrite or not output.exists():
         return False
-    for item in manifest.get("items", []):
-        if item.get("source_path") == rel(source) and item.get("source_hash") == source_hash:
-            if require_llm_polished and not item.get("llm_polished"):
-                return False
-            return True
-    return False
+    return True
 
 
 def discover_sources(source_dir: pathlib.Path, sample: bool, cfg: dict[str, str]) -> list[pathlib.Path]:

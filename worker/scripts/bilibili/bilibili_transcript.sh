@@ -31,6 +31,7 @@ ENABLE_OPENCC="${ENABLE_OPENCC:-true}"
 FORCE_ASR="${FORCE_ASR:-false}"
 BILIBILI_PREFER_WEB_SUBTITLE="${BILIBILI_PREFER_WEB_SUBTITLE:-false}"
 BILIBILI_WEB_SUBTITLE_LANGS="${BILIBILI_WEB_SUBTITLE_LANGS:-zh-CN,zh-Hans,zh-Hant,zh-TW,ai-zh,en,ai-en,ja,ai-ja,ko,ai-kr}"
+OVERWRITE_OUTPUT="${OVERWRITE_OUTPUT:-false}"
 
 # ===== 解析命令行参数 =====
 LOCAL_DIR=""
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
         --output-dir)
             OUTPUT_DIR="$2"
             shift 2
+            ;;
+        --overwrite)
+            OVERWRITE_OUTPUT=true
+            shift
             ;;
         *)
             if [ -z "$VIDEO_URL" ]; then
@@ -609,6 +614,13 @@ transcribe_bilibili_url() {
     local AUTHOR_SAFE; AUTHOR_SAFE=$(echo "$AUTHOR" | to_safe_name)
     local OUTPUT_FILE="${final_outdir}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.md"
 
+    if [ -f "$OUTPUT_FILE" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
+        echo "⏭️  已存在同名笔记，跳过转录: $OUTPUT_FILE"
+        echo "   如需重写，请勾选“覆盖同名文件”或传入 --overwrite。"
+        echo "$OUTPUT_FILE"
+        return 0
+    fi
+
     write_output_file "$OUTPUT_FILE" "$TITLE" "$url" "$AUTHOR" "$UPLOAD_DATE_FORMATTED" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT_SIMPLIFIED"
 
     echo ""
@@ -650,7 +662,7 @@ transcribe_local_file() {
     # 去重：已有 Markdown 时直接返回，避免重复执行 Whisper/ASR。
     local EXISTING
     EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
-    if [ -n "$EXISTING" ]; then
+    if [ -n "$EXISTING" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
         echo "   ⏭️  $file_label: 已存在转录文件: $(basename "$EXISTING")，跳过 ASR"
         echo "$EXISTING"
         return 0
@@ -934,6 +946,7 @@ if [ -z "$VIDEO_URL" ]; then
     echo "  --local-dir <目录>    批量转录本地目录中的媒体文件"
     echo "  --recursive           本地目录模式下递归扫描子目录"
     echo "  --output-dir <目录>   输出目录（默认: $OUTPUT_DIR）"
+    echo "  --overwrite           覆盖同名 Markdown 输出"
     echo ""
     echo "配置: 编辑项目根目录的 env.local 文件"
     exit 1

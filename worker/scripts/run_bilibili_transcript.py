@@ -40,6 +40,7 @@ DEFAULTS = {
     "EXTRACT_KEYFRAMES": "false",
     "KEYFRAME_MAX_COUNT": "4",
     "KEEP_ORIGINAL_SUBTITLES": "true",
+    "OVERWRITE_OUTPUT": "false",
 }
 
 
@@ -182,6 +183,7 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
         "EXTRACT_KEYFRAMES": cfg["EXTRACT_KEYFRAMES"],
         "KEYFRAME_MAX_COUNT": cfg["KEYFRAME_MAX_COUNT"],
         "KEEP_ORIGINAL_SUBTITLES": cfg["KEEP_ORIGINAL_SUBTITLES"],
+        "OVERWRITE_OUTPUT": cfg["OVERWRITE_OUTPUT"],
     }
     for key, value in mappings.items():
         if value:
@@ -567,11 +569,14 @@ def main() -> int:
     parser.add_argument("--summary-only", action="store_true", help="fill summaries for existing Markdown outputs")
     parser.add_argument("--limit", type=int, default=0, help="in favorite mode, process only the first N new videos")
     parser.add_argument("--no-video-manifest", action="store_true", help="skip writing indexes/video-manifest.json after postprocessing")
+    parser.add_argument("--overwrite", action="store_true", help="overwrite existing Markdown outputs")
     parser.add_argument("--sync-env", action="store_true", help="deprecated after migration; current project env.local is used directly")
     parser.add_argument("--dry-run", action="store_true", help="print the command without running it")
     args = parser.parse_args()
     if args.no_video_manifest:
         cfg["VIDEO_MANIFEST_ENABLED"] = "false"
+    if args.overwrite:
+        cfg["OVERWRITE_OUTPUT"] = "true"
 
     project_dir = ROOT
     script_dir = ROOT / "scripts" / "bilibili"

@@ -63,6 +63,8 @@ class TaskRequest:
     favorite_limit: int = 1
     extract_keyframes: bool = False
     keep_original_subtitles: bool = True
+    recursive_search: bool = False
+    overwrite_outputs: bool = False
     stock_terms: bool = False
     enable_ocr: bool = False
     dry_run: bool = False
@@ -83,6 +85,8 @@ class TaskRequest:
             favorite_limit=parse_int(data.get("favorite_limit"), 1),
             extract_keyframes=parse_bool(data.get("extract_keyframes")),
             keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", True)),
+            recursive_search=parse_bool(data.get("recursive_search")),
+            overwrite_outputs=parse_bool(data.get("overwrite_outputs")),
             stock_terms=parse_bool(data.get("stock_terms")),
             enable_ocr=parse_bool(data.get("enable_ocr")),
             dry_run=bool(data.get("dry_run")),
@@ -135,6 +139,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
     env["EXTRACT_KEYFRAMES"] = "true" if req.extract_keyframes else "false"
     env["KEEP_ORIGINAL_SUBTITLES"] = "true" if req.keep_original_subtitles else "false"
+    env["OVERWRITE_OUTPUT"] = "true" if req.overwrite_outputs else "false"
     env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
     env["ENABLE_OCR"] = "true" if req.enable_ocr else "false"
     subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
@@ -465,11 +470,14 @@ def command_for(req: TaskRequest) -> list[str]:
         raise ValueError("output_dir is required")
 
     if req.task == "bilibili-url":
-        return [
+        command = [
             *python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"),
             "--url",
             req.source,
         ]
+        if req.overwrite_outputs:
+            command.append("--overwrite")
+        return command
     if req.task == "bilibili-favorite":
         command = [
             *python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"),
@@ -477,38 +485,50 @@ def command_for(req: TaskRequest) -> list[str]:
         ]
         if req.favorite_limit > 0:
             command.extend(["--limit", str(req.favorite_limit)])
+        if req.overwrite_outputs:
+            command.append("--overwrite")
         return command
     if req.task == "local-video":
         source_path = pathlib.Path(req.source)
         args = ["--local-dir" if source_path.is_dir() else "--local-file", req.source]
+        if source_path.is_dir() and req.recursive_search:
+            args.append("--recursive")
+        if req.overwrite_outputs:
+            args.append("--overwrite")
         return [*python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"), *args]
     if req.task == "web-url":
-        return [
+        command = [
             *python_cmd(req, SCRIPTS_DIR / "convert_sources_to_md.py"),
             "--url",
             req.source,
             "--output-dir",
             req.output_dir,
-            "--overwrite",
         ]
-    if req.task == "source-file":
-        return [
+        if req.overwrite_outputs:
+            command.append("--overwrite")
+        return command
+    if req.task in {"source-file", "ai-chat"}:
+        command = [
             *python_cmd(req, SCRIPTS_DIR / "convert_sources_to_md.py"),
             "--source",
             req.source,
             "--output-dir",
             req.output_dir,
-            "--overwrite",
         ]
+        if req.overwrite_outputs:
+            command.append("--overwrite")
+        return command
     if req.task == "paper-quickread":
-        return [
+        command = [
             *python_cmd(req, SCRIPTS_DIR / "quick_read_pdf.py"),
             "--source",
             req.source,
             "--output-dir",
             req.output_dir,
-            "--overwrite",
         ]
+        if req.overwrite_outputs:
+            command.append("--overwrite")
+        return command
     raise ValueError(f"unsupported task: {req.task}")
 
 
@@ -528,8 +548,9 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
             "<converted-markdown-path>",
             "--output-dir",
             req.output_dir,
-            "--overwrite",
         ]
+        if req.overwrite_outputs:
+            organize_preview.append("--overwrite")
         return "\n".join(
             [
                 render_command(convert_command),
@@ -551,8 +572,9 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         converted_paths[-1],
         "--output-dir",
         req.output_dir,
-        "--overwrite",
     ]
+    if req.overwrite_outputs:
+        organize_command.append("--overwrite")
     print("")
     print("organize:", render_command(organize_command))
     run_process(organize_command, env)
@@ -622,6 +644,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--favorite-limit", type=int, default=1, help="Maximum videos to process in favorite mode. Use 0 for full run.")
     parser.add_argument("--extract-keyframes", action="store_true", help="Extract key frames for Bilibili or local video notes.")
     parser.add_argument("--no-keep-original-subtitles", action="store_true", help="Do not keep the raw subtitle section in video notes.")
+    parser.add_argument("--recursive-search", action="store_true", help="Recursively scan local video directories.")
+    parser.add_argument("--overwrite-outputs", action="store_true", help="Overwrite existing output files.")
     parser.add_argument("--stock-terms", action="store_true", help="Enable A-share stock terminology validation.")
     parser.add_argument("--enable-ocr", action="store_true", help="Enable OCR for images and scanned PDFs in source conversion.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
@@ -645,6 +669,8 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         favorite_limit=args.favorite_limit,
         extract_keyframes=args.extract_keyframes,
         keep_original_subtitles=not args.no_keep_original_subtitles,
+        recursive_search=args.recursive_search,
+        overwrite_outputs=args.overwrite_outputs,
         stock_terms=args.stock_terms,
         enable_ocr=args.enable_ocr,
         dry_run=args.dry_run,

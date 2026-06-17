@@ -8,6 +8,7 @@ type TaskType =
   | "bilibili-favorite"
   | "web-url"
   | "source-file"
+  | "ai-chat"
   | "paper-quickread"
   | "local-video";
 
@@ -25,6 +26,8 @@ type SavedSettings = {
   favoriteLimit: string;
   extractKeyframes: boolean;
   keepOriginalSubtitles: boolean;
+  recursiveSearch: boolean;
+  overwriteOutputs: boolean;
   stockTerms: boolean;
   enableOcr: boolean;
 };
@@ -48,6 +51,7 @@ const taskLabels: Record<TaskType, string> = {
   "bilibili-favorite": "B站收藏夹/系列",
   "web-url": "微信公众号/网页",
   "source-file": "Word/PDF整理",
+  "ai-chat": "AI-Chat JSON",
   "paper-quickread": "论文速读",
   "local-video": "本地视频/音频",
 };
@@ -55,8 +59,9 @@ const taskLabels: Record<TaskType, string> = {
 const taskHints: Record<TaskType, string> = {
   "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
-  "web-url": "输入微信公众号文章或一般网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
+  "web-url": "输入微信公众号文章、普通网页 URL，或 B站动态/充电动态 URL。Qwen 整理会插入原文之上，并保留完整原文。",
   "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html 或图片文件。支持扫描版 PDF 的 OCR 回退；抽取后会调用 Qwen 整理，并在末尾保留原文。",
+  "ai-chat": "输入 LM Studio 导出的 .conversation.json 文件，转换为 Markdown 对话笔记。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
   "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
 };
@@ -66,6 +71,7 @@ const outputSubdirs: Record<TaskType, string> = {
   "bilibili-favorite": "Net/BiliBili",
   "web-url": "Net/WeChat",
   "source-file": "Inbox",
+  "ai-chat": "AI/AI-Chat",
   "paper-quickread": "AI/_quickread/AI_paper",
   "local-video": "Net/BiliBili",
 };
@@ -93,6 +99,7 @@ const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy;
   ],
   "web-url": [{ value: "yt-dlp", label: "不适用" }],
   "source-file": [{ value: "yt-dlp", label: "不适用" }],
+  "ai-chat": [{ value: "yt-dlp", label: "不适用" }],
   "paper-quickread": [{ value: "yt-dlp", label: "不适用" }],
 };
 
@@ -108,6 +115,8 @@ const defaults: SavedSettings = {
   favoriteLimit: "1",
   extractKeyframes: false,
   keepOriginalSubtitles: true,
+  recursiveSearch: false,
+  overwriteOutputs: false,
   stockTerms: false,
   enableOcr: false,
 };
@@ -247,6 +256,14 @@ app.innerHTML = `
             <span>保留原始字幕</span>
             <input id="keepOriginalSubtitles" type="checkbox" ${savedSettings.keepOriginalSubtitles ? "checked" : ""} />
           </label>
+          <label id="recursiveSearchField" class="checkbox-field hidden">
+            <span>递归扫描目录</span>
+            <input id="recursiveSearch" type="checkbox" ${savedSettings.recursiveSearch ? "checked" : ""} />
+          </label>
+          <label class="checkbox-field">
+            <span>覆盖同名文件</span>
+            <input id="overwriteOutputs" type="checkbox" ${savedSettings.overwriteOutputs ? "checked" : ""} />
+          </label>
           <label id="stockTermsField" class="checkbox-field">
             <span>A股术语校验</span>
             <input id="stockTerms" type="checkbox" ${savedSettings.stockTerms ? "checked" : ""} />
@@ -372,6 +389,8 @@ function payload(dryRun: boolean) {
     favorite_limit: inputValue("favoriteLimit"),
     extract_keyframes: checkboxChecked("extractKeyframes"),
     keep_original_subtitles: checkboxChecked("keepOriginalSubtitles"),
+    recursive_search: checkboxChecked("recursiveSearch"),
+    overwrite_outputs: checkboxChecked("overwriteOutputs"),
     stock_terms: checkboxChecked("stockTerms"),
     enable_ocr: checkboxChecked("enableOcr"),
     dry_run: dryRun,
@@ -483,11 +502,13 @@ async function chooseSourceFile(): Promise<void> {
     filters = [{ name: "PDF", extensions: ["pdf"] }];
   } else if (task === "local-video") {
     filters = [{ name: "Media", extensions: ["mp4", "mkv", "mov", "webm", "flv", "mp3", "m4a", "wav"] }];
+  } else if (task === "ai-chat") {
+    filters = [{ name: "AI Chat JSON", extensions: ["json"] }];
   } else if (task === "source-file") {
     filters = [
       {
         name: "Supported Sources",
-        extensions: ["doc", "docx", "pdf", "pptx", "xlsx", "csv", "tsv", "html", "htm", "png", "jpg", "jpeg", "webp", "heic", "bmp", "gif", "tif", "tiff"],
+        extensions: ["doc", "docx", "pdf", "pptx", "xlsx", "csv", "tsv", "html", "htm", "json", "png", "jpg", "jpeg", "webp", "heic", "bmp", "gif", "tif", "tiff"],
       },
     ];
   }
@@ -572,6 +593,10 @@ function hydrateTaskControls(): void {
   if (keepOriginalSubtitlesField) {
     keepOriginalSubtitlesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
   }
+  const recursiveSearchField = document.querySelector<HTMLElement>("#recursiveSearchField");
+  if (recursiveSearchField) {
+    recursiveSearchField.classList.toggle("hidden", task !== "local-video");
+  }
   const stockTermsField = document.querySelector<HTMLElement>("#stockTermsField");
   if (stockTermsField) {
     stockTermsField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video", "web-url", "source-file"].includes(task));
@@ -598,7 +623,7 @@ function bindSettingsPersistence(): void {
   for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy", "favoriteLimit"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
-  for (const id of ["extractKeyframes", "keepOriginalSubtitles", "stockTerms", "enableOcr"]) {
+  for (const id of ["extractKeyframes", "keepOriginalSubtitles", "recursiveSearch", "overwriteOutputs", "stockTerms", "enableOcr"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
 }
@@ -625,6 +650,8 @@ function saveSettings(): void {
     favoriteLimit: inputValue("favoriteLimit") || defaults.favoriteLimit,
     extractKeyframes: checkboxChecked("extractKeyframes"),
     keepOriginalSubtitles: checkboxChecked("keepOriginalSubtitles"),
+    recursiveSearch: checkboxChecked("recursiveSearch"),
+    overwriteOutputs: checkboxChecked("overwriteOutputs"),
     stockTerms: checkboxChecked("stockTerms"),
     enableOcr: checkboxChecked("enableOcr"),
   };
