@@ -432,12 +432,14 @@ def append_processed(avid: str, cfg: dict[str, str]) -> None:
         handle.write(f"{avid}\n")
 
 
-def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: bool) -> int:
+def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: bool, output_filename: str = "") -> int:
     env = project_env(cfg)
     script_dir = project_dir / "scripts" / "bilibili"
     transcript = script_dir / "bilibili_transcript.sh"
     batch = script_dir / "batch_transcribe.py"
     transcribe_command = bash_command(cfg, transcript, url)
+    if output_filename:
+        transcribe_command.extend(["--output-filename", output_filename])
     print("transcribe:", " ".join(transcribe_command))
     if dry_run:
         print("then run summary-only for the generated Markdown")
@@ -465,12 +467,14 @@ def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: b
     return 1 if failures else 0
 
 
-def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: str, dry_run: bool) -> int:
+def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: str, dry_run: bool, output_filename: str = "") -> int:
     env = project_env(cfg)
     script_dir = project_dir / "scripts" / "bilibili"
     transcript = script_dir / "bilibili_transcript.sh"
     batch = script_dir / "batch_transcribe.py"
     transcribe_command = bash_command(cfg, transcript, "--local-file", local_file)
+    if output_filename:
+        transcribe_command.extend(["--output-filename", output_filename])
     print("transcribe:", " ".join(transcribe_command))
     if dry_run:
         print("then run summary-only for the generated Markdown")
@@ -570,6 +574,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="in favorite mode, process only the first N new videos")
     parser.add_argument("--no-video-manifest", action="store_true", help="skip writing indexes/video-manifest.json after postprocessing")
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing Markdown outputs")
+    parser.add_argument("--output-filename", default="", help="custom Markdown file name for one URL/local file; directory separators are not allowed")
     parser.add_argument("--sync-env", action="store_true", help="deprecated after migration; current project env.local is used directly")
     parser.add_argument("--dry-run", action="store_true", help="print the command without running it")
     args = parser.parse_args()
@@ -591,15 +596,17 @@ def main() -> int:
     if args.url:
         if args.sync_env:
             print("--sync-env is no longer needed after migration; current project env.local is used directly.")
-        return run_url(project_dir, cfg, args.url, args.dry_run)
+        return run_url(project_dir, cfg, args.url, args.dry_run, args.output_filename)
 
     if args.local_file:
         if args.sync_env:
             print("--sync-env is no longer needed after migration; current project env.local is used directly.")
-        return run_local_file(project_dir, cfg, args.local_file, args.dry_run)
+        return run_local_file(project_dir, cfg, args.local_file, args.dry_run, args.output_filename)
 
     command = python_command(cfg, script_dir / "batch_transcribe.py")
     if args.local_dir:
+        if args.output_filename:
+            parser.error("--output-filename cannot be used with --local-dir")
         command.extend(["--local-dir", args.local_dir])
         if args.recursive:
             command.append("--recursive")

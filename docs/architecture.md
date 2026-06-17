@@ -29,6 +29,7 @@ The worker accepts either CLI flags or a JSON request. Normal processing tasks u
   "task": "paper-quickread",
   "source": "/path/to/paper.pdf",
   "output_dir": "/path/to/notes",
+  "output_filename": "optional-custom-name.md",
   "conda_env": "course-whisper",
   "api_base": "http://127.0.0.1:1234/v1",
   "api_key": "lm-studio",
@@ -64,9 +65,14 @@ For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For l
 | `bilibili-favorite` | `worker/scripts/run_bilibili_transcript.py --favorite --limit N` |
 | `local-video` | `worker/scripts/run_bilibili_transcript.py --local-file/--local-dir` |
 | `web-url` | `worker/scripts/convert_sources_to_md.py --url`, then `worker/scripts/qwen_organize_notes.py --source` |
-| `source-file` | `worker/scripts/convert_sources_to_md.py --source` |
+| `bilibili-opus` | `worker/scripts/convert_sources_to_md.py --url`, then `worker/scripts/qwen_organize_notes.py --source` |
+| `source-file` | `worker/scripts/convert_sources_to_md.py --source`, then `worker/scripts/qwen_organize_notes.py --source` |
+| `ai-chat` | `worker/scripts/convert_sources_to_md.py --source`, then `worker/scripts/qwen_organize_notes.py --source` |
 | `paper-quickread` | `worker/scripts/quick_read_pdf.py --source` |
+| `epub-export` | `worker/scripts/export_epub.py --source-dir` |
 | `env-check` | internal worker dependency validation |
+
+`output_filename` is optional and only intended for single-output tasks. It cannot contain path separators. Directory batch video jobs intentionally reject it to prevent multiple sources writing to the same Markdown file.
 
 ## Later Hardening
 

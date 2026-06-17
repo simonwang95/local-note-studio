@@ -4,6 +4,7 @@
 
 Use this for one video URL. By default, the worker prioritizes `yt-dlp`-confirmed subtitles, then ASR. Web-player subtitles can be selected explicitly from the desktop UI.
 The output file is written directly into `--output-dir`.
+For a single video, add `--output-filename "Custom Name.md"` when you want to keep image assets tied to a stable final file name.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -29,6 +30,7 @@ python3 worker/local_note_studio_worker.py \
 ## WeChat Article Or Web Page
 
 This task first converts the page to Markdown, then organizes the just-converted draft with Qwen into the same output directory.
+Add `--output-filename` for a single URL when you want a custom final Markdown file name.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -41,6 +43,7 @@ python3 worker/local_note_studio_worker.py \
 
 Legacy `.doc` files are supported on macOS through `textutil`, then parsed through the existing DOCX converter. If a complex `.doc` loses layout, save it as `.docx` in Word/WPS and run the task again.
 The desktop worker converts the source first, then runs `qwen_organize_notes.py` on the converted Markdown. The organized note keeps the extracted original text at the end.
+For one source file, `--output-filename` controls the final Markdown name. Image assets are stored under `assets/<final-file-stem>/`.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -52,6 +55,7 @@ python3 worker/local_note_studio_worker.py \
 ## Paper Quick Read
 
 Quick read uses up to `QWEN_QUICKREAD_MAX_CHARS` extracted PDF characters by default. The current default is `128000`; set it to `0` in `worker/env.local` if you want no proactive truncation. The generated note keeps a full-translation section when extractable text is available.
+Use `--output-filename` for a custom single-paper Markdown name.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -63,6 +67,7 @@ python3 worker/local_note_studio_worker.py \
 ## Local Video Or Audio
 
 Generated Markdown is written directly into `--output-dir`; the script no longer appends a `local` subdirectory.
+`--output-filename` is supported for a single local media file, but not for directory batch mode.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -70,4 +75,24 @@ python3 worker/local_note_studio_worker.py \
   --source "/path/to/video.mp4" \
   --output-dir "/path/to/notes/Net/BiliBili" \
   --conda-env course-whisper
+```
+
+## Recursive EPUB Export
+
+This task recursively collects Markdown files under one directory and exports them into one EPUB through `pandoc`.
+
+```bash
+python3 worker/local_note_studio_worker.py \
+  --task epub-export \
+  --source "/path/to/notes/folder" \
+  --output-dir "/path/to/notes/Exports/EPUB" \
+  --output-filename "My Notes.epub"
+```
+
+Install `pandoc` first:
+
+```bash
+brew install pandoc
+# or
+conda install -n course-whisper -c conda-forge pandoc
 ```

@@ -11,7 +11,7 @@ The product is local-first. Source files, generated Markdown, indexes, cookies, 
 - First configure the runtime: existing conda environment, Python fallback, OpenAI-compatible LLM API, model, and optional Bilibili cookie file.
 - Then choose a default output root. The app should prefer absolute output paths so generated notes can go directly into an external Obsidian vault or another user-selected notes directory.
 - Then choose a task, provide a URL or file path, run a preview, run the real task, inspect logs, and open or locate outputs later.
-- Supported first-stage tasks: Bilibili single URL, web or WeChat URL, Word/PDF source conversion, paper quick read, and local video/audio. Bilibili favorites/series remain scaffolded but are lower priority.
+- Supported first-stage tasks: Bilibili single URL, Bilibili favorites/series test mode, Bilibili opus/charging opus, web or WeChat URL, source-file conversion, AI-Chat JSON, paper quick read, local video/audio, and recursive Markdown-to-EPUB export.
 - The first version uses a user-managed conda environment, currently `course-whisper`, and an OpenAI-compatible API such as LM Studio.
 - The app must check whether runtime dependencies are complete and provide installation hints when they are not.
 
@@ -46,4 +46,5 @@ The frontend should stay focused on task selection, settings, validation, and lo
 - This directory may start without git history; initialize git before the first committed development checkpoint.
 - Keep migrated scripts close to the old `knowledge-base` behavior until reusable modules can be extracted.
 - Use absolute paths in task payloads when possible.
+- `output_filename` is optional and should only be used for single-output tasks. It is useful when generated image assets should follow a stable final Markdown file name.
 - Avoid broad refactors while the worker contract is still forming.

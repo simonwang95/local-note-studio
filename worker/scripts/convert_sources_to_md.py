@@ -150,6 +150,21 @@ def slugify(text: str, fallback: str = "untitled") -> str:
     return text[:120] or fallback
 
 
+def custom_output_path(output_dir: pathlib.Path, output_filename: str = "") -> pathlib.Path | None:
+    name = output_filename.strip()
+    if not name:
+        return None
+    if pathlib.PurePath(name).name != name or "/" in name or "\\" in name:
+        raise ValueError("--output-filename 只能是文件名，不能包含目录")
+    if not name.lower().endswith(".md"):
+        name += ".md"
+    return output_dir / name
+
+
+def output_path_for(output_dir: pathlib.Path, default_name: str, output_filename: str = "") -> pathlib.Path:
+    return custom_output_path(output_dir, output_filename) or (output_dir / default_name)
+
+
 def yaml_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -1126,6 +1141,7 @@ def convert_webpage(
     manifest: dict[str, Any],
     overwrite: bool,
     download_assets: bool,
+    output_filename: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any], bool]:
     raw_html, body, final_url = fetch_webpage(url, cfg)
     doc = parse_html(raw_html)
@@ -1140,7 +1156,7 @@ def convert_webpage(
     source_hash = sha256_bytes(source_bytes)
     source_size = len(source_bytes)
     prefix = "WECHAT" if source_type == "wechat-article" else "WEB"
-    out_path = output_dir / f"{prefix}-{slugify(title)}.md"
+    out_path = output_path_for(output_dir, f"{prefix}-{slugify(title)}.md", output_filename)
     has_remote_assets = bool(markdown_image_urls(extracted))
     if should_skip_url(manifest, url, out_path, source_hash, overwrite, download_assets and has_remote_assets):
         return out_path, {}, True
@@ -1235,6 +1251,7 @@ def convert_bilibili_opus(
     manifest: dict[str, Any],
     overwrite: bool,
     download_assets: bool,
+    output_filename: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any], bool]:
     opus_id = bilibili_opus_id(url)
     if bilibili_cookie_path(cfg) is None:
@@ -1247,7 +1264,7 @@ def convert_bilibili_opus(
     parsed = parse_bilibili_opus_payload(payload, url)
     source_hash = sha256_bytes(json.dumps(parsed["item"], ensure_ascii=False, sort_keys=True).encode("utf-8"))
     title = parsed["title"]
-    out_path = output_dir / f"BILI-OPUS-{slugify(title, opus_id)}.md"
+    out_path = output_path_for(output_dir, f"BILI-OPUS-{slugify(title, opus_id)}.md", output_filename)
     if should_skip_url(manifest, url, out_path, source_hash, overwrite, download_assets and bool(parsed["images"])):
         return out_path, {}, True
 
@@ -1332,6 +1349,7 @@ def convert_local_html(
     manifest: dict[str, Any],
     overwrite: bool,
     download_assets: bool,
+    output_filename: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any], bool]:
     raw_html = read_text_with_fallback(path)
     source_hash = sha256_file(path)
@@ -1344,7 +1362,7 @@ def convert_local_html(
     if not extracted:
         raise RuntimeError("未能从本地 HTML 中抽取到正文")
     source_bytes = extracted.encode("utf-8")
-    out_path = output_dir / f"HTML-{slugify(title, path.stem)}.md"
+    out_path = output_path_for(output_dir, f"HTML-{slugify(title, path.stem)}.md", output_filename)
     has_assets = "file://" in extracted or bool(markdown_image_urls(extracted))
     if should_skip(manifest, path, out_path, source_hash, overwrite, download_assets and has_assets):
         return out_path, {}, True
@@ -1441,6 +1459,7 @@ def convert_pdf(
     cfg: dict[str, str],
     qwen_polish: bool = False,
     enable_ocr: bool = False,
+    output_filename: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     if PdfReader is None:
         raise RuntimeError("pypdf is not available in the current Python environment")
@@ -1503,8 +1522,7 @@ def convert_pdf(
                 ]
             )
 
-    out_name = f"PDF-{slugify(title, path.stem)}.md"
-    out_path = output_dir / out_name
+    out_path = output_path_for(output_dir, f"PDF-{slugify(title, path.stem)}.md", output_filename)
     meta = {
         "title": title,
         "type": "source-conversion",
@@ -1887,13 +1905,13 @@ def convert_docx(
     source_hash: str | None = None,
     source_size: int | None = None,
     conversion_tool: str = "`zipfile` + `ElementTree`",
+    output_filename: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     source_path = source_path or path
     source_hash = source_hash or sha256_file(source_path)
     source_size = source_size if source_size is not None else source_path.stat().st_size
     prefix = "DOC" if source_type == "doc" else "DOCX"
-    out_name = f"{prefix}-{slugify(source_path.stem)}.md"
-    out_path = output_dir / out_name
+    out_path = output_path_for(output_dir, f"{prefix}-{slugify(source_path.stem)}.md", output_filename)
     assets_dir = output_dir / "assets" / out_path.stem
     body, props, new_images, image_count = docx_body_markdown(path, assets_dir)
     title = props.get("title") or source_path.stem
@@ -1956,7 +1974,7 @@ def convert_docx(
     return out_path, item
 
 
-def convert_doc(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+def convert_doc(path: pathlib.Path, output_dir: pathlib.Path, model: str, output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
     textutil = shutil.which("textutil")
     if not textutil:
         raise RuntimeError("unsupported .doc conversion: macOS textutil command not found")
@@ -1979,6 +1997,7 @@ def convert_doc(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tup
             source_hash=source_hash,
             source_size=source_size,
             conversion_tool="`textutil` -> `zipfile` + `ElementTree`",
+            output_filename=output_filename,
         )
 
 
@@ -2002,12 +2021,12 @@ def convert_csv_like(
     model: str,
     delimiter: str,
     source_type: str,
+    output_filename: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     source_hash = sha256_file(path)
     text = read_text_with_fallback(path)
     rows = [row for row in csv_reader(text, delimiter)]
-    out_name = f"{source_type.upper()}-{slugify(path.stem)}.md"
-    out_path = output_dir / out_name
+    out_path = output_path_for(output_dir, f"{source_type.upper()}-{slugify(path.stem)}.md", output_filename)
     title = path.stem
     meta = {
         "title": title,
@@ -2145,10 +2164,10 @@ def xlsx_rows(path: pathlib.Path) -> list[tuple[str, list[list[str]]]]:
         return output
 
 
-def convert_xlsx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+def convert_xlsx(path: pathlib.Path, output_dir: pathlib.Path, model: str, output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
     source_hash = sha256_file(path)
     sheets = xlsx_rows(path)
-    out_path = output_dir / f"XLSX-{slugify(path.stem)}.md"
+    out_path = output_path_for(output_dir, f"XLSX-{slugify(path.stem)}.md", output_filename)
     title = path.stem
     meta = {
         "title": title,
@@ -2235,10 +2254,10 @@ def pptx_slide_texts(path: pathlib.Path) -> list[tuple[int, str]]:
         return output
 
 
-def convert_pptx(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+def convert_pptx(path: pathlib.Path, output_dir: pathlib.Path, model: str, output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
     source_hash = sha256_file(path)
     slides = pptx_slide_texts(path)
-    out_path = output_dir / f"PPTX-{slugify(path.stem)}.md"
+    out_path = output_path_for(output_dir, f"PPTX-{slugify(path.stem)}.md", output_filename)
     title = path.stem
     meta = {
         "title": title,
@@ -2306,9 +2325,9 @@ def copy_source_image(path: pathlib.Path, out_path: pathlib.Path) -> str:
     return (asset_dir_rel / target.name).as_posix()
 
 
-def convert_image_ocr(path: pathlib.Path, output_dir: pathlib.Path, model: str, cfg: dict[str, str]) -> tuple[pathlib.Path, dict[str, Any]]:
+def convert_image_ocr(path: pathlib.Path, output_dir: pathlib.Path, model: str, cfg: dict[str, str], output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
     source_hash = sha256_file(path)
-    out_path = output_dir / f"IMAGE-{slugify(path.stem)}.md"
+    out_path = output_path_for(output_dir, f"IMAGE-{slugify(path.stem)}.md", output_filename)
     image_md_path = copy_source_image(path, out_path)
     ocr_pages = ocr_document(path, cfg, max_pages=1)
     ocr_text = ocr_pages[0] if ocr_pages else ""
@@ -2422,7 +2441,7 @@ def extract_message(version: dict[str, Any]) -> tuple[str, str, str]:
     return role, sender, clean_text(text)
 
 
-def convert_conversation(path: pathlib.Path, output_dir: pathlib.Path, model: str) -> tuple[pathlib.Path, dict[str, Any]]:
+def convert_conversation(path: pathlib.Path, output_dir: pathlib.Path, model: str, output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     title = str(data.get("name") or path.stem).strip() or path.stem
     source_hash = sha256_file(path)
@@ -2436,8 +2455,7 @@ def convert_conversation(path: pathlib.Path, output_dir: pathlib.Path, model: st
             heading += f" ({sender})"
         rows.append(f"{heading}\n\n{text or '> 空消息或暂未解析到文本。'}")
 
-    out_name = f"CHAT-{slugify(title, path.stem)}.md"
-    out_path = output_dir / out_name
+    out_path = output_path_for(output_dir, f"CHAT-{slugify(title, path.stem)}.md", output_filename)
     last_model = model_label(data.get("lastUsedModel")) or model
     conversation_body = "\n\n".join(rows) if rows else "> 未解析到消息。"
     meta = {
@@ -2536,6 +2554,7 @@ def main() -> int:
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing outputs")
     parser.add_argument("--source", action="append", help="specific source path to convert")
     parser.add_argument("--url", action="append", help="web page URL to convert, including WeChat public-account articles")
+    parser.add_argument("--output-filename", default="", help="custom Markdown file name for one source/URL; directory separators are not allowed")
     asset_group = parser.add_mutually_exclusive_group()
     asset_group.add_argument(
         "--download-assets",
@@ -2569,6 +2588,8 @@ def main() -> int:
         sources = []
     else:
         sources = discover_sources(source_dir, args.sample, cfg)
+    if args.output_filename and len(sources) + len(urls) != 1:
+        parser.error("--output-filename 只能用于单个 source 或 URL")
 
     converted = 0
     skipped = 0
@@ -2582,7 +2603,7 @@ def main() -> int:
             if source.suffix.lower() == ".pdf":
                 probe_reader = PdfReader(str(source)) if PdfReader is not None else None
                 title = pdf_title(probe_reader, source) if probe_reader is not None else source.stem
-                output_path = output_dir / f"PDF-{slugify(title, source.stem)}.md"
+                output_path = output_path_for(output_dir, f"PDF-{slugify(title, source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite, args.qwen_polish_pdf):
                     skipped += 1
                     print(f"skip {rel(source)}")
@@ -2595,71 +2616,72 @@ def main() -> int:
                     cfg,
                     args.qwen_polish_pdf,
                     parse_bool(cfg.get("ENABLE_OCR", "false")),
+                    args.output_filename,
                 )
             elif source.name.endswith(".conversation.json"):
                 title = str(json.loads(source.read_text(encoding="utf-8")).get("name") or source.stem)
-                output_path = output_dir / f"CHAT-{slugify(title, source.stem)}.md"
+                output_path = output_path_for(output_dir, f"CHAT-{slugify(title, source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_conversation(source, output_dir, model)
+                out_path, item = convert_conversation(source, output_dir, model, args.output_filename)
             elif source.suffix.lower() == ".docx":
-                output_path = output_dir / f"DOCX-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"DOCX-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_docx(source, output_dir, model)
+                out_path, item = convert_docx(source, output_dir, model, output_filename=args.output_filename)
             elif source.suffix.lower() == ".doc":
-                output_path = output_dir / f"DOC-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"DOC-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_doc(source, output_dir, model)
+                out_path, item = convert_doc(source, output_dir, model, args.output_filename)
             elif source.suffix.lower() == ".csv":
-                output_path = output_dir / f"CSV-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"CSV-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_csv_like(source, output_dir, model, ",", "csv")
+                out_path, item = convert_csv_like(source, output_dir, model, ",", "csv", args.output_filename)
             elif source.suffix.lower() == ".tsv":
-                output_path = output_dir / f"TSV-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"TSV-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_csv_like(source, output_dir, model, "\t", "tsv")
+                out_path, item = convert_csv_like(source, output_dir, model, "\t", "tsv", args.output_filename)
             elif source.suffix.lower() == ".xlsx":
-                output_path = output_dir / f"XLSX-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"XLSX-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_xlsx(source, output_dir, model)
+                out_path, item = convert_xlsx(source, output_dir, model, args.output_filename)
             elif source.suffix.lower() == ".pptx":
-                output_path = output_dir / f"PPTX-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"PPTX-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_pptx(source, output_dir, model)
+                out_path, item = convert_pptx(source, output_dir, model, args.output_filename)
             elif source.suffix.lower() in {".html", ".htm"}:
-                output_path = output_dir / f"HTML-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"HTML-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item, _ = convert_local_html(source, output_dir, model, cfg, manifest, args.overwrite, download_assets)
+                out_path, item, _ = convert_local_html(source, output_dir, model, cfg, manifest, args.overwrite, download_assets, args.output_filename)
             elif source.suffix.lower() in IMAGE_SOURCE_EXTS:
-                output_path = output_dir / f"IMAGE-{slugify(source.stem)}.md"
+                output_path = output_path_for(output_dir, f"IMAGE-{slugify(source.stem)}.md", args.output_filename)
                 if should_skip(manifest, source, output_path, source_hash, args.overwrite):
                     skipped += 1
                     print(f"skip {rel(source)}")
                     continue
-                out_path, item = convert_image_ocr(source, output_dir, model, cfg)
+                out_path, item = convert_image_ocr(source, output_dir, model, cfg, args.output_filename)
             else:
                 raise ValueError(f"unsupported source type: {source}")
             update_manifest(manifest, item)
@@ -2686,9 +2708,9 @@ def main() -> int:
     for url in urls:
         try:
             if is_bilibili_opus_url(url):
-                out_path, item, did_skip = convert_bilibili_opus(url, output_dir, model, cfg, manifest, args.overwrite, download_assets)
+                out_path, item, did_skip = convert_bilibili_opus(url, output_dir, model, cfg, manifest, args.overwrite, download_assets, args.output_filename)
             else:
-                out_path, item, did_skip = convert_webpage(url, output_dir, model, cfg, manifest, args.overwrite, download_assets)
+                out_path, item, did_skip = convert_webpage(url, output_dir, model, cfg, manifest, args.overwrite, download_assets, args.output_filename)
             if did_skip:
                 skipped += 1
                 print(f"skip {url}")

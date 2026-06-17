@@ -94,6 +94,21 @@ def slugify(text: str, fallback: str = "untitled") -> str:
     return text[:120] or fallback
 
 
+def custom_output_path(output_dir: pathlib.Path, output_filename: str = "") -> pathlib.Path | None:
+    name = output_filename.strip()
+    if not name:
+        return None
+    if pathlib.PurePath(name).name != name or "/" in name or "\\" in name:
+        raise ValueError("--output-filename 只能是文件名，不能包含目录")
+    if not name.lower().endswith(".md"):
+        name += ".md"
+    return output_dir / name
+
+
+def output_path_for(output_dir: pathlib.Path, default_name: str, output_filename: str = "") -> pathlib.Path:
+    return custom_output_path(output_dir, output_filename) or (output_dir / default_name)
+
+
 def yaml_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -384,12 +399,13 @@ def write_quickread(
     *,
     overwrite: bool,
     prompt_only: bool,
+    output_filename: str = "",
 ) -> pathlib.Path:
     source = source.resolve()
     title, page_count, text = extract_pdf(source)
     slug = slugify(title or source.stem)
     prefix = "PROMPT" if prompt_only else "QR"
-    out_path = out_dir / f"{prefix}-{slug}.md"
+    out_path = output_path_for(out_dir, f"{prefix}-{slug}.md", output_filename)
     if out_path.exists() and not overwrite:
         print(f"skip existing: {rel(out_path)}")
         return out_path
@@ -484,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--month", default=month_value(), help="Output month, default: current YYYY-MM.")
     parser.add_argument("--output-dir", default="", help="Override output directory.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing quick-read notes.")
+    parser.add_argument("--output-filename", default="", help="Custom Markdown file name for one PDF; directory separators are not allowed.")
     parser.add_argument(
         "--prompt-only",
         action="store_true",
@@ -494,9 +511,11 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config()
     out_dir = output_dir_for(cfg, args.month, args.output_dir or None)
     sources = resolve_sources(args, cfg)
+    if args.output_filename and len(sources) != 1:
+        parser.error("--output-filename can only be used with one PDF source")
     cooldown = max(0.0, float(cfg.get("QWEN_QUICKREAD_COOLDOWN_DELAY") or 0))
     for index, source in enumerate(sources, start=1):
-        write_quickread(source, out_dir, cfg, overwrite=args.overwrite, prompt_only=args.prompt_only)
+        write_quickread(source, out_dir, cfg, overwrite=args.overwrite, prompt_only=args.prompt_only, output_filename=args.output_filename)
         if cooldown and index < len(sources):
             print(f"cooldown {cooldown:g}s")
             time.sleep(cooldown)

@@ -38,6 +38,7 @@ LOCAL_DIR=""
 LOCAL_FILE=""
 LOCAL_RECURSIVE=false
 VIDEO_URL=""
+OUTPUT_FILENAME=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             OVERWRITE_OUTPUT=true
             shift
             ;;
+        --output-filename)
+            OUTPUT_FILENAME="$2"
+            shift 2
+            ;;
         *)
             if [ -z "$VIDEO_URL" ]; then
                 VIDEO_URL="$1"
@@ -74,6 +79,25 @@ done
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$CACHE_DIR"
 mkdir -p "$MODEL_CACHE_DIR"
+
+custom_markdown_path() {
+    local outdir="$1"
+    local name="${OUTPUT_FILENAME:-}"
+    if [ -z "$name" ]; then
+        return 1
+    fi
+    case "$name" in
+        */*|*\\*)
+            echo "❌ --output-filename 只能是文件名，不能包含目录" >&2
+            return 2
+            ;;
+    esac
+    if [[ "$name" != *.md && "$name" != *.MD ]]; then
+        name="${name}.md"
+    fi
+    echo "${outdir}/${name}"
+    return 0
+}
 
 # ===== 获取 Python 路径（conda 环境优先） =====
 get_python() {
@@ -612,7 +636,12 @@ transcribe_bilibili_url() {
 
     local SAFE_TITLE;  SAFE_TITLE=$(echo "$TITLE" | to_safe_name)
     local AUTHOR_SAFE; AUTHOR_SAFE=$(echo "$AUTHOR" | to_safe_name)
-    local OUTPUT_FILE="${final_outdir}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.md"
+    local OUTPUT_FILE
+    if [ -n "${OUTPUT_FILENAME:-}" ]; then
+        OUTPUT_FILE=$(custom_markdown_path "$final_outdir") || return 1
+    else
+        OUTPUT_FILE="${final_outdir}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.md"
+    fi
 
     if [ -f "$OUTPUT_FILE" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
         echo "⏭️  已存在同名笔记，跳过转录: $OUTPUT_FILE"
@@ -658,10 +687,27 @@ transcribe_local_file() {
     local NOW; NOW=$(date '+%Y-%m-%d')
     local LOCAL_OUT="${OUTPUT_DIR}"
     mkdir -p "$LOCAL_OUT"
+    local CUSTOM_OUTPUT=""
+    if [ -n "${OUTPUT_FILENAME:-}" ]; then
+        if [ "${file_total:-1}" != "1" ]; then
+            echo "❌ --output-filename 只能用于单个本地文件，不能用于目录批量转录"
+            return 1
+        fi
+        if ! CUSTOM_OUTPUT=$(custom_markdown_path "$LOCAL_OUT"); then
+            return 1
+        fi
+    fi
 
     # 去重：已有 Markdown 时直接返回，避免重复执行 Whisper/ASR。
     local EXISTING
-    EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
+    if [ -n "$CUSTOM_OUTPUT" ]; then
+        EXISTING="$CUSTOM_OUTPUT"
+        if [ ! -f "$EXISTING" ]; then
+            EXISTING=""
+        fi
+    else
+        EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
+    fi
     if [ -n "$EXISTING" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
         echo "   ⏭️  $file_label: 已存在转录文件: $(basename "$EXISTING")，跳过 ASR"
         echo "$EXISTING"
@@ -678,7 +724,7 @@ transcribe_local_file() {
         subtitle_text=$(extract_srt_text "$subtitle_file" | to_simplified)
 
         if [ -n "$subtitle_text" ]; then
-            local subtitle_output="${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md"
+            local subtitle_output="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
             echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
             write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "本地SRT字幕" "$subtitle_text"
             echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
@@ -758,7 +804,7 @@ transcribe_local_file() {
     TRANSCRIPT_TEXT=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
 
     # 生成输出文件
-    local OUTPUT_FILE="${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md"
+    local OUTPUT_FILE="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
 
     echo "   📝 $file_label: 写入 Markdown: $(basename "$OUTPUT_FILE")"
     write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
@@ -946,6 +992,7 @@ if [ -z "$VIDEO_URL" ]; then
     echo "  --local-dir <目录>    批量转录本地目录中的媒体文件"
     echo "  --recursive           本地目录模式下递归扫描子目录"
     echo "  --output-dir <目录>   输出目录（默认: $OUTPUT_DIR）"
+    echo "  --output-filename <名> 单个视频/本地文件自定义 Markdown 文件名"
     echo "  --overwrite           覆盖同名 Markdown 输出"
     echo ""
     echo "配置: 编辑项目根目录的 env.local 文件"

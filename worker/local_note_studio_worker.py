@@ -38,6 +38,7 @@ OPTIONAL_PYTHON_PACKAGES = {
 
 OPTIONAL_INFO_COMMANDS = {
     "opencc": "Install opencc if you want traditional-to-simplified conversion.",
+    "pandoc": "Install pandoc if you want recursive Markdown-to-EPUB export.",
 }
 
 OCR_FALLBACK_COMMANDS = {
@@ -53,6 +54,7 @@ class TaskRequest:
     task: str
     source: str = ""
     output_dir: str = ""
+    output_filename: str = ""
     conda_env: str = ""
     python_bin: str = "python3"
     api_base: str = ""
@@ -75,6 +77,7 @@ class TaskRequest:
             task=str(data.get("task") or ""),
             source=str(data.get("source") or ""),
             output_dir=str(data.get("output_dir") or ""),
+            output_filename=str(data.get("output_filename") or ""),
             conda_env=str(data.get("conda_env") or ""),
             python_bin=str(data.get("python_bin") or "python3"),
             api_base=str(data.get("api_base") or ""),
@@ -451,11 +454,13 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
     lines.append("Common setup hints")
     if req.conda_env:
         lines.append(f"- conda install -n {req.conda_env} -c conda-forge ffmpeg")
+        lines.append(f"- conda install -n {req.conda_env} -c conda-forge pandoc")
         lines.append(f"- conda run -n {req.conda_env} python3 -m pip install pypdf lxml requests yt-dlp mlx-whisper")
     else:
         python = req.python_bin or "python3"
         lines.append(f"- {python} -m pip install pypdf lxml requests yt-dlp mlx-whisper")
         lines.append("- brew install ffmpeg")
+        lines.append("- brew install pandoc")
     return "\n".join(lines) + "\n"
 
 
@@ -477,6 +482,8 @@ def command_for(req: TaskRequest) -> list[str]:
         ]
         if req.overwrite_outputs:
             command.append("--overwrite")
+        if req.output_filename:
+            command.extend(["--output-filename", req.output_filename])
         return command
     if req.task == "bilibili-favorite":
         command = [
@@ -491,10 +498,14 @@ def command_for(req: TaskRequest) -> list[str]:
     if req.task == "local-video":
         source_path = pathlib.Path(req.source)
         args = ["--local-dir" if source_path.is_dir() else "--local-file", req.source]
+        if source_path.is_dir() and req.output_filename:
+            raise ValueError("output_filename can only be used with a single local video file")
         if source_path.is_dir() and req.recursive_search:
             args.append("--recursive")
         if req.overwrite_outputs:
             args.append("--overwrite")
+        if req.output_filename and not source_path.is_dir():
+            args.extend(["--output-filename", req.output_filename])
         return [*python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"), *args]
     if req.task in {"web-url", "bilibili-opus"}:
         command = [
@@ -506,6 +517,8 @@ def command_for(req: TaskRequest) -> list[str]:
         ]
         if req.overwrite_outputs:
             command.append("--overwrite")
+        if req.output_filename:
+            command.extend(["--output-filename", req.output_filename])
         return command
     if req.task in {"source-file", "ai-chat"}:
         command = [
@@ -517,6 +530,8 @@ def command_for(req: TaskRequest) -> list[str]:
         ]
         if req.overwrite_outputs:
             command.append("--overwrite")
+        if req.output_filename:
+            command.extend(["--output-filename", req.output_filename])
         return command
     if req.task == "paper-quickread":
         command = [
@@ -528,6 +543,21 @@ def command_for(req: TaskRequest) -> list[str]:
         ]
         if req.overwrite_outputs:
             command.append("--overwrite")
+        if req.output_filename:
+            command.extend(["--output-filename", req.output_filename])
+        return command
+    if req.task == "epub-export":
+        command = [
+            *python_cmd(req, SCRIPTS_DIR / "export_epub.py"),
+            "--source-dir",
+            req.source,
+            "--output-dir",
+            req.output_dir,
+        ]
+        if req.overwrite_outputs:
+            command.append("--overwrite")
+        if req.output_filename:
+            command.extend(["--output-filename", req.output_filename])
         return command
     raise ValueError(f"unsupported task: {req.task}")
 
@@ -551,6 +581,8 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         ]
         if req.overwrite_outputs:
             organize_preview.append("--overwrite")
+        if req.output_filename:
+            organize_preview.extend(["--output-filename", req.output_filename])
         return "\n".join(
             [
                 render_command(convert_command),
@@ -575,6 +607,8 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
     ]
     if req.overwrite_outputs:
         organize_command.append("--overwrite")
+    if req.output_filename:
+        organize_command.extend(["--output-filename", req.output_filename])
     print("")
     print("organize:", render_command(organize_command))
     run_process(organize_command, env)
@@ -629,6 +663,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task", help="Task type.")
     parser.add_argument("--source", default="", help="URL or file path.")
     parser.add_argument("--output-dir", default="", help="Markdown output directory.")
+    parser.add_argument("--output-filename", default="", help="Custom Markdown/EPUB file name for single-output tasks.")
     parser.add_argument("--conda-env", default="", help="Existing conda environment to use.")
     parser.add_argument("--python-bin", default="python3", help="Python command when conda is not used.")
     parser.add_argument("--api-base", default="", help="OpenAI-compatible API base.")
@@ -659,6 +694,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         task=args.task or "",
         source=args.source,
         output_dir=args.output_dir,
+        output_filename=args.output_filename,
         conda_env=args.conda_env,
         python_bin=args.python_bin,
         api_base=args.api_base,
@@ -684,7 +720,7 @@ def main(argv: list[str] | None = None) -> int:
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
         return 0
-    if req.task in {"web-url", "bilibili-opus", "source-file"}:
+    if req.task in {"web-url", "bilibili-opus", "source-file", "ai-chat"}:
         sys.stdout.write(run_convert_and_organize_task(req, env))
         return 0
     command = command_for(req)

@@ -11,7 +11,8 @@ type TaskType =
   | "source-file"
   | "ai-chat"
   | "paper-quickread"
-  | "local-video";
+  | "local-video"
+  | "epub-export";
 
 type SubtitleStrategy = "yt-dlp" | "web" | "asr";
 
@@ -56,6 +57,7 @@ const taskLabels: Record<TaskType, string> = {
   "ai-chat": "AI-Chat JSON",
   "paper-quickread": "论文速读",
   "local-video": "本地视频/音频",
+  "epub-export": "目录导出 EPUB",
 };
 
 const taskHints: Record<TaskType, string> = {
@@ -67,6 +69,7 @@ const taskHints: Record<TaskType, string> = {
   "ai-chat": "输入 LM Studio 导出的 .conversation.json 文件，转换为 Markdown 对话笔记。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
   "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
+  "epub-export": "输入一个 Markdown 笔记目录，递归导出为单个 EPUB。需要本机安装 pandoc，图片资源会按 Markdown 相对路径打包。",
 };
 
 const outputSubdirs: Record<TaskType, string> = {
@@ -78,6 +81,7 @@ const outputSubdirs: Record<TaskType, string> = {
   "ai-chat": "AI/AI-Chat",
   "paper-quickread": "AI/_quickread/AI_paper",
   "local-video": "Net/BiliBili",
+  "epub-export": "Exports/EPUB",
 };
 
 const subtitleStrategyLabels: Record<SubtitleStrategy, string> = {
@@ -106,6 +110,7 @@ const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy;
   "source-file": [{ value: "yt-dlp", label: "不适用" }],
   "ai-chat": [{ value: "yt-dlp", label: "不适用" }],
   "paper-quickread": [{ value: "yt-dlp", label: "不适用" }],
+  "epub-export": [{ value: "yt-dlp", label: "不适用" }],
 };
 
 const defaults: SavedSettings = {
@@ -237,6 +242,10 @@ app.innerHTML = `
               <input id="outputDir" placeholder="/Users/xxx/Notes/Net/BiliBili" />
               <button id="chooseOutputDir" type="button" class="secondary compact-button">选择</button>
             </div>
+          </label>
+          <label id="outputFilenameField" class="hidden">
+            输出文件名（可选）
+            <input id="outputFilename" placeholder="留空使用默认命名；可省略 .md/.epub" />
           </label>
           <label>
             字幕/转录优先级
@@ -384,6 +393,7 @@ function payload(dryRun: boolean) {
     task: currentTask(),
     source: inputValue("source"),
     output_dir: inputValue("outputDir"),
+    output_filename: inputValue("outputFilename"),
     conda_env: inputValue("condaEnv"),
     python_bin: inputValue("pythonBin"),
     api_base: inputValue("apiBase"),
@@ -609,6 +619,13 @@ function hydrateTaskControls(): void {
   const enableOcrField = document.querySelector<HTMLElement>("#enableOcrField");
   if (enableOcrField) {
     enableOcrField.classList.toggle("hidden", task !== "source-file");
+  }
+  const outputFilenameField = document.querySelector<HTMLElement>("#outputFilenameField");
+  if (outputFilenameField) {
+    outputFilenameField.classList.toggle(
+      "hidden",
+      !["bilibili-url", "bilibili-opus", "web-url", "source-file", "ai-chat", "paper-quickread", "local-video", "epub-export"].includes(task),
+    );
   }
 }
 

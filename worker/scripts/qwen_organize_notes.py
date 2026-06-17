@@ -88,6 +88,21 @@ def slugify(text: str, fallback: str = "untitled") -> str:
     return text[:120] or fallback
 
 
+def custom_output_path(output_dir: pathlib.Path, output_filename: str = "") -> pathlib.Path | None:
+    name = output_filename.strip()
+    if not name:
+        return None
+    if pathlib.PurePath(name).name != name or "/" in name or "\\" in name:
+        raise ValueError("--output-filename 只能是文件名，不能包含目录")
+    if not name.lower().endswith(".md"):
+        name += ".md"
+    return output_dir / name
+
+
+def output_path_for(output_dir: pathlib.Path, default_name: str, output_filename: str = "") -> pathlib.Path:
+    return custom_output_path(output_dir, output_filename) or (output_dir / default_name)
+
+
 def yaml_scalar(value: Any) -> str:
     if value is None:
         return ""
@@ -400,7 +415,7 @@ def find_manifest_item(manifest: dict[str, Any], draft_path: pathlib.Path) -> di
     return None
 
 
-def build_output_path(output_dir: pathlib.Path, title: str, source_type: str) -> pathlib.Path:
+def build_output_path(output_dir: pathlib.Path, title: str, source_type: str, output_filename: str = "") -> pathlib.Path:
     prefix = {
         "pdf": "PAPER",
         "lmstudio-conversation": "CHAT",
@@ -418,7 +433,7 @@ def build_output_path(output_dir: pathlib.Path, title: str, source_type: str) ->
         "bilibili": "BILI",
         "local-video": "VIDEO",
     }.get(source_type, "NOTE")
-    return output_dir / f"{prefix}-{slugify(title)}.md"
+    return output_path_for(output_dir, f"{prefix}-{slugify(title)}.md", output_filename)
 
 
 def original_source_section(body: str, source_type: str) -> str:
@@ -459,7 +474,7 @@ def demote_markdown_headings(markdown: str) -> str:
     return re.sub(r"(?m)^(#{2,5})(\s+)", r"#\1\2", markdown.strip())
 
 
-def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[str, str]) -> tuple[pathlib.Path, dict[str, Any]]:
+def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[str, str], output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
     markdown = draft_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(markdown)
     title = title_from(body, meta, draft_path)
@@ -478,7 +493,7 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
         for index, chunk in enumerate(chunks, 1)
     ]
     organized_body = merge_duplicate_h2_sections(normalize_markdown(synthesize_chunks(title, source_ref, chunk_notes, cfg, source_type)))
-    output_path = build_output_path(output_dir, title, source_type)
+    output_path = build_output_path(output_dir, title, source_type, output_filename)
     organized_meta = {
         "title": title,
         "type": note_type_for(source_type),
@@ -538,6 +553,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="maximum number of drafts to organize")
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing organized notes")
     parser.add_argument("--output-dir", default=cfg["ORGANIZED_OUTPUT_DIR"], help="organized note output directory")
+    parser.add_argument("--output-filename", default="", help="custom Markdown file name for one organized note; directory separators are not allowed")
     args = parser.parse_args()
 
     manifest_path = (ROOT / cfg["INDEX_DIR"] / "source-manifest.json").resolve()
@@ -553,6 +569,8 @@ def main() -> int:
 
     if args.limit > 0:
         sources = sources[: args.limit]
+    if args.output_filename and len(sources) != 1:
+        parser.error("--output-filename 只能用于单个整理源")
 
     organized = 0
     skipped = 0
@@ -566,14 +584,14 @@ def main() -> int:
             meta, body = parse_frontmatter(markdown)
             title = title_from(body, meta, draft_path)
             source_type = str(meta.get("source_type") or "markdown")
-            planned_output = build_output_path(output_dir, title, source_type)
+            planned_output = build_output_path(output_dir, title, source_type, args.output_filename)
             manifest_item = find_manifest_item(manifest, draft_path)
             if planned_output.exists() and not args.overwrite:
                 if manifest_item is not None and manifest_item.get("organized_status") == "organized":
                     skipped += 1
                     print(f"skip {rel(draft_path)}")
                     continue
-            out_path, update = organize_file(draft_path, output_dir, cfg)
+            out_path, update = organize_file(draft_path, output_dir, cfg, args.output_filename)
             if manifest_item is not None:
                 manifest_item.update(update)
             else:

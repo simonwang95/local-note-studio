@@ -268,10 +268,13 @@ ASR_ENGINE="qwen3"
 | --- | --- |
 | B站单链接 | `Net/BiliBili` |
 | B站收藏夹/系列 | `Net/BiliBili` |
+| B站动态/充电动态 | `Net/BiliBili` |
 | 微信公众号/网页 | `Net/WeChat` |
 | Word/PDF整理 | `Inbox` |
+| AI-Chat JSON | `AI/AI-Chat` |
 | 论文速读 | `AI/_quickread/AI_paper` |
 | 本地视频/音频 | `Net/BiliBili` |
+| 目录导出 EPUB | `Exports/EPUB` |
 
 点击“保存配置”后，界面配置会保存到本机 `localStorage`。
 
@@ -288,6 +291,10 @@ ASR_ENGINE="qwen3"
 任务运行时，日志会实时追加到“日志”区域。长任务运行中可以点击“取消任务”；取消会尝试停止当前 Python worker。某些由外部工具启动的子进程可能需要几秒钟才完全退出。
 
 默认不会覆盖同名输出文件。需要重跑并替换已有 Markdown 时，勾选“覆盖同名文件”。
+
+“输出文件名（可选）”只建议用于单个文件、单个 URL 或单个目录导出任务。留空时程序保持默认命名；填写时可以省略 `.md` 或 `.epub` 后缀。文件名不能包含目录分隔符，目录批量视频任务不支持自定义同一个输出名，避免多个视频写到同一个文件。
+
+如果任务会生成图片资产，例如 Word 图片、网页图片、B站动态图片、图片 OCR 或关键帧，资产目录会跟随最终 Markdown 文件名生成在当前输出目录的 `assets/<文件名>/` 下。只要同步移动 Markdown 文件和同级 `assets` 目录，相对图片链接仍可解析。
 
 ## 5. 各任务怎么填
 
@@ -387,7 +394,7 @@ https://www.bilibili.com/opus/1214533678103789602
 /Users/xxx/Notes/AI/AI-Chat
 ```
 
-这一任务会把对话 JSON 转成 Markdown，保留来源信息、模型信息、消息数和完整对话正文。它当前主要做“转写/归档”，不会默认再跑 Qwen 深度整理。
+这一任务会先把对话 JSON 转成 Markdown，保留来源信息、模型信息、消息数和完整对话正文，然后自动调用 Qwen 整理。整理后的文件会在上方插入 `## Qwen 整理`，末尾保留完整对话正文，适合把可复用结论沉淀成长期笔记。
 
 ### Word/PDF整理
 
@@ -442,6 +449,36 @@ https://www.bilibili.com/opus/1214533678103789602
 ```
 
 论文速读默认最多向模型提供约 128k 字符的 PDF 抽取文本，适配 128k 上下文模型。需要完整不截断时，可以在 `worker/env.local` 中设置 `QWEN_QUICKREAD_MAX_CHARS="0"`。速读会要求模型在文件末尾输出 `## 全文翻译`；如果首次速读结果缺少这个章节，程序会自动发起一次“全文翻译”补跑并追加到文件末尾。
+
+### 目录导出 EPUB
+
+输入源填写一个 Markdown 笔记目录：
+
+```text
+/Users/xxx/Notes/SomeFolder
+```
+
+输出目录通常为：
+
+```text
+/Users/xxx/Notes/Exports/EPUB
+```
+
+这个任务会递归收集输入目录下的 `.md` 文件，按路径排序后调用 `pandoc` 合并导出为一个 EPUB。它会跳过 `.git`、`.obsidian`、`indexes`、`cache` 等内部目录，并尝试通过 Markdown 相对路径打包图片资源。
+
+导出前需要安装 `pandoc`：
+
+```bash
+brew install pandoc
+```
+
+或安装到当前 conda 环境：
+
+```bash
+conda install -n course-whisper -c conda-forge pandoc
+```
+
+如果想指定 EPUB 文件名，可以填写“输出文件名（可选）”，例如 `青枫课程笔记.epub`。
 
 ### 本地视频/音频
 
