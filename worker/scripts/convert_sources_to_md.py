@@ -543,8 +543,50 @@ def build_cookie_opener(cookie_path: pathlib.Path | None) -> urllib.request.Open
             raise FileNotFoundError(f"B站 Cookie 文件不存在: {cookie_path}")
         jar = http.cookiejar.MozillaCookieJar()
         jar.load(str(cookie_path), ignore_discard=True, ignore_expires=True)
+        mirror_bilibili_auth_cookies(jar)
         handlers.append(urllib.request.HTTPCookieProcessor(jar))
     return urllib.request.build_opener(*handlers)
+
+
+def mirror_bilibili_auth_cookies(jar: http.cookiejar.CookieJar) -> None:
+    """Some exports store Bilibili auth cookies under .bilibili.cn.
+
+    The web dynamic API lives on api.bilibili.com, so a strict CookieJar will not
+    send .bilibili.cn cookies there. Mirroring these auth cookies in memory keeps
+    yt-dlp/Chrome exports usable without rewriting the user's cookies.txt.
+    """
+    auth_names = {"SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid"}
+    existing = {(cookie.name, cookie.domain) for cookie in jar}
+    clones = []
+    for cookie in jar:
+        if cookie.name not in auth_names or not cookie.domain.endswith("bilibili.cn"):
+            continue
+        target_domain = ".bilibili.com"
+        if (cookie.name, target_domain) in existing:
+            continue
+        clones.append(
+            http.cookiejar.Cookie(
+                version=cookie.version,
+                name=cookie.name,
+                value=cookie.value,
+                port=cookie.port,
+                port_specified=cookie.port_specified,
+                domain=target_domain,
+                domain_specified=True,
+                domain_initial_dot=True,
+                path=cookie.path or "/",
+                path_specified=cookie.path_specified,
+                secure=cookie.secure,
+                expires=cookie.expires,
+                discard=cookie.discard,
+                comment=cookie.comment,
+                comment_url=cookie.comment_url,
+                rest=dict(cookie._rest),
+                rfc2109=cookie.rfc2109,
+            )
+        )
+    for cookie in clones:
+        jar.set_cookie(cookie)
 
 
 def fetch_json_with_cookies(url: str, referer: str, cfg: dict[str, str]) -> dict[str, Any]:
@@ -559,6 +601,27 @@ def fetch_json_with_cookies(url: str, referer: str, cfg: dict[str, str]) -> dict
     timeout = int(cfg["WEB_FETCH_TIMEOUT_SECONDS"])
     with opener.open(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
+def bilibili_nav_status(cfg: dict[str, str]) -> dict[str, Any]:
+    return fetch_json_with_cookies(
+        "https://api.bilibili.com/x/web-interface/nav",
+        "https://www.bilibili.com/",
+        cfg,
+    )
+
+
+def ensure_bilibili_cookie_login(cfg: dict[str, str]) -> None:
+    try:
+        payload = bilibili_nav_status(cfg)
+    except Exception as exc:
+        raise RuntimeError(f"B站 Cookie 登录态检查失败: {exc}") from exc
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if payload.get("code") != 0 or not data.get("isLogin"):
+        raise RuntimeError(
+            "B站 Cookie 未登录或已失效，无法读取充电动态正文。"
+            "请在有权限的浏览器账号中重新导出 cookies.txt，并确认环境检查里 B站 Cookie 显示为已登录。"
+        )
 
 
 def rich_text(nodes: Any) -> str:
@@ -1282,6 +1345,7 @@ def convert_bilibili_opus(
     opus_id = bilibili_opus_id(url)
     if bilibili_cookie_path(cfg) is None:
         raise RuntimeError("B站动态/充电动态需要配置 BILIBILI_COOKIES_FILE 或 BILI_COOKIE_FILE。")
+    ensure_bilibili_cookie_login(cfg)
     api_url = (
         "https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?"
         + urllib.parse.urlencode({"id": opus_id, "features": "itemOpusStyle"})

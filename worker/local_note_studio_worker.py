@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import http.cookiejar
 import json
 import os
 import pathlib
@@ -12,6 +13,8 @@ import re
 import shlex
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -171,6 +174,74 @@ def inspect_cookie_file(path: pathlib.Path) -> str:
     stat = path.stat()
     modified = dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
     return f"{path} (B站域 cookie {bilibili_lines}/{total_lines}，更新于 {modified})"
+
+
+def resolve_local_path(raw: str, base: pathlib.Path = ROOT) -> pathlib.Path:
+    path = pathlib.Path(os.path.expanduser(os.path.expandvars(raw)))
+    if path.is_absolute():
+        return path
+    candidates = [base / path, WORKER_DIR / path]
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+
+
+def mirror_bilibili_auth_cookies(jar: http.cookiejar.CookieJar) -> None:
+    auth_names = {"SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid"}
+    existing = {(cookie.name, cookie.domain) for cookie in jar}
+    clones = []
+    for cookie in jar:
+        if cookie.name not in auth_names or not cookie.domain.endswith("bilibili.cn"):
+            continue
+        target_domain = ".bilibili.com"
+        if (cookie.name, target_domain) in existing:
+            continue
+        clones.append(
+            http.cookiejar.Cookie(
+                version=cookie.version,
+                name=cookie.name,
+                value=cookie.value,
+                port=cookie.port,
+                port_specified=cookie.port_specified,
+                domain=target_domain,
+                domain_specified=True,
+                domain_initial_dot=True,
+                path=cookie.path or "/",
+                path_specified=cookie.path_specified,
+                secure=cookie.secure,
+                expires=cookie.expires,
+                discard=cookie.discard,
+                comment=cookie.comment,
+                comment_url=cookie.comment_url,
+                rest=dict(cookie._rest),
+                rfc2109=cookie.rfc2109,
+            )
+        )
+    for cookie in clones:
+        jar.set_cookie(cookie)
+
+
+def bilibili_cookie_login_detail(path: pathlib.Path) -> tuple[bool, str]:
+    jar = http.cookiejar.MozillaCookieJar()
+    jar.load(str(path), ignore_discard=True, ignore_expires=True)
+    mirror_bilibili_auth_cookies(jar)
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    request = urllib.request.Request(
+        "https://api.bilibili.com/x/web-interface/nav",
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.bilibili.com/",
+        },
+    )
+    try:
+        with opener.open(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return False, f"登录态检查失败: {first_line(str(exc))}"
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if payload.get("code") == 0 and data.get("isLogin"):
+        mid = data.get("mid") or "unknown"
+        return True, f"已登录 mid={mid}"
+    return False, f"未登录或已失效 (code={payload.get('code')})"
 
 
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
@@ -371,16 +442,23 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
 
     cookie_value = req.cookies or env.get("BILIBILI_COOKIES_FILE") or env.get("BILI_COOKIE_FILE") or ""
     if cookie_value:
-        cookie_path = pathlib.Path(cookie_value).expanduser()
+        cookie_path = resolve_local_path(cookie_value)
         ok = cookie_path.exists()
         if not ok:
             warning_count += 1
+            detail = str(cookie_path)
+        else:
+            login_ok, login_detail = bilibili_cookie_login_detail(cookie_path)
+            ok = login_ok
+            if not ok:
+                warning_count += 1
+            detail = f"{inspect_cookie_file(cookie_path)}；{login_detail}"
         lines.append(
             status_line(
                 ok,
                 "Bilibili cookie file",
-                inspect_cookie_file(cookie_path) if ok else str(cookie_path),
-                "Export a Netscape cookies.txt file and set its absolute path.",
+                detail,
+                "Export a fresh Netscape cookies.txt file from the browser account that has access.",
                 required=False,
             )
         )
