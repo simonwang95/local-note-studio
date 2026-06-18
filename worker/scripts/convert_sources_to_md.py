@@ -531,7 +531,8 @@ def bilibili_cookie_path(cfg: dict[str, str]) -> pathlib.Path | None:
         return None
     path = pathlib.Path(os.path.expanduser(os.path.expandvars(raw)))
     if not path.is_absolute():
-        path = ROOT / path
+        candidates = [ROOT.parent / path, ROOT / path]
+        path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     return path
 
 
@@ -584,6 +585,23 @@ def append_unique(lines: list[str], value: str) -> None:
         lines.append(text)
 
 
+def blocked_opus_message(major: dict[str, Any], url: str) -> str:
+    blocked = major.get("blocked") if isinstance(major, dict) else {}
+    blocked = blocked if isinstance(blocked, dict) else {}
+    hint = text_value(blocked.get("hint_message"))
+    button = blocked.get("button") if isinstance(blocked.get("button"), dict) else {}
+    button_text = text_value(button.get("text"))
+    jump_url = str(button.get("jump_url") or "").strip()
+    detail = "；".join(part for part in [hint, button_text] if part)
+    if detail:
+        detail = f"：{detail}"
+    jump = f" 解锁入口：{jump_url}" if jump_url else ""
+    return (
+        f"B站接口返回权限占位，当前 cookie 无法读取该动态正文{detail}。"
+        f"{jump} 请确认导出 cookie 的浏览器账号已加入对应充电档位，并重新导出 cookie 后再试。动态链接：{url}"
+    )
+
+
 def collect_opus_images(value: Any) -> list[str]:
     urls: list[str] = []
     seen = set()
@@ -625,6 +643,8 @@ def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, 
     author = modules.get("module_author") or {}
     dynamic = modules.get("module_dynamic") or {}
     major = dynamic.get("major") or {}
+    if isinstance(major, dict) and major.get("type") == "MAJOR_TYPE_BLOCKED":
+        raise RuntimeError(blocked_opus_message(major, url))
     opus = major.get("opus") if isinstance(major, dict) else {}
     opus = opus if isinstance(opus, dict) else {}
 
@@ -646,10 +666,16 @@ def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, 
             for child in node:
                 collect_text_nodes(child)
 
-    collect_text_nodes(dynamic)
+    collect_text_nodes(item)
     content = "\n\n".join(lines).strip()
     if not content:
-        raise RuntimeError("未读取到 B站动态正文。请确认 cookie 对该充电动态有权限，并重新导出 B站 cookie。")
+        module_keys = ", ".join(sorted(str(key) for key in modules.keys())) or "无"
+        major_type = str(major.get("type") or "unknown") if isinstance(major, dict) else "unknown"
+        raise RuntimeError(
+            "未读取到 B站动态正文。"
+            f"接口模块：{module_keys}；动态类型：{major_type}。"
+            "请确认 cookie 对该动态有权限；如果是充电动态，请确认账号已加入对应档位并重新导出 B站 cookie。"
+        )
 
     pub_ts = author.get("pub_ts")
     published = unix_seconds_to_iso(str(pub_ts)) if str(pub_ts or "").isdigit() else str(author.get("pub_time") or "")
