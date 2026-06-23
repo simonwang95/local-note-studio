@@ -52,17 +52,30 @@ Candidate work:
 - Avoid excessive screenshots by deduplicating visually similar frames and limiting frames per section/video.
 - Record extracted frame paths in `video-manifest.json` for later cleanup or regeneration.
 
-## Stage 5: Managed Environment
+## Stage 5: App-Managed Runtime (Required Before Packaging)
 
-Goal: optionally bootstrap a known-good runtime while preserving the local-first model.
+Goal: make the main workflows usable on a clean Mac without requiring conda or Homebrew, while preserving existing conda selection for advanced users.
 
 Candidate work:
 
-- Create app-managed Python environment.
-- Install pinned Python packages.
-- Verify ffmpeg and yt-dlp.
-- Guide the user to install or select ASR model files.
-- Keep advanced users able to use their own conda environment.
+- Install a relocatable Python runtime and pinned worker dependencies under Application Support rather than inside the signed `.app` bundle.
+- Install and verify managed `ffmpeg` / `ffprobe`; make `yt-dlp` independently updateable; install `pandoc` on demand for EPUB export.
+- Manage ASR engines and optional model downloads/selections in a separate model directory.
+- Keep LLM and multimodal OCR behind the user-configured OpenAI-compatible API.
+- Add runtime versioning, install progress, integrity checks, upgrades, repair, removal, disk usage, and rollback behavior.
+- Keep advanced users able to select their own conda environment.
+- Validate the main task matrix on a clean Mac without conda or Homebrew.
+
+## Stage 6: Signed Daily-Use Package
+
+Goal: package and distribute the app only after the managed runtime lifecycle works reliably.
+
+Candidate work:
+
+- Create release builds with final icons, version metadata, and upgrade notes.
+- Sign and notarize the `.app` / installer.
+- Handle first-launch permissions and Application Support data migration.
+- Verify installation, runtime initialization, task execution, upgrade, repair, and uninstall on a clean macOS account.
 
 ## Open Todo Backlog
 

@@ -14,13 +14,13 @@ The product is local-first. Source files, generated Markdown, indexes, cookies, 
 - Then choose a default output root. The app should prefer absolute output paths so generated notes can go directly into an external Obsidian vault or another user-selected notes directory.
 - Then choose a task, provide a URL or file path, run a preview, run the real task, inspect logs, and open or locate outputs later.
 - Supported first-stage tasks: Bilibili single URL, Bilibili favorites/series test mode, Bilibili opus/charging opus, one-UP opus batch processing, web or WeChat URL, source-file conversion, AI-Chat JSON, paper quick read, local video/audio, and recursive Markdown-to-EPUB export.
-- The first version uses a user-managed conda environment, currently `course-whisper`, and an OpenAI-compatible API such as LM Studio.
+- Current development uses a user-managed conda environment, currently `course-whisper`. The daily-use package should instead manage Python and non-LLM tools under Application Support while retaining conda as an advanced backend.
 - The app must check whether runtime dependencies are complete and provide installation hints when they are not.
 
 ## Non-Goals For The First Release
 
-- No bundled local LLM runtime.
-- No bundled Python, ffmpeg, yt-dlp, Whisper, or model files.
+- No bundled local LLM runtime; LLM and multimodal OCR remain OpenAI-compatible API configuration.
+- Do not place mutable runtimes or large ASR model files directly inside the signed `.app`; manage them as versioned Application Support resources.
 - No cloud sync or account system.
 - No full task database until the task contract stabilizes.
 - No macOS signing/notarization work before the local workflow is useful.

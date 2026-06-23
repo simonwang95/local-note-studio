@@ -9,8 +9,8 @@ The first version should make existing command-line workflows easier and safer t
 ## Confirmed First Flow
 
 1. Configure runtime settings:
-   - conda environment, default `course-whisper`
-   - Python command fallback, default `python3`
+   - current development mode: conda environment, default `course-whisper`, or Python fallback
+   - distribution target: app-managed runtime, with existing conda retained as an advanced mode
    - OpenAI-compatible LLM API base
    - API key
    - model name, default `qwen3.6-35b-a3b-nvfp4`
@@ -73,3 +73,5 @@ Suggested task defaults under an output root:
 The worker should receive absolute output directories whenever possible.
 
 Current priorities and acceptance criteria are tracked only in [`docs/todo.md`](todo.md).
+
+The signed daily-use package is gated on the app-managed runtime. Python, worker packages and non-LLM tools should be versioned under Application Support; LLM/multimodal OCR remains API-configured, and optional ASR model assets are managed separately.

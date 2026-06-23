@@ -6,7 +6,7 @@
 - Frontend: Vite + TypeScript.
 - Worker: Python scripts migrated from `knowledge-base`.
 - LLM: OpenAI-compatible API, including LM Studio, Ollama-compatible proxies, or remote providers.
-- ASR: user-managed conda environment in MVP.
+- ASR today: user-managed conda environment; distribution target: app-managed runtime with optional managed model assets.
 
 ## Process Model
 
@@ -19,6 +19,25 @@ Tauri UI
 ```
 
 The desktop app should not embed business logic for transcription, conversion, or prompting. It sends a structured task request to the worker and streams or displays logs.
+
+## Distribution Runtime Boundary
+
+The daily-use package should use a hybrid runtime instead of putting every dependency inside the signed `.app`:
+
+```text
+Local Note Studio.app
+  -> Tauri UI, Rust bridge, worker sources, runtime manager
+  -> ~/Library/Application Support/Local Note Studio/
+       runtime/<version>/   relocatable Python, pinned packages, ffmpeg/ffprobe, yt-dlp
+       tools/               optional tools such as pandoc
+       models/              optional app-managed ASR models
+       state/               runtime metadata, checksums, logs, rollback state
+  -> user-configured OpenAI-compatible LLM/OCR API
+```
+
+Keeping the managed runtime outside the `.app` allows dependency repair and yt-dlp updates without replacing the signed application. Runtime downloads must use pinned versions and checksums. The app must support install, verify, upgrade, rollback/repair, and removal. Existing conda selection remains an advanced execution backend.
+
+LLM inference and multimodal OCR remain external API configuration. ASR code can live in the managed Python environment, while large model weights are downloaded or selected on demand rather than bundled into the installer.
 
 ## Worker Contract
 
@@ -93,6 +112,6 @@ Cookie refresh uses two internal tasks: `refresh-bilibili-cookies` calls the ded
 - Add retry and partial-recovery controls; cancellation and streaming logs are already implemented.
 - Add output-integrity checks and surface manifest/index state.
 - Optionally add Bilibili QR login while keeping Chrome Profile refresh available.
-- Add app-managed Python environment bootstrap.
+- Complete the app-managed runtime lifecycle before release packaging, signing, and notarization.
 
 See [`docs/todo.md`](todo.md) for the prioritized backlog and acceptance criteria.

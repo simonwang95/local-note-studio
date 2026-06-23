@@ -1,8 +1,8 @@
 # Environment Setup
 
-## MVP Principle
+## Current Development Environment
 
-The first version uses a user-managed conda environment. This keeps the app small and avoids packaging native ASR dependencies before the task flow settles.
+Current development builds use a user-managed conda environment. This remains the supported advanced mode while the app-managed runtime is implemented.
 
 The current known-good environment is:
 
@@ -90,11 +90,43 @@ python3 worker/scripts/export_bilibili_cookies.py \
 
 QR login remains an optional later enhancement; Chrome Profile refresh is the current supported workflow.
 
-## Future App-Managed Environment
+## Planned App-Managed Runtime
 
-Later versions can add an "Initialize Environment" button that:
+The managed runtime is a prerequisite for the daily-use signed package. It should make the main workflows usable without requiring the user to install conda or Homebrew.
 
-1. Creates an app-managed Python environment.
-2. Installs pinned worker dependencies.
-3. Downloads or verifies ffmpeg/yt-dlp.
-4. Lets the user choose Whisper model storage.
+Target layout:
+
+```text
+~/Library/Application Support/Local Note Studio/
+├── runtime/<version>/   # relocatable Python, pinned packages, ffmpeg/ffprobe, yt-dlp
+├── tools/               # optional tools such as pandoc
+├── models/              # downloaded or user-selected ASR models
+└── state/               # versions, checksums, install logs, rollback metadata
+```
+
+Runtime policy:
+
+1. Keep the signed `.app` small; it contains the UI, Rust bridge, worker sources, and runtime manager.
+2. Install a relocatable Python runtime and locked dependencies under Application Support without touching system Python.
+3. Manage `ffmpeg` / `ffprobe`; allow `yt-dlp` to update independently because B站 extraction changes frequently.
+4. Install `pandoc` only when EPUB export is first requested.
+5. Provide the ASR engine in the runtime, but download or select large model weights separately and show disk usage.
+6. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
+7. Support install progress, integrity checks, upgrade, rollback/repair, and removal.
+8. Preserve existing conda selection as an advanced backend.
+
+Planned ownership matrix:
+
+| Component | Distribution plan |
+| --- | --- |
+| Python and worker packages | App-managed, versioned runtime |
+| `ffmpeg` / `ffprobe` | App-managed binaries |
+| `yt-dlp` | App-managed with an independent update channel |
+| `pandoc` | App-managed, installed on first EPUB use |
+| ASR engine | App-managed Python dependency |
+| ASR model weights | App-managed optional download or user-selected path |
+| LLM organization and multimodal OCR | User-configured OpenAI-compatible API |
+| B站 authentication | User account state refreshed from the selected Chrome Profile |
+| macOS `textutil`, Quick Look and Vision | Use system-provided frameworks/tools when available |
+
+Packaging acceptance requires a clean Mac without conda or Homebrew to initialize this runtime and complete the main task matrix. External prerequisites are limited to the configured LLM/OCR API service, account/browser state such as B站 Cookie, source/network access, and optional ASR model assets managed through the app.

@@ -8,7 +8,8 @@ Confirmed the MVP direction:
 - Runtime configuration comes first.
 - Default output root comes second.
 - Task execution comes after environment and output configuration.
-- The first release uses an existing conda environment and OpenAI-compatible LLM API.
+- Current development uses an existing conda environment and OpenAI-compatible LLM API.
+- The daily-use package will require an app-managed runtime for Python and non-LLM tools; existing conda selection remains an advanced mode.
 - The app must validate dependencies and show installation hints.
 
 Current repository state:
@@ -43,3 +44,5 @@ Implemented since the initial checkpoint:
 ## Current Todo Backlog
 
 The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). The next P0 work is automated regression coverage, Bilibili favorites/series UX, restricted-content diagnostics, and output-integrity checks.
+
+Packaging decision: T-108 app-managed runtime must be completed before T-109 release packaging. A clean Mac without conda or Homebrew should run the main workflows after in-app initialization; LLM/OCR remains API-configured and ASR model assets are managed separately.
