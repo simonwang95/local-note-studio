@@ -15,6 +15,7 @@ The first version should make existing command-line workflows easier and safer t
    - API key
    - model name, default `qwen3.6-35b-a3b-nvfp4`
    - optional Bilibili Netscape cookie file
+   - optional Chrome Profile path for refreshing the Bilibili cookie file
 2. Check environment dependencies and show installation hints.
 3. Choose a default output root, preferably an absolute path outside the app project.
 4. Choose a task type.
@@ -27,14 +28,16 @@ The first version should make existing command-line workflows easier and safer t
 
 | Task | Priority | Notes |
 | --- | --- | --- |
-| Bilibili single URL | P0 | Subtitle first, ASR fallback through migrated scripts. |
-| WeChat or general web URL | P0 | Convert article/page to Markdown; download assets when configured. |
-| Word/PDF source conversion | P0 | Convert local files to Markdown drafts. |
-| Paper quick read | P0 | Use Qwen-compatible API to generate paper quick-read notes. |
-| Local video/audio | P0 | Transcribe one local file or a local directory. |
-| Bilibili favorite/series | P1 | Keep worker support; UI can remain minimal until login/cookie flow improves. |
-| Bilibili UP opus batch | P0 | Page through one UP account, filter opus posts, download images, and organize every note with Qwen. |
-| Video key-frame notes | P1 | Optional Bilibili/local video mode that extracts representative frames and inserts them into image-text Markdown notes. |
+| Bilibili single URL | Implemented | Subtitle/web/ASR priority, key frames, dialogue detection, terminology checks, and optional raw subtitles. |
+| Bilibili favorite/series | Partial | Incremental limited/full processing works; in-app favorite selection and failed-item retry remain pending. |
+| Bilibili opus/charging opus | Implemented | Cookie-authenticated API capture followed by Qwen organization. |
+| Bilibili UP opus batch | Implemented | Page through one UP account, download images, show per-item progress, and organize with Qwen. |
+| WeChat or general web URL | Implemented | Convert and organize while retaining the complete extracted original. |
+| Document/source conversion | Implemented | DOC/DOCX/PDF/PPTX/XLSX/CSV/HTML/image/OCR conversion and Qwen organization. |
+| Paper quick read | Implemented | Structured paper note, restrained Mermaid mindmap, and full translation. |
+| AI-Chat JSON | Implemented | Convert LM Studio conversation JSON and retain the complete dialogue. |
+| Local video/audio | Implemented | Single-file or recursive directory transcription with the same rich-video options. |
+| Recursive EPUB export | Implemented | Recursively package Markdown and relative image assets through pandoc. |
 
 ## Product Shape
 
@@ -59,9 +62,14 @@ Suggested task defaults under an output root:
 | --- | --- |
 | Bilibili URL | `Net/BiliBili` |
 | Bilibili favorite | `Net/BiliBili` |
+| Bilibili opus / UP opus | `Net/BiliBili` |
 | Web URL | `Net/WeChat` |
 | Source file | `Inbox` |
+| AI-Chat JSON | `AI/AI-Chat` |
 | Paper quick read | `AI/_quickread/AI_paper` |
 | Local video/audio | `Net/BiliBili` |
+| EPUB export | `Exports/EPUB` |
 
 The worker should receive absolute output directories whenever possible.
+
+Current priorities and acceptance criteria are tracked only in [`docs/todo.md`](todo.md).

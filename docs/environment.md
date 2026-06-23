@@ -66,17 +66,29 @@ SUMMARY_API_KEY
 SUMMARY_MODEL
 ```
 
+Video task options selected in the UI override the corresponding process environment for that run. Important examples include `EXTRACT_KEYFRAMES`, `ENABLE_DIALOGUE_DETECTION`, `KEEP_ORIGINAL_SUBTITLES`, `FORCE_ASR`, `OVERWRITE_OUTPUT`, and `A_SHARE_TERMS_ENABLED`. The app does not rewrite `worker/env.local` when an option is toggled.
+
 For image OCR and scanned-PDF OCR, the app now prefers the configured multimodal Qwen/OpenAI-compatible model. Local OCR tools are only fallbacks when a vision-capable model is unavailable.
 
 ## Bilibili Cookie
 
-MVP supports a Netscape cookie file:
+The app supports a Netscape cookie file:
 
 ```bash
 BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
 ```
 
-QR login can be added later. Until then, cookie export is the most stable option.
+The desktop UI can refresh this file from a selected Chrome Profile. Open `chrome://version`, copy or select the displayed profile path, choose the Cookie output path, and click “刷新 Cookie”. The exporter writes only Bilibili-domain cookies and immediately checks whether the account is logged in. Cookie and Chrome Profile paths are masked in the UI by default; dependency and refresh results are shown in the log.
+
+The same operation is available from the command line:
+
+```bash
+python3 worker/scripts/export_bilibili_cookies.py \
+  --profile "/Users/xxx/Library/Application Support/Google/Chrome/Default" \
+  --output ./bili_cookies.txt
+```
+
+QR login remains an optional later enhancement; Chrome Profile refresh is the current supported workflow.
 
 ## Future App-Managed Environment
 

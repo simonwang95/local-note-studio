@@ -45,6 +45,7 @@ The frontend should stay focused on task selection, settings, validation, and lo
 
 ## Development Notes
 
+- `docs/todo.md` is the canonical backlog. Do not maintain a second independent todo list in progress or planning docs.
 - This directory may start without git history; initialize git before the first committed development checkpoint.
 - Keep migrated scripts close to the old `knowledge-base` behavior until reusable modules can be extracted.
 - Use absolute paths in task payloads when possible.
