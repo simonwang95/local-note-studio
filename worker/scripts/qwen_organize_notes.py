@@ -593,7 +593,7 @@ def organize_file(
         if meta.get(key) not in (None, ""):
             source_trace_lines.append(f"- {label}：`{meta[key]}`" if key.endswith("_id") or key == "author_mid" else f"- {label}：{meta[key]}")
     source_trace = "\n\n".join([source_trace_lines[0], "\n".join(source_trace_lines[1:])])
-    output_parts = [frontmatter(organized_meta), f"# {title}", "## Qwen 整理", demote_markdown_headings(organized_body), source_trace]
+    output_parts = [frontmatter(organized_meta), f"# {title}", source_trace, "## Qwen 整理", demote_markdown_headings(organized_body)]
     original = original_source_section(body, source_type)
     if original:
         output_parts.append(original)
