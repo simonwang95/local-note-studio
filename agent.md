@@ -47,4 +47,5 @@ The frontend should stay focused on task selection, settings, validation, and lo
 - Keep migrated scripts close to the old `knowledge-base` behavior until reusable modules can be extracted.
 - Use absolute paths in task payloads when possible.
 - `output_filename` is optional and should only be used for single-output tasks. It is useful when generated image assets should follow a stable final Markdown file name.
+- Convert-and-organize tasks must stage conversion drafts in a temporary directory. The user-selected output directory should receive only organized notes and promoted assets after Qwen succeeds.
 - Avoid broad refactors while the worker contract is still forming.

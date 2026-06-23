@@ -49,6 +49,8 @@ The app should feel like an operator console rather than a marketing website. De
 
 ## Output Policy
 
+- Conversion drafts are temporary implementation artifacts. For tasks that require Qwen organization, write drafts outside the selected note directory and publish only the completed Markdown plus its assets.
+
 The app should not default to writing user notes inside the application repository. It can suggest a path, but the user should choose a notes root or Obsidian vault path early in the flow. Task-specific output paths can be derived from that root.
 
 Suggested task defaults under an output root:

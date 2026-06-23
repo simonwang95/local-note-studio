@@ -11,11 +11,13 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -650,14 +652,16 @@ def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
 
 
 def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
-    convert_command = command_for(req)
     if req.dry_run:
+        staged_req = replace(req, output_dir="<temporary-staging-dir>")
+        convert_command = command_for(staged_req)
         organize_preview = [
             *python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py"),
             "--source",
             "<converted-markdown-path>",
             "--output-dir",
             req.output_dir,
+            "--omit-draft-path",
         ]
         if req.overwrite_outputs:
             organize_preview.append("--overwrite")
@@ -667,29 +671,136 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
             [
                 render_command(convert_command),
                 "",
-                "then organize converted Markdown with Qwen:",
+                "then organize staged Markdown with Qwen into the final output directory:",
                 render_command(organize_preview),
             ]
         ) + "\n"
 
-    output = run_process(convert_command, env)
-    converted_paths = extract_converted_paths(output)
-    if not converted_paths:
-        print("未从转换输出中识别到 Markdown 路径，跳过 Qwen 整理。", file=sys.stderr)
-        return ""
+    if req.task in {"bilibili-opus", "bilibili-up-opus"}:
+        backfill_legacy_bilibili_originals(pathlib.Path(req.output_dir))
+        archive_legacy_bilibili_drafts(pathlib.Path(req.output_dir))
 
-    organize_command = [*python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py")]
-    for converted_path in converted_paths:
-        organize_command.extend(["--source", converted_path])
-    organize_command.extend(["--output-dir", req.output_dir])
-    if req.overwrite_outputs:
-        organize_command.append("--overwrite")
-    if req.output_filename and req.task != "bilibili-up-opus":
-        organize_command.extend(["--output-filename", req.output_filename])
-    print("")
-    print(f"organize {len(converted_paths)} note(s):", render_command(organize_command))
-    run_process(organize_command, env)
+    with tempfile.TemporaryDirectory(prefix="local-note-studio-drafts-") as staging_dir:
+        staged_req = replace(req, output_dir=staging_dir)
+        convert_command = command_for(staged_req)
+        print(f"草稿暂存目录: {staging_dir}")
+        output = run_process(convert_command, env)
+        converted_paths = extract_converted_paths(output)
+        if not converted_paths:
+            print("未从转换输出中识别到 Markdown 路径，跳过 Qwen 整理。", file=sys.stderr)
+            return ""
+
+        organize_command = [*python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py")]
+        for converted_path in converted_paths:
+            organize_command.extend(["--source", converted_path])
+        organize_command.extend(["--output-dir", req.output_dir, "--omit-draft-path"])
+        if req.overwrite_outputs:
+            organize_command.append("--overwrite")
+        if req.output_filename and req.task != "bilibili-up-opus":
+            organize_command.extend(["--output-filename", req.output_filename])
+        print("")
+        print(f"organize {len(converted_paths)} note(s):", render_command(organize_command))
+        run_process(organize_command, env)
+        promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
+
+    if req.task in {"bilibili-opus", "bilibili-up-opus"}:
+        archive_legacy_bilibili_drafts(pathlib.Path(req.output_dir))
     return ""
+
+
+def promote_staged_assets(staging_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
+    source = staging_dir / "assets"
+    if not source.exists():
+        return
+    target = output_dir / "assets"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target, dirs_exist_ok=True)
+    print(f"图片资产已写入: {target}")
+
+
+def markdown_frontmatter_value(markdown: str, key: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.*?)\s*$", markdown)
+    if not match:
+        return ""
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def extracted_original_section(markdown: str) -> str:
+    match = re.search(r"(?ms)^##\s+原文抽取\s*$\n(.+)\Z", markdown)
+    if not match:
+        return ""
+    original = match.group(1).strip()
+    if not original:
+        return ""
+    return "\n\n".join(
+        [
+            "## 原文抽取",
+            "> 以下为转换脚本抽取的完整原文，Qwen 整理内容插入在上方，便于回看与校对。",
+            original,
+        ]
+    )
+
+
+def backfill_legacy_bilibili_originals(output_dir: pathlib.Path) -> None:
+    if not output_dir.exists():
+        return
+    drafts: dict[str, str] = {}
+    organized: list[tuple[pathlib.Path, str, str]] = []
+    for path in output_dir.glob("*.md"):
+        try:
+            markdown = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if markdown_frontmatter_value(markdown, "source_type") != "bilibili-opus":
+            continue
+        source_url = markdown_frontmatter_value(markdown, "source_url")
+        status = markdown_frontmatter_value(markdown, "status")
+        if status == "draft":
+            original = extracted_original_section(markdown)
+            if source_url and original:
+                drafts[source_url] = original
+        elif status == "organized":
+            organized.append((path, source_url, markdown))
+
+    for path, source_url, markdown in organized:
+        migrated = re.sub(r"(?m)^draft_path:\s*.*\n", "", markdown, count=1)
+        original = drafts.get(source_url, "")
+        if not re.search(r"(?m)^##\s+原文抽取\s*$", migrated) and original:
+            migrated = f"{migrated.rstrip()}\n\n{original}\n"
+            print(f"已为历史正式笔记补全原文: {path}")
+        if migrated != markdown:
+            path.write_text(migrated, encoding="utf-8")
+
+
+def archive_legacy_bilibili_drafts(output_dir: pathlib.Path) -> None:
+    if not output_dir.exists():
+        return
+    organized_urls: set[str] = set()
+    drafts: list[tuple[pathlib.Path, str]] = []
+    for path in output_dir.glob("*.md"):
+        try:
+            markdown = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if markdown_frontmatter_value(markdown, "source_type") != "bilibili-opus":
+            continue
+        source_url = markdown_frontmatter_value(markdown, "source_url")
+        status = markdown_frontmatter_value(markdown, "status")
+        if status == "organized" and re.search(r"(?m)^##\s+原文抽取\s*$", markdown):
+            organized_urls.add(source_url)
+        elif status == "draft":
+            drafts.append((path, source_url))
+
+    archive_dir = output_dir / ".local-note-studio-legacy-drafts"
+    for path, source_url in drafts:
+        if not source_url or source_url not in organized_urls:
+            continue
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / path.name
+        if target.exists():
+            target = archive_dir / f"{path.stem}-{int(path.stat().st_mtime)}{path.suffix}"
+        shutil.move(str(path), str(target))
+        print(f"旧草稿已移入隐藏备份目录: {target}")
 
 
 def render_command(command: list[str]) -> str:

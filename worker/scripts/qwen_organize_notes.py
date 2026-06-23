@@ -444,6 +444,48 @@ def build_output_path(
     return output_path_for(output_dir, f"{prefix}-{slugify(title)}{suffix}.md", output_filename)
 
 
+def existing_bilibili_opus_output(
+    output_dir: pathlib.Path,
+    source_url: str,
+    draft_path: pathlib.Path,
+) -> pathlib.Path | None:
+    if not source_url or not output_dir.exists():
+        return None
+    candidates: list[tuple[bool, bool, float, pathlib.Path]] = []
+    for path in output_dir.glob("*.md"):
+        if path.resolve() == draft_path.resolve():
+            continue
+        try:
+            markdown = path.read_text(encoding="utf-8")
+            meta, body = parse_frontmatter(markdown)
+        except (OSError, UnicodeError):
+            continue
+        if (
+            str(meta.get("source_type") or "") != "bilibili-opus"
+            or str(meta.get("source_url") or "") != source_url
+            or str(meta.get("status") or "") != "organized"
+        ):
+            continue
+        has_original = re.search(r"(?m)^##\s+原文抽取\s*$", body) is not None
+        candidates.append((has_original, path.name.startswith("BILI-OPUS-"), path.stat().st_mtime, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[:3])[3]
+
+
+def organized_note_complete(path: pathlib.Path, source_type: str) -> bool:
+    try:
+        markdown = path.read_text(encoding="utf-8")
+        meta, body = parse_frontmatter(markdown)
+    except (OSError, UnicodeError):
+        return False
+    if str(meta.get("status") or "") != "organized":
+        return False
+    if source_type == "bilibili-opus":
+        return re.search(r"(?m)^##\s+原文抽取\s*$", body) is not None
+    return True
+
+
 def original_source_section(body: str, source_type: str) -> str:
     if source_type not in {
         "wechat-article",
@@ -483,7 +525,14 @@ def demote_markdown_headings(markdown: str) -> str:
     return re.sub(r"(?m)^(#{2,5})(\s+)", r"#\1\2", markdown.strip())
 
 
-def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[str, str], output_filename: str = "") -> tuple[pathlib.Path, dict[str, Any]]:
+def organize_file(
+    draft_path: pathlib.Path,
+    output_dir: pathlib.Path,
+    cfg: dict[str, str],
+    output_filename: str = "",
+    planned_output: pathlib.Path | None = None,
+    omit_draft_path: bool = False,
+) -> tuple[pathlib.Path, dict[str, Any]]:
     markdown = draft_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(markdown)
     title = title_from(body, meta, draft_path)
@@ -502,14 +551,19 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
         for index, chunk in enumerate(chunks, 1)
     ]
     organized_body = merge_duplicate_h2_sections(normalize_markdown(synthesize_chunks(title, source_ref, chunk_notes, cfg, source_type)))
-    output_path = build_output_path(output_dir, title, source_type, output_filename, str(meta.get("dynamic_id") or ""))
+    output_path = planned_output or build_output_path(
+        output_dir,
+        title,
+        source_type,
+        output_filename,
+        str(meta.get("dynamic_id") or ""),
+    )
     organized_meta = {
         "title": title,
         "type": note_type_for(source_type),
         "source_type": source_type,
         "source_path": source_path,
         "source_url": source_url,
-        "draft_path": rel(draft_path),
         "created": today(),
         "updated": today(),
         "status": "organized",
@@ -518,14 +572,17 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
         "draft_hash": draft_hash,
         "source_hash": meta.get("source_hash", ""),
     }
+    if not omit_draft_path:
+        organized_meta["draft_path"] = rel(draft_path)
     for key in ("dynamic_id", "author", "author_mid", "published"):
         if meta.get(key) not in (None, ""):
             organized_meta[key] = meta[key]
     source_trace_lines = [
         "## 来源追溯",
-        f"- 草稿：`{rel(draft_path)}`",
         f"- 原始来源：`{source_ref}`",
     ]
+    if not omit_draft_path:
+        source_trace_lines.insert(1, f"- 草稿：`{rel(draft_path)}`")
     source_labels = {
         "dynamic_id": "动态 ID",
         "author": "作者/账号",
@@ -574,6 +631,7 @@ def main() -> int:
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing organized notes")
     parser.add_argument("--output-dir", default=cfg["ORGANIZED_OUTPUT_DIR"], help="organized note output directory")
     parser.add_argument("--output-filename", default="", help="custom Markdown file name for one organized note; directory separators are not allowed")
+    parser.add_argument("--omit-draft-path", action="store_true", help="omit temporary draft paths from final note metadata")
     args = parser.parse_args()
 
     manifest_path = (ROOT / cfg["INDEX_DIR"] / "source-manifest.json").resolve()
@@ -604,20 +662,34 @@ def main() -> int:
             meta, body = parse_frontmatter(markdown)
             title = title_from(body, meta, draft_path)
             source_type = str(meta.get("source_type") or "markdown")
-            planned_output = build_output_path(
-                output_dir,
-                title,
-                source_type,
-                args.output_filename,
-                str(meta.get("dynamic_id") or ""),
+            planned_output = None
+            if source_type == "bilibili-opus" and not args.output_filename:
+                planned_output = existing_bilibili_opus_output(
+                    output_dir,
+                    str(meta.get("source_url") or ""),
+                    draft_path,
+                )
+            planned_output = planned_output or build_output_path(
+                output_dir, title, source_type, args.output_filename, str(meta.get("dynamic_id") or "")
             )
             manifest_item = find_manifest_item(manifest, draft_path)
             if planned_output.exists() and not args.overwrite:
-                if manifest_item is not None and manifest_item.get("organized_status") == "organized":
+                if organized_note_complete(planned_output, source_type):
                     skipped += 1
                     print(f"skip {rel(draft_path)}")
                     continue
-            out_path, update = organize_file(draft_path, output_dir, cfg, args.output_filename)
+                if source_type != "bilibili-opus" and manifest_item is not None and manifest_item.get("organized_status") == "organized":
+                    skipped += 1
+                    print(f"skip {rel(draft_path)}")
+                    continue
+            out_path, update = organize_file(
+                draft_path,
+                output_dir,
+                cfg,
+                args.output_filename,
+                planned_output,
+                args.omit_draft_path,
+            )
             if manifest_item is not None:
                 manifest_item.update(update)
             else:
