@@ -585,17 +585,19 @@ def command_for(req: TaskRequest) -> list[str]:
         if req.output_filename and not source_path.is_dir():
             args.extend(["--output-filename", req.output_filename])
         return [*python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"), *args]
-    if req.task in {"web-url", "bilibili-opus"}:
+    if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus"}:
         command = [
             *python_cmd(req, SCRIPTS_DIR / "convert_sources_to_md.py"),
-            "--url",
+            "--bilibili-up-opus" if req.task == "bilibili-up-opus" else "--url",
             req.source,
             "--output-dir",
             req.output_dir,
         ]
+        if req.task == "bilibili-up-opus" and req.favorite_limit > 0:
+            command.extend(["--limit", str(req.favorite_limit)])
         if req.overwrite_outputs:
             command.append("--overwrite")
-        if req.output_filename:
+        if req.output_filename and req.task != "bilibili-up-opus":
             command.extend(["--output-filename", req.output_filename])
         return command
     if req.task in {"source-file", "ai-chat"}:
@@ -659,7 +661,7 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         ]
         if req.overwrite_outputs:
             organize_preview.append("--overwrite")
-        if req.output_filename:
+        if req.output_filename and req.task != "bilibili-up-opus":
             organize_preview.extend(["--output-filename", req.output_filename])
         return "\n".join(
             [
@@ -676,19 +678,16 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         print("未从转换输出中识别到 Markdown 路径，跳过 Qwen 整理。", file=sys.stderr)
         return ""
 
-    organize_command = [
-        *python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py"),
-        "--source",
-        converted_paths[-1],
-        "--output-dir",
-        req.output_dir,
-    ]
+    organize_command = [*python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py")]
+    for converted_path in converted_paths:
+        organize_command.extend(["--source", converted_path])
+    organize_command.extend(["--output-dir", req.output_dir])
     if req.overwrite_outputs:
         organize_command.append("--overwrite")
-    if req.output_filename:
+    if req.output_filename and req.task != "bilibili-up-opus":
         organize_command.extend(["--output-filename", req.output_filename])
     print("")
-    print("organize:", render_command(organize_command))
+    print(f"organize {len(converted_paths)} note(s):", render_command(organize_command))
     run_process(organize_command, env)
     return ""
 
@@ -798,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
         return 0
-    if req.task in {"web-url", "bilibili-opus", "source-file", "ai-chat"}:
+    if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
         sys.stdout.write(run_convert_and_organize_task(req, env))
         return 0
     command = command_for(req)

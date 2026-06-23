@@ -33,6 +33,7 @@ The first version should make existing command-line workflows easier and safer t
 | Paper quick read | P0 | Use Qwen-compatible API to generate paper quick-read notes. |
 | Local video/audio | P0 | Transcribe one local file or a local directory. |
 | Bilibili favorite/series | P1 | Keep worker support; UI can remain minimal until login/cookie flow improves. |
+| Bilibili UP opus batch | P0 | Page through one UP account, filter opus posts, download images, and organize every note with Qwen. |
 | Video key-frame notes | P1 | Optional Bilibili/local video mode that extracts representative frames and inserts them into image-text Markdown notes. |
 
 ## Product Shape

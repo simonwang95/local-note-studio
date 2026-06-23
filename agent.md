@@ -11,7 +11,7 @@ The product is local-first. Source files, generated Markdown, indexes, cookies, 
 - First configure the runtime: existing conda environment, Python fallback, OpenAI-compatible LLM API, model, and optional Bilibili cookie file.
 - Then choose a default output root. The app should prefer absolute output paths so generated notes can go directly into an external Obsidian vault or another user-selected notes directory.
 - Then choose a task, provide a URL or file path, run a preview, run the real task, inspect logs, and open or locate outputs later.
-- Supported first-stage tasks: Bilibili single URL, Bilibili favorites/series test mode, Bilibili opus/charging opus, web or WeChat URL, source-file conversion, AI-Chat JSON, paper quick read, local video/audio, and recursive Markdown-to-EPUB export.
+- Supported first-stage tasks: Bilibili single URL, Bilibili favorites/series test mode, Bilibili opus/charging opus, one-UP opus batch processing, web or WeChat URL, source-file conversion, AI-Chat JSON, paper quick read, local video/audio, and recursive Markdown-to-EPUB export.
 - The first version uses a user-managed conda environment, currently `course-whisper`, and an OpenAI-compatible API such as LM Studio.
 - The app must check whether runtime dependencies are complete and provide installation hints when they are not.
 

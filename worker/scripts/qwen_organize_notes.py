@@ -415,7 +415,13 @@ def find_manifest_item(manifest: dict[str, Any], draft_path: pathlib.Path) -> di
     return None
 
 
-def build_output_path(output_dir: pathlib.Path, title: str, source_type: str, output_filename: str = "") -> pathlib.Path:
+def build_output_path(
+    output_dir: pathlib.Path,
+    title: str,
+    source_type: str,
+    output_filename: str = "",
+    source_id: str = "",
+) -> pathlib.Path:
     prefix = {
         "pdf": "PAPER",
         "lmstudio-conversation": "CHAT",
@@ -431,9 +437,11 @@ def build_output_path(output_dir: pathlib.Path, title: str, source_type: str, ou
         "image-ocr": "IMAGE",
         "video": "VIDEO",
         "bilibili": "BILI",
+        "bilibili-opus": "BILI-OPUS",
         "local-video": "VIDEO",
     }.get(source_type, "NOTE")
-    return output_path_for(output_dir, f"{prefix}-{slugify(title)}.md", output_filename)
+    suffix = f"_{source_id}" if source_type == "bilibili-opus" and source_id else ""
+    return output_path_for(output_dir, f"{prefix}-{slugify(title)}{suffix}.md", output_filename)
 
 
 def original_source_section(body: str, source_type: str) -> str:
@@ -450,6 +458,7 @@ def original_source_section(body: str, source_type: str) -> str:
         "xlsx",
         "pptx",
         "image-ocr",
+        "bilibili-opus",
     }:
         return ""
     original = body.strip()
@@ -493,7 +502,7 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
         for index, chunk in enumerate(chunks, 1)
     ]
     organized_body = merge_duplicate_h2_sections(normalize_markdown(synthesize_chunks(title, source_ref, chunk_notes, cfg, source_type)))
-    output_path = build_output_path(output_dir, title, source_type, output_filename)
+    output_path = build_output_path(output_dir, title, source_type, output_filename, str(meta.get("dynamic_id") or ""))
     organized_meta = {
         "title": title,
         "type": note_type_for(source_type),
@@ -509,13 +518,24 @@ def organize_file(draft_path: pathlib.Path, output_dir: pathlib.Path, cfg: dict[
         "draft_hash": draft_hash,
         "source_hash": meta.get("source_hash", ""),
     }
-    source_trace = "\n\n".join(
-        [
-            "## 来源追溯",
-            f"- 草稿：`{rel(draft_path)}`",
-            f"- 原始来源：`{source_ref}`",
-        ]
-    )
+    for key in ("dynamic_id", "author", "author_mid", "published"):
+        if meta.get(key) not in (None, ""):
+            organized_meta[key] = meta[key]
+    source_trace_lines = [
+        "## 来源追溯",
+        f"- 草稿：`{rel(draft_path)}`",
+        f"- 原始来源：`{source_ref}`",
+    ]
+    source_labels = {
+        "dynamic_id": "动态 ID",
+        "author": "作者/账号",
+        "author_mid": "作者 MID",
+        "published": "发布时间",
+    }
+    for key, label in source_labels.items():
+        if meta.get(key) not in (None, ""):
+            source_trace_lines.append(f"- {label}：`{meta[key]}`" if key.endswith("_id") or key == "author_mid" else f"- {label}：{meta[key]}")
+    source_trace = "\n\n".join([source_trace_lines[0], "\n".join(source_trace_lines[1:])])
     output_parts = [frontmatter(organized_meta), f"# {title}", "## Qwen 整理", demote_markdown_headings(organized_body), source_trace]
     original = original_source_section(body, source_type)
     if original:
@@ -584,7 +604,13 @@ def main() -> int:
             meta, body = parse_frontmatter(markdown)
             title = title_from(body, meta, draft_path)
             source_type = str(meta.get("source_type") or "markdown")
-            planned_output = build_output_path(output_dir, title, source_type, args.output_filename)
+            planned_output = build_output_path(
+                output_dir,
+                title,
+                source_type,
+                args.output_filename,
+                str(meta.get("dynamic_id") or ""),
+            )
             manifest_item = find_manifest_item(manifest, draft_path)
             if planned_output.exists() and not args.overwrite:
                 if manifest_item is not None and manifest_item.get("organized_status") == "organized":

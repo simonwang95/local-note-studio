@@ -92,6 +92,7 @@ DEFAULTS = {
     ),
     "BILIBILI_COOKIES_FILE": "",
     "BILI_COOKIE_FILE": "",
+    "BILIBILI_OPUS_REQUEST_DELAY_SECONDS": "0.8",
 }
 
 
@@ -518,6 +519,17 @@ def is_bilibili_opus_url(url: str) -> bool:
     return parsed.netloc.lower().endswith("bilibili.com") and re.search(r"/opus/([0-9]+)", parsed.path) is not None
 
 
+def bilibili_space_mid(value: str) -> str:
+    candidate = value.strip()
+    if candidate.isdigit():
+        return candidate
+    parsed = urllib.parse.urlparse(candidate)
+    match = re.search(r"^/([0-9]+)(?:/|$)", parsed.path)
+    if parsed.netloc.lower() == "space.bilibili.com" and match:
+        return match.group(1)
+    raise ValueError(f"不是有效的 B站 UP 主空间图文页或 UID: {value}")
+
+
 def bilibili_opus_id(url: str) -> str:
     match = re.search(r"/opus/([0-9]+)", urllib.parse.urlparse(url).path)
     if not match:
@@ -591,10 +603,12 @@ def mirror_bilibili_auth_cookies(jar: http.cookiejar.CookieJar) -> None:
 
 def fetch_json_with_cookies(url: str, referer: str, cfg: dict[str, str]) -> dict[str, Any]:
     opener = build_cookie_opener(bilibili_cookie_path(cfg))
+    referer_url = urllib.parse.urlparse(referer)
     headers = {
         "User-Agent": cfg["WEB_USER_AGENT"],
         "Accept": "application/json, text/plain, */*",
-        "Origin": "https://www.bilibili.com",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Origin": f"{referer_url.scheme}://{referer_url.netloc}" if referer_url.netloc else "https://www.bilibili.com",
         "Referer": referer,
     }
     request = urllib.request.Request(url, headers=headers)
@@ -622,6 +636,77 @@ def ensure_bilibili_cookie_login(cfg: dict[str, str]) -> None:
             "B站 Cookie 未登录或已失效，无法读取充电动态正文。"
             "请在有权限的浏览器账号中重新导出 cookies.txt，并确认环境检查里 B站 Cookie 显示为已登录。"
         )
+
+
+def fetch_bilibili_space_opus_urls(source: str, cfg: dict[str, str], limit: int = 0) -> list[str]:
+    mid = bilibili_space_mid(source)
+    if bilibili_cookie_path(cfg) is None:
+        raise RuntimeError("B站 UP 主图文批量整理需要配置 BILIBILI_COOKIES_FILE 或 BILI_COOKIE_FILE。")
+    ensure_bilibili_cookie_login(cfg)
+
+    referer = f"https://space.bilibili.com/{mid}/upload/opus"
+    offset = ""
+    seen_offsets: set[str] = set()
+    seen_ids: set[str] = set()
+    opus_urls: list[str] = []
+    page = 0
+    while True:
+        page += 1
+        params = {
+            "host_mid": mid,
+            "offset": offset,
+            "timezone_offset": "-480",
+            "platform": "web",
+            "features": (
+                "itemOpusStyle,onlyfansVote,decorationCard,forwardListHidden,"
+                "ugcDelete,onlyfansAssetsV2,commentsNewVersion"
+            ),
+            "web_location": "333.1387",
+        }
+        api_url = (
+            "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?"
+            + urllib.parse.urlencode(params)
+        )
+        payload = fetch_json_with_cookies(api_url, referer, cfg)
+        if payload.get("code") != 0:
+            raise RuntimeError(
+                f"B站空间图文列表接口失败 (code={payload.get('code')}): "
+                f"{payload.get('message') or payload.get('msg') or '未知错误'}"
+            )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        page_added = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            modules = item.get("modules") if isinstance(item.get("modules"), dict) else {}
+            dynamic = modules.get("module_dynamic") if isinstance(modules.get("module_dynamic"), dict) else {}
+            major = dynamic.get("major") if isinstance(dynamic.get("major"), dict) else {}
+            if major.get("type") != "MAJOR_TYPE_OPUS":
+                continue
+            opus_id = str(item.get("id_str") or item.get("id") or "").strip()
+            if not opus_id or opus_id in seen_ids:
+                continue
+            seen_ids.add(opus_id)
+            opus_urls.append(f"https://www.bilibili.com/opus/{opus_id}")
+            page_added += 1
+            if limit > 0 and len(opus_urls) >= limit:
+                print(f"B站空间第 {page} 页：新增图文 {page_added} 条，达到处理上限 {limit} 条。")
+                return opus_urls
+
+        print(f"B站空间第 {page} 页：读取动态 {len(items)} 条，新增图文 {page_added} 条。")
+        if not data.get("has_more"):
+            break
+        next_offset = str(data.get("offset") or "").strip()
+        if not next_offset or next_offset == offset or next_offset in seen_offsets:
+            print("B站空间分页 offset 未变化，停止继续读取。", file=sys.stderr)
+            break
+        seen_offsets.add(next_offset)
+        offset = next_offset
+
+    if not opus_urls:
+        raise RuntimeError(f"未在 UP 主 {mid} 的空间动态中找到可整理的图文。")
+    return opus_urls
 
 
 def rich_text(nodes: Any) -> str:
@@ -1253,7 +1338,7 @@ def convert_webpage(
     extracted, assets = download_markdown_assets(extracted, out_path, final_url, cfg, download_assets)
     downloaded_assets = [item for item in assets if item.get("status") == "downloaded"]
     failed_assets = [item for item in assets if item.get("status") == "failed"]
-    assets_downloaded = bool(download_assets) and not failed_assets
+    assets_downloaded = bool(download_assets) and has_remote_assets and not failed_assets
 
     tags = ["source/web", "status/draft"]
     if source_type == "wechat-article":
@@ -1294,7 +1379,7 @@ def convert_webpage(
         f"- SHA256：`{source_hash}`",
         f"- 转换时间：{now_iso()}",
         "- 转换工具：`lxml` + `convert_sources_to_md.py`",
-        f"- 图片资产：{'已下载' if assets_downloaded else ('部分失败' if failed_assets else '未下载')}",
+        f"- 图片资产：{'无图片' if not has_remote_assets else ('已下载' if assets_downloaded else ('部分失败' if failed_assets else '未下载'))}",
         f"- 资产目录：`{asset_dir or '无'}`",
         "",
         "## 待整理区",
@@ -1354,7 +1439,7 @@ def convert_bilibili_opus(
     parsed = parse_bilibili_opus_payload(payload, url)
     source_hash = sha256_bytes(json.dumps(parsed["item"], ensure_ascii=False, sort_keys=True).encode("utf-8"))
     title = parsed["title"]
-    out_path = output_path_for(output_dir, f"BILI-OPUS-{slugify(title, opus_id)}.md", output_filename)
+    out_path = output_path_for(output_dir, f"BILI-OPUS-{slugify(title, opus_id)}_{opus_id}.md", output_filename)
     if should_skip_url(manifest, url, out_path, source_hash, overwrite, download_assets and bool(parsed["images"])):
         return out_path, {}, True
 
@@ -1365,7 +1450,7 @@ def convert_bilibili_opus(
     extracted, assets = download_markdown_assets(extracted, out_path, url, cfg, download_assets)
     downloaded_assets = [item for item in assets if item.get("status") == "downloaded"]
     failed_assets = [item for item in assets if item.get("status") == "failed"]
-    assets_downloaded = bool(download_assets) and not failed_assets
+    assets_downloaded = bool(download_assets) and bool(parsed["images"]) and not failed_assets
     asset_dir = ""
     if downloaded_assets:
         first_asset = pathlib.Path(str(downloaded_assets[0]["path"]))
@@ -1377,6 +1462,10 @@ def convert_bilibili_opus(
         "source_type": "bilibili-opus",
         "source_path": "",
         "source_url": url,
+        "dynamic_id": opus_id,
+        "author": parsed["author"],
+        "author_mid": parsed["author_mid"],
+        "published": parsed["published"],
         "created": today(),
         "updated": today(),
         "status": "draft",
@@ -1402,7 +1491,7 @@ def convert_bilibili_opus(
         f"- SHA256：`{source_hash}`",
         f"- 转换时间：{now_iso()}",
         "- 转换工具：`Bilibili dynamic API` + `convert_sources_to_md.py`",
-        f"- 图片资产：{'已下载' if assets_downloaded else ('部分失败' if failed_assets else '未下载')}",
+        f"- 图片资产：{'无图片' if not parsed['images'] else ('已下载' if assets_downloaded else ('部分失败' if failed_assets else '未下载'))}",
         f"- 资产目录：`{asset_dir or '无'}`",
         "",
         "## 原文抽取",
@@ -2644,6 +2733,8 @@ def main() -> int:
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing outputs")
     parser.add_argument("--source", action="append", help="specific source path to convert")
     parser.add_argument("--url", action="append", help="web page URL to convert, including WeChat public-account articles")
+    parser.add_argument("--bilibili-up-opus", help="Bilibili space opus URL or UP UID to batch convert")
+    parser.add_argument("--limit", type=int, default=0, help="maximum Bilibili UP opus posts to process; 0 means all")
     parser.add_argument("--output-filename", default="", help="custom Markdown file name for one source/URL; directory separators are not allowed")
     asset_group = parser.add_mutually_exclusive_group()
     asset_group.add_argument(
@@ -2671,14 +2762,21 @@ def main() -> int:
     max_pages = None if args.all_pages else int(cfg["SOURCE_CONVERSION_MAX_PDF_PAGES"])
     download_assets = parse_bool(cfg["WEB_DOWNLOAD_ASSETS"]) if args.download_assets is None else args.download_assets
 
+    if args.limit < 0:
+        parser.error("--limit 不能小于 0")
+    if args.bilibili_up_opus and (args.source or args.url):
+        parser.error("--bilibili-up-opus 不能和 --source/--url 同时使用")
     urls = args.url or []
+    if args.bilibili_up_opus:
+        urls = fetch_bilibili_space_opus_urls(args.bilibili_up_opus, cfg, args.limit)
+        print(f"发现 {len(urls)} 条 UP 主图文，开始逐条转换。")
     if args.source:
         sources = [(ROOT / item).resolve() for item in args.source]
     elif urls:
         sources = []
     else:
         sources = discover_sources(source_dir, args.sample, cfg)
-    if args.output_filename and len(sources) + len(urls) != 1:
+    if args.output_filename and (args.bilibili_up_opus or len(sources) + len(urls) != 1):
         parser.error("--output-filename 只能用于单个 source 或 URL")
 
     converted = 0
@@ -2795,7 +2893,7 @@ def main() -> int:
             }
             update_manifest(manifest, error_item)
             print(f"failed {rel(source)}: {exc}", file=sys.stderr)
-    for url in urls:
+    for url_index, url in enumerate(urls, 1):
         try:
             if is_bilibili_opus_url(url):
                 out_path, item, did_skip = convert_bilibili_opus(url, output_dir, model, cfg, manifest, args.overwrite, download_assets, args.output_filename)
@@ -2825,8 +2923,15 @@ def main() -> int:
             }
             update_manifest(manifest, error_item)
             print(f"failed {url}: {exc}", file=sys.stderr)
+        if args.bilibili_up_opus and url_index < len(urls):
+            request_delay = float(cfg.get("BILIBILI_OPUS_REQUEST_DELAY_SECONDS") or 0)
+            if request_delay > 0:
+                time.sleep(request_delay)
     save_manifest(manifest_path, manifest)
     print(f"done converted={converted} skipped={skipped} failed={failed} manifest={rel(manifest_path)}")
+    if args.bilibili_up_opus and failed and converted:
+        print(f"批量任务部分完成：成功 {converted}，失败 {failed}。", file=sys.stderr)
+        return 0
     return 1 if failed else 0
 
 

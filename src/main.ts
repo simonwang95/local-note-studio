@@ -7,6 +7,7 @@ type TaskType =
   | "bilibili-url"
   | "bilibili-favorite"
   | "bilibili-opus"
+  | "bilibili-up-opus"
   | "web-url"
   | "source-file"
   | "ai-chat"
@@ -52,6 +53,7 @@ const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
   "bilibili-favorite": "B站收藏夹/系列",
   "bilibili-opus": "B站动态/充电动态",
+  "bilibili-up-opus": "B站 UP 主图文批量",
   "web-url": "微信公众号/网页",
   "source-file": "Word/PDF整理",
   "ai-chat": "AI-Chat JSON",
@@ -64,6 +66,7 @@ const taskHints: Record<TaskType, string> = {
   "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
   "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
   "bilibili-opus": "输入 B站动态或充电动态链接。会使用 B站 Cookie 调接口抓取正文，账号无权限时会明确报错。",
+  "bilibili-up-opus": "输入 UP 主空间图文页链接或 UID。程序会分页读取、过滤视频动态，并逐篇下载图片、调用 Qwen 整理；处理数量为 0 时读取全部图文。",
   "web-url": "输入微信公众号文章或普通网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
   "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html 或图片文件。支持扫描版 PDF 的 OCR 回退；抽取后会调用 Qwen 整理，并在末尾保留原文。",
   "ai-chat": "输入 LM Studio 导出的 .conversation.json 文件，转换为 Markdown 对话笔记。",
@@ -76,6 +79,7 @@ const outputSubdirs: Record<TaskType, string> = {
   "bilibili-url": "Net/BiliBili",
   "bilibili-favorite": "Net/BiliBili",
   "bilibili-opus": "Net/BiliBili",
+  "bilibili-up-opus": "Net/BiliBili",
   "web-url": "Net/WeChat",
   "source-file": "Inbox",
   "ai-chat": "AI/AI-Chat",
@@ -102,6 +106,7 @@ const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy;
     { value: "asr", label: "ASR 语音转写优先" },
   ],
   "bilibili-opus": [{ value: "yt-dlp", label: "不适用" }],
+  "bilibili-up-opus": [{ value: "yt-dlp", label: "不适用" }],
   "local-video": [
     { value: "yt-dlp", label: "同目录 SRT 字幕优先" },
     { value: "asr", label: "ASR 语音转写优先" },
@@ -259,7 +264,7 @@ app.innerHTML = `
             </select>
           </label>
           <label id="favoriteLimitField" class="hidden">
-            收藏夹测试数量
+            <span id="batchLimitLabel">批量处理数量（0=全部）</span>
             <input id="favoriteLimit" type="number" min="0" step="1" value="${escapeHtml(savedSettings.favoriteLimit)}" placeholder="1" />
           </label>
           <label id="extractKeyframesField" class="checkbox-field hidden">
@@ -598,7 +603,11 @@ function hydrateTaskControls(): void {
   hydrateSubtitleStrategy(task);
   const favoriteLimitField = document.querySelector<HTMLElement>("#favoriteLimitField");
   if (favoriteLimitField) {
-    favoriteLimitField.classList.toggle("hidden", task !== "bilibili-favorite");
+    favoriteLimitField.classList.toggle("hidden", !["bilibili-favorite", "bilibili-up-opus"].includes(task));
+    const label = document.querySelector<HTMLElement>("#batchLimitLabel");
+    if (label) {
+      label.textContent = task === "bilibili-favorite" ? "收藏夹处理数量（0=全部）" : "图文处理数量（0=全部）";
+    }
   }
   const extractKeyframesField = document.querySelector<HTMLElement>("#extractKeyframesField");
   if (extractKeyframesField) {
@@ -614,7 +623,10 @@ function hydrateTaskControls(): void {
   }
   const stockTermsField = document.querySelector<HTMLElement>("#stockTermsField");
   if (stockTermsField) {
-    stockTermsField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video", "web-url", "source-file"].includes(task));
+    stockTermsField.classList.toggle(
+      "hidden",
+      !["bilibili-url", "bilibili-favorite", "bilibili-up-opus", "local-video", "web-url", "source-file"].includes(task),
+    );
   }
   const enableOcrField = document.querySelector<HTMLElement>("#enableOcrField");
   if (enableOcrField) {
