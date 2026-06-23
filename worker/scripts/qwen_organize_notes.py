@@ -532,6 +532,7 @@ def organize_file(
     output_filename: str = "",
     planned_output: pathlib.Path | None = None,
     omit_draft_path: bool = False,
+    progress_label: str = "",
 ) -> tuple[pathlib.Path, dict[str, Any]]:
     markdown = draft_path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(markdown)
@@ -546,10 +547,13 @@ def organize_file(
         int(cfg["QWEN_ORGANIZE_MAX_CHARS"]),
         int(cfg.get("QWEN_ORGANIZE_OVERLAP_CHARS") or 0),
     )
-    chunk_notes = [
-        organize_chunk(title, source_ref, chunk, index, len(chunks), source_type, cfg)
-        for index, chunk in enumerate(chunks, 1)
-    ]
+    chunk_notes: list[str] = []
+    for index, chunk in enumerate(chunks, 1):
+        if progress_label:
+            print(f"{progress_label} Qwen 分块 {index}/{len(chunks)}...", flush=True)
+        chunk_notes.append(organize_chunk(title, source_ref, chunk, index, len(chunks), source_type, cfg))
+    if progress_label:
+        print(f"{progress_label} 正在合并结构化笔记...", flush=True)
     organized_body = merge_duplicate_h2_sections(normalize_markdown(synthesize_chunks(title, source_ref, chunk_notes, cfg, source_type)))
     output_path = planned_output or build_output_path(
         output_dir,
@@ -622,6 +626,15 @@ def manifest_sources(manifest: dict[str, Any]) -> list[pathlib.Path]:
     return paths
 
 
+def wait_with_progress(seconds: float, next_index: int, total: int) -> None:
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        print(f"[整理 {next_index}/{total}] 冷却等待，剩余 {int(remaining + 0.999)} 秒...", flush=True)
+        step = min(10.0, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
 def main() -> int:
     cfg = config()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -655,6 +668,8 @@ def main() -> int:
     failed = 0
     cooldown_delay = float(cfg.get("QWEN_ORGANIZE_COOLDOWN_DELAY") or 0)
     for index, draft_path in enumerate(sources, start=1):
+        progress_label = f"[整理 {index}/{len(sources)}]"
+        title = draft_path.stem
         try:
             if not draft_path.exists():
                 raise FileNotFoundError(draft_path)
@@ -662,6 +677,7 @@ def main() -> int:
             meta, body = parse_frontmatter(markdown)
             title = title_from(body, meta, draft_path)
             source_type = str(meta.get("source_type") or "markdown")
+            print(f"{progress_label} 检查：{title}", flush=True)
             planned_output = None
             if source_type == "bilibili-opus" and not args.output_filename:
                 planned_output = existing_bilibili_opus_output(
@@ -676,12 +692,15 @@ def main() -> int:
             if planned_output.exists() and not args.overwrite:
                 if organized_note_complete(planned_output, source_type):
                     skipped += 1
-                    print(f"skip {rel(draft_path)}")
+                    print(f"{progress_label} 已存在完整笔记，跳过：{planned_output.name}", flush=True)
                     continue
                 if source_type != "bilibili-opus" and manifest_item is not None and manifest_item.get("organized_status") == "organized":
                     skipped += 1
-                    print(f"skip {rel(draft_path)}")
+                    print(f"{progress_label} 已整理，跳过：{planned_output.name}", flush=True)
                     continue
+            if organized > 0 and cooldown_delay > 0:
+                wait_with_progress(cooldown_delay, index, len(sources))
+            print(f"{progress_label} 开始 Qwen 整理：{title}", flush=True)
             out_path, update = organize_file(
                 draft_path,
                 output_dir,
@@ -689,6 +708,7 @@ def main() -> int:
                 args.output_filename,
                 planned_output,
                 args.omit_draft_path,
+                progress_label,
             )
             if manifest_item is not None:
                 manifest_item.update(update)
@@ -705,10 +725,7 @@ def main() -> int:
                     }
                 )
             organized += 1
-            print(f"organized {rel(draft_path)} -> {rel(out_path)}")
-            if cooldown_delay > 0 and index < len(sources):
-                print(f"cooldown {cooldown_delay:g}s before next draft")
-                time.sleep(cooldown_delay)
+            print(f"{progress_label} 完成：{out_path.name}", flush=True)
         except Exception as exc:
             failed += 1
             manifest_item = find_manifest_item(manifest, draft_path)
@@ -721,9 +738,9 @@ def main() -> int:
                         "organize_error": str(exc),
                     }
                 )
-            print(f"failed {rel(draft_path)}: {exc}", file=sys.stderr)
+            print(f"{progress_label} 失败（{title}）：{exc}", file=sys.stderr, flush=True)
     save_manifest(manifest_path, manifest)
-    print(f"done organized={organized} skipped={skipped} failed={failed} manifest={rel(manifest_path)}")
+    print(f"整理阶段完成：成功 {organized}，跳过 {skipped}，失败 {failed}。")
     return 1 if failed else 0
 
 

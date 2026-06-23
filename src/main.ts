@@ -24,10 +24,12 @@ type SavedSettings = {
   apiKey: string;
   model: string;
   cookies: string;
+  chromeProfile: string;
   outputRoot: string;
   subtitleStrategy: SubtitleStrategy;
   favoriteLimit: string;
   extractKeyframes: boolean;
+  dialogueDetection: boolean;
   keepOriginalSubtitles: boolean;
   recursiveSearch: boolean;
   overwriteOutputs: boolean;
@@ -125,10 +127,12 @@ const defaults: SavedSettings = {
   apiKey: "lm-studio",
   model: "qwen3.6-35b-a3b-nvfp4",
   cookies: "",
+  chromeProfile: "",
   outputRoot: "",
   subtitleStrategy: "yt-dlp",
   favoriteLimit: "1",
   extractKeyframes: false,
+  dialogueDetection: false,
   keepOriginalSubtitles: true,
   recursiveSearch: false,
   overwriteOutputs: false,
@@ -195,8 +199,24 @@ app.innerHTML = `
           </label>
           <label>
             B站 Cookie 文件
-            <input id="cookies" value="${escapeHtml(savedSettings.cookies)}" placeholder="/path/to/bili_cookies.txt" />
-            <p id="cookieStatus" class="field-note">Cookie 状态：待检查</p>
+            <div class="input-row secret-row">
+              <input id="cookies" type="password" value="${escapeHtml(savedSettings.cookies)}" placeholder="/path/to/bili_cookies.txt" autocomplete="off" />
+              <button id="toggleCookies" type="button" class="secondary icon-button" title="显示 Cookie 文件路径" aria-label="显示 Cookie 文件路径">
+                ${eyeIcon()}
+              </button>
+            </div>
+          </label>
+          <label class="full-row">
+            Chrome 个人资料路径
+            <div class="input-row profile-row">
+              <input id="chromeProfile" type="password" value="${escapeHtml(savedSettings.chromeProfile)}" placeholder=".../Google/Chrome/Default" autocomplete="off" />
+              <button id="toggleChromeProfile" type="button" class="secondary icon-button" title="显示 Chrome 个人资料路径" aria-label="显示 Chrome 个人资料路径">
+                ${eyeIcon()}
+              </button>
+              <button id="chooseChromeProfile" type="button" class="secondary compact-button">选择</button>
+              <button id="refreshCookies" type="button" class="secondary compact-button">刷新 Cookie</button>
+            </div>
+            <p class="field-note">填写当前登录 B站账号对应的 Chrome Profile，可在 chrome://version 查看“个人资料路径”。</p>
           </label>
         </div>
       </section>
@@ -271,6 +291,10 @@ app.innerHTML = `
             <span>关键帧图文笔记</span>
             <input id="extractKeyframes" type="checkbox" ${savedSettings.extractKeyframes ? "checked" : ""} />
           </label>
+          <label id="dialogueDetectionField" class="checkbox-field hidden">
+            <span>对话检测与角色标注</span>
+            <input id="dialogueDetection" type="checkbox" ${savedSettings.dialogueDetection ? "checked" : ""} />
+          </label>
           <label id="keepOriginalSubtitlesField" class="checkbox-field hidden">
             <span>保留原始字幕</span>
             <input id="keepOriginalSubtitles" type="checkbox" ${savedSettings.keepOriginalSubtitles ? "checked" : ""} />
@@ -339,12 +363,8 @@ document.querySelector<HTMLButtonElement>("#saveSettings")?.addEventListener("cl
   saveSettings();
   setState("配置已保存");
 });
-document.querySelector<HTMLInputElement>("#cookies")?.addEventListener("input", () => {
-  const el = document.querySelector<HTMLParagraphElement>("#cookieStatus");
-  if (el) el.textContent = "Cookie 状态：待检查";
-});
-
 document.querySelector<HTMLButtonElement>("#checkEnv")?.addEventListener("click", () => runEnvironmentCheck());
+document.querySelector<HTMLButtonElement>("#refreshCookies")?.addEventListener("click", () => refreshBilibiliCookies());
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
 document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
@@ -352,7 +372,12 @@ document.querySelector<HTMLButtonElement>("#chooseOutputRoot")?.addEventListener
 document.querySelector<HTMLButtonElement>("#chooseOutputDir")?.addEventListener("click", () => chooseDirectory("outputDir"));
 document.querySelector<HTMLButtonElement>("#chooseSourceFile")?.addEventListener("click", () => chooseSourceFile());
 document.querySelector<HTMLButtonElement>("#chooseSourceDir")?.addEventListener("click", () => chooseDirectory("source"));
-document.querySelector<HTMLButtonElement>("#toggleApiKey")?.addEventListener("click", () => toggleSecretField("apiKey", "toggleApiKey"));
+document.querySelector<HTMLButtonElement>("#chooseChromeProfile")?.addEventListener("click", () => chooseDirectory("chromeProfile"));
+document.querySelector<HTMLButtonElement>("#toggleApiKey")?.addEventListener("click", () => toggleSecretField("apiKey", "toggleApiKey", "API Key"));
+document.querySelector<HTMLButtonElement>("#toggleCookies")?.addEventListener("click", () => toggleSecretField("cookies", "toggleCookies", "Cookie 文件路径"));
+document.querySelector<HTMLButtonElement>("#toggleChromeProfile")?.addEventListener("click", () =>
+  toggleSecretField("chromeProfile", "toggleChromeProfile", "Chrome 个人资料路径"),
+);
 
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
@@ -378,13 +403,13 @@ function setInputValue(id: string, value: string): void {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function toggleSecretField(inputId: string, buttonId: string): void {
+function toggleSecretField(inputId: string, buttonId: string, label: string): void {
   const input = document.querySelector<HTMLInputElement>(`#${inputId}`);
   const button = document.querySelector<HTMLButtonElement>(`#${buttonId}`);
   if (!input || !button) return;
   const willShow = input.type === "password";
   input.type = willShow ? "text" : "password";
-  button.title = willShow ? "隐藏 API Key" : "显示 API Key";
+  button.title = willShow ? `隐藏 ${label}` : `显示 ${label}`;
   button.setAttribute("aria-label", button.title);
   input.focus();
 }
@@ -405,9 +430,11 @@ function payload(dryRun: boolean) {
     api_key: inputValue("apiKey"),
     model: inputValue("model"),
     cookies: inputValue("cookies"),
+    browser_profile: inputValue("chromeProfile"),
     subtitle_strategy: inputValue("subtitleStrategy"),
     favorite_limit: inputValue("favoriteLimit"),
     extract_keyframes: checkboxChecked("extractKeyframes"),
+    dialogue_detection: checkboxChecked("dialogueDetection"),
     keep_original_subtitles: checkboxChecked("keepOriginalSubtitles"),
     recursive_search: checkboxChecked("recursiveSearch"),
     overwrite_outputs: checkboxChecked("overwriteOutputs"),
@@ -427,7 +454,6 @@ async function runEnvironmentCheck(): Promise<void> {
   try {
     const request = { ...payload(false), task: "env-check", source: "" };
     const result = await invokeWorker(request);
-    updateCookieStatus(result);
     if (!currentOutput().trim()) setOutput(result);
     setState(result.includes("[MISSING]") ? "依赖缺失" : "依赖检查完成");
   } catch (error) {
@@ -438,6 +464,34 @@ async function runEnvironmentCheck(): Promise<void> {
       setOutput(message);
     }
     setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "检查失败");
+  } finally {
+    setWorkerRunning(false);
+  }
+}
+
+async function refreshBilibiliCookies(): Promise<void> {
+  if (isWorkerRunning) return;
+  const profile = inputValue("chromeProfile");
+  if (!profile) {
+    setState("缺少 Chrome Profile");
+    setOutput("请填写或选择 Chrome 个人资料路径。可在 chrome://version 查看“个人资料路径”。");
+    return;
+  }
+  if (!inputValue("cookies")) {
+    setInputValue("cookies", "./bili_cookies.txt");
+  }
+  saveSettings();
+  setWorkerRunning(true);
+  setState("正在刷新 Cookie...");
+  setOutput("正在从指定 Chrome Profile 读取 B站 Cookie...\n");
+  try {
+    await invokeWorker({ ...payload(false), task: "refresh-bilibili-cookies", source: "", output_dir: "" });
+    appendOutput("\nCookie 导出完成，正在校验登录态...\n");
+    const checkResult = await invokeWorker({ ...payload(false), task: "bilibili-cookie-status", source: "", output_dir: "" });
+    setState(checkResult.includes("[OK] Bilibili cookie file") ? "Cookie 刷新完成" : "Cookie 需要关注");
+  } catch (error) {
+    appendOutput(`\n刷新失败：${errorMessage(error)}\n`);
+    setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "Cookie 刷新失败");
   } finally {
     setWorkerRunning(false);
   }
@@ -511,7 +565,7 @@ async function cancelWorker(): Promise<void> {
   }
 }
 
-async function chooseDirectory(targetId: "outputRoot" | "outputDir" | "source"): Promise<void> {
+async function chooseDirectory(targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile"): Promise<void> {
   await choosePath(targetId, { directory: true, multiple: false });
 }
 
@@ -536,7 +590,7 @@ async function chooseSourceFile(): Promise<void> {
 }
 
 async function choosePath(
-  targetId: "outputRoot" | "outputDir" | "source",
+  targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile",
   options: OpenDialogOptions,
 ): Promise<void> {
   if (!hasTauriRuntime()) {
@@ -613,6 +667,10 @@ function hydrateTaskControls(): void {
   if (extractKeyframesField) {
     extractKeyframesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
   }
+  const dialogueDetectionField = document.querySelector<HTMLElement>("#dialogueDetectionField");
+  if (dialogueDetectionField) {
+    dialogueDetectionField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
+  }
   const keepOriginalSubtitlesField = document.querySelector<HTMLElement>("#keepOriginalSubtitlesField");
   if (keepOriginalSubtitlesField) {
     keepOriginalSubtitlesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
@@ -654,10 +712,18 @@ function hydrateSubtitleStrategy(task: TaskType): void {
 }
 
 function bindSettingsPersistence(): void {
-  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "subtitleStrategy", "favoriteLimit"]) {
+  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "chromeProfile", "subtitleStrategy", "favoriteLimit"]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
-  for (const id of ["extractKeyframes", "keepOriginalSubtitles", "recursiveSearch", "overwriteOutputs", "stockTerms", "enableOcr"]) {
+  for (const id of [
+    "extractKeyframes",
+    "dialogueDetection",
+    "keepOriginalSubtitles",
+    "recursiveSearch",
+    "overwriteOutputs",
+    "stockTerms",
+    "enableOcr",
+  ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
 }
@@ -679,10 +745,12 @@ function saveSettings(): void {
     apiKey: inputValue("apiKey") || defaults.apiKey,
     model: inputValue("model") || defaults.model,
     cookies: inputValue("cookies"),
+    chromeProfile: inputValue("chromeProfile"),
     outputRoot: inputValue("outputRoot"),
     subtitleStrategy: (inputValue("subtitleStrategy") || defaults.subtitleStrategy) as SubtitleStrategy,
     favoriteLimit: inputValue("favoriteLimit") || defaults.favoriteLimit,
     extractKeyframes: checkboxChecked("extractKeyframes"),
+    dialogueDetection: checkboxChecked("dialogueDetection"),
     keepOriginalSubtitles: checkboxChecked("keepOriginalSubtitles"),
     recursiveSearch: checkboxChecked("recursiveSearch"),
     overwriteOutputs: checkboxChecked("overwriteOutputs"),
@@ -690,21 +758,6 @@ function saveSettings(): void {
     enableOcr: checkboxChecked("enableOcr"),
   };
   localStorage.setItem(settingsKey, JSON.stringify(settings));
-}
-
-function updateCookieStatus(result: string): void {
-  const el = document.querySelector<HTMLParagraphElement>("#cookieStatus");
-  if (!el) return;
-  const line = result
-    .split("\n")
-    .find((entry) => entry.includes("Bilibili cookie file"));
-  if (!line) {
-    el.textContent = "Cookie 状态：待检查";
-    return;
-  }
-  const status = line.startsWith("[OK]") ? "可用" : line.startsWith("[WARN]") ? "未配置或需关注" : "异常";
-  const detail = line.includes(" - ") ? line.split(" - ", 2)[1].split(" Hint:", 1)[0].trim() : "";
-  el.textContent = detail ? `Cookie 状态：${status}，${detail}` : `Cookie 状态：${status}`;
 }
 
 function setOutput(text: string): void {
@@ -730,7 +783,7 @@ function setState(text: string): void {
 
 function setWorkerRunning(running: boolean): void {
   isWorkerRunning = running;
-  for (const id of ["checkEnv", "runDry", "runTask"]) {
+  for (const id of ["checkEnv", "refreshCookies", "runDry", "runTask"]) {
     const button = document.querySelector<HTMLButtonElement>(`#${id}`);
     if (button) button.disabled = running;
   }

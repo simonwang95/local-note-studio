@@ -2894,6 +2894,8 @@ def main() -> int:
             update_manifest(manifest, error_item)
             print(f"failed {rel(source)}: {exc}", file=sys.stderr)
     for url_index, url in enumerate(urls, 1):
+        if args.bilibili_up_opus:
+            print(f"[抓取 {url_index}/{len(urls)}] 开始：动态 {bilibili_opus_id(url)}")
         try:
             if is_bilibili_opus_url(url):
                 out_path, item, did_skip = convert_bilibili_opus(url, output_dir, model, cfg, manifest, args.overwrite, download_assets, args.output_filename)
@@ -2901,11 +2903,17 @@ def main() -> int:
                 out_path, item, did_skip = convert_webpage(url, output_dir, model, cfg, manifest, args.overwrite, download_assets, args.output_filename)
             if did_skip:
                 skipped += 1
-                print(f"skip {url}")
+                if args.bilibili_up_opus:
+                    print(f"[抓取 {url_index}/{len(urls)}] 已存在，跳过")
+                else:
+                    print(f"skip {url}")
                 continue
             update_manifest(manifest, item)
             converted += 1
-            print(f"converted {url} -> {rel(out_path)}")
+            if args.bilibili_up_opus:
+                print(f"[抓取 {url_index}/{len(urls)}] 完成：{out_path.name}")
+            else:
+                print(f"converted {url} -> {rel(out_path)}")
         except Exception as exc:
             failed += 1
             source_type = "bilibili-opus" if is_bilibili_opus_url(url) else "webpage"
@@ -2922,13 +2930,19 @@ def main() -> int:
                 "error": str(exc),
             }
             update_manifest(manifest, error_item)
-            print(f"failed {url}: {exc}", file=sys.stderr)
+            if args.bilibili_up_opus:
+                print(f"[抓取 {url_index}/{len(urls)}] 失败：{exc}", file=sys.stderr)
+            else:
+                print(f"failed {url}: {exc}", file=sys.stderr)
         if args.bilibili_up_opus and url_index < len(urls):
             request_delay = float(cfg.get("BILIBILI_OPUS_REQUEST_DELAY_SECONDS") or 0)
             if request_delay > 0:
                 time.sleep(request_delay)
     save_manifest(manifest_path, manifest)
-    print(f"done converted={converted} skipped={skipped} failed={failed} manifest={rel(manifest_path)}")
+    if args.bilibili_up_opus:
+        print(f"抓取阶段完成：成功 {converted}，跳过 {skipped}，失败 {failed}。")
+    else:
+        print(f"done converted={converted} skipped={skipped} failed={failed} manifest={rel(manifest_path)}")
     if args.bilibili_up_opus and failed and converted:
         print(f"批量任务部分完成：成功 {converted}，失败 {failed}。", file=sys.stderr)
         return 0

@@ -67,9 +67,11 @@ class TaskRequest:
     api_key: str = ""
     model: str = ""
     cookies: str = ""
+    browser_profile: str = ""
     subtitle_strategy: str = "yt-dlp"
     favorite_limit: int = 1
     extract_keyframes: bool = False
+    dialogue_detection: bool = False
     keep_original_subtitles: bool = True
     recursive_search: bool = False
     overwrite_outputs: bool = False
@@ -90,9 +92,11 @@ class TaskRequest:
             api_key=str(data.get("api_key") or ""),
             model=str(data.get("model") or ""),
             cookies=str(data.get("cookies") or ""),
+            browser_profile=str(data.get("browser_profile") or ""),
             subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
             favorite_limit=parse_int(data.get("favorite_limit"), 1),
             extract_keyframes=parse_bool(data.get("extract_keyframes")),
+            dialogue_detection=parse_bool(data.get("dialogue_detection")),
             keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", True)),
             recursive_search=parse_bool(data.get("recursive_search")),
             overwrite_outputs=parse_bool(data.get("overwrite_outputs")),
@@ -147,6 +151,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     if req.output_dir:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
     env["EXTRACT_KEYFRAMES"] = "true" if req.extract_keyframes else "false"
+    env["ENABLE_DIALOGUE_DETECTION"] = "true" if req.dialogue_detection else "false"
     env["KEEP_ORIGINAL_SUBTITLES"] = "true" if req.keep_original_subtitles else "false"
     env["OVERWRITE_OUTPUT"] = "true" if req.overwrite_outputs else "false"
     env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
@@ -245,6 +250,18 @@ def bilibili_cookie_login_detail(path: pathlib.Path) -> tuple[bool, str]:
         mid = data.get("mid") or "unknown"
         return True, f"已登录 mid={mid}"
     return False, f"未登录或已失效 (code={payload.get('code')})"
+
+
+def check_bilibili_cookie(req: TaskRequest) -> str:
+    raw = req.cookies.strip()
+    if not raw:
+        return "[WARN] Bilibili cookie file - 未配置\n"
+    path = resolve_local_path(raw)
+    if not path.exists():
+        return f"[WARN] Bilibili cookie file - 文件不存在: {path}\n"
+    login_ok, login_detail = bilibili_cookie_login_detail(path)
+    status = "OK" if login_ok else "WARN"
+    return f"[{status}] Bilibili cookie file - {inspect_cookie_file(path)}；{login_detail}\n"
 
 
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
@@ -550,6 +567,19 @@ def command_for(req: TaskRequest) -> list[str]:
         raise ValueError("task is required")
     if req.task == "env-check":
         raise ValueError("env-check is handled internally")
+    if req.task == "refresh-bilibili-cookies":
+        if not req.browser_profile.strip():
+            raise ValueError("请先配置 Chrome 个人资料路径")
+        cookie_path = resolve_local_path(req.cookies or "bili_cookies.txt")
+        return [
+            *python_cmd(req, SCRIPTS_DIR / "export_bilibili_cookies.py"),
+            "--browser",
+            "chrome",
+            "--profile",
+            req.browser_profile,
+            "--output",
+            str(cookie_path),
+        ]
     if not req.source and req.task not in {"bilibili-favorite"}:
         raise ValueError("source is required")
     if not req.output_dir:
@@ -684,9 +714,18 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
     with tempfile.TemporaryDirectory(prefix="local-note-studio-drafts-") as staging_dir:
         staged_req = replace(req, output_dir=staging_dir)
         convert_command = command_for(staged_req)
-        print(f"草稿暂存目录: {staging_dir}")
+        print("已创建临时草稿区；整理完成后会自动清理。")
         output = run_process(convert_command, env)
-        converted_paths = extract_converted_paths(output)
+        if req.task == "bilibili-up-opus":
+            converted_paths = [
+                str(path)
+                for path in sorted(
+                    pathlib.Path(staging_dir).glob("*.md"),
+                    key=lambda item: item.stat().st_mtime_ns,
+                )
+            ]
+        else:
+            converted_paths = extract_converted_paths(output)
         if not converted_paths:
             print("未从转换输出中识别到 Markdown 路径，跳过 Qwen 整理。", file=sys.stderr)
             return ""
@@ -700,7 +739,7 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         if req.output_filename and req.task != "bilibili-up-opus":
             organize_command.extend(["--output-filename", req.output_filename])
         print("")
-        print(f"organize {len(converted_paths)} note(s):", render_command(organize_command))
+        print(f"开始 Qwen 整理：共 {len(converted_paths)} 篇，正式输出到 {req.output_dir}")
         run_process(organize_command, env)
         promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
 
@@ -859,6 +898,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-key", default="", help="OpenAI-compatible API key.")
     parser.add_argument("--model", default="", help="LLM model name.")
     parser.add_argument("--cookies", default="", help="Bilibili Netscape cookies.txt path.")
+    parser.add_argument("--browser-profile", default="", help="Chrome profile directory name or absolute path.")
     parser.add_argument(
         "--subtitle-strategy",
         default="yt-dlp",
@@ -867,6 +907,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--favorite-limit", type=int, default=1, help="Maximum videos to process in favorite mode. Use 0 for full run.")
     parser.add_argument("--extract-keyframes", action="store_true", help="Extract key frames for Bilibili or local video notes.")
+    parser.add_argument("--dialogue-detection", action="store_true", help="Detect dialogue and label speakers in video transcripts.")
     parser.add_argument("--no-keep-original-subtitles", action="store_true", help="Do not keep the raw subtitle section in video notes.")
     parser.add_argument("--recursive-search", action="store_true", help="Recursively scan local video directories.")
     parser.add_argument("--overwrite-outputs", action="store_true", help="Overwrite existing output files.")
@@ -890,9 +931,11 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         api_key=args.api_key,
         model=args.model,
         cookies=args.cookies,
+        browser_profile=args.browser_profile,
         subtitle_strategy=args.subtitle_strategy,
         favorite_limit=args.favorite_limit,
         extract_keyframes=args.extract_keyframes,
+        dialogue_detection=args.dialogue_detection,
         keep_original_subtitles=not args.no_keep_original_subtitles,
         recursive_search=args.recursive_search,
         overwrite_outputs=args.overwrite_outputs,
@@ -908,6 +951,9 @@ def main(argv: list[str] | None = None) -> int:
     env = build_env(req)
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
+        return 0
+    if req.task == "bilibili-cookie-status":
+        sys.stdout.write(check_bilibili_cookie(req))
         return 0
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
         sys.stdout.write(run_convert_and_organize_task(req, env))

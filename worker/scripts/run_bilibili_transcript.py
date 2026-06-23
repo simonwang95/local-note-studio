@@ -39,6 +39,7 @@ DEFAULTS = {
     "FORCE_ASR": "false",
     "EXTRACT_KEYFRAMES": "false",
     "KEYFRAME_MAX_COUNT": "4",
+    "ENABLE_DIALOGUE_DETECTION": "false",
     "KEEP_ORIGINAL_SUBTITLES": "true",
     "OVERWRITE_OUTPUT": "false",
 }
@@ -215,6 +216,7 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
         "FORCE_ASR": cfg["FORCE_ASR"],
         "EXTRACT_KEYFRAMES": cfg["EXTRACT_KEYFRAMES"],
         "KEYFRAME_MAX_COUNT": cfg["KEYFRAME_MAX_COUNT"],
+        "ENABLE_DIALOGUE_DETECTION": cfg["ENABLE_DIALOGUE_DETECTION"],
         "KEEP_ORIGINAL_SUBTITLES": cfg["KEEP_ORIGINAL_SUBTITLES"],
         "OVERWRITE_OUTPUT": cfg["OVERWRITE_OUTPUT"],
     }
