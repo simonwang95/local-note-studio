@@ -63,50 +63,57 @@ BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
 
 B站 Cookie 文件用于让脚本读取你自己账号可访问的字幕、公开视频信息、私有收藏夹或受限内容。它不是必须项：只处理公开视频时可以先留空；处理收藏夹、会员可见内容或字幕抓取不稳定时，再补充。
 
-推荐使用项目内的专用导出脚本。它会从 Chrome 读取登录态，但只保留 B站域 Cookie，并在覆盖原文件前调用 B站登录态接口校验，不会访问具体视频：
+#### 推荐：在桌面 App 内刷新
 
-1. 在 Chrome 或其他浏览器里登录 B站。
-2. 在有权限的 Chrome 窗口打开 `chrome://version`，查看“个人资料路径”。路径末尾通常是 `Default`、`Profile 1`、`Profile 2` 等。
+这一操作必须在 `npm run tauri:dev` 启动的桌面窗口中完成；普通浏览器预览页不能读取 Chrome Profile 或运行 Cookie 导出脚本。
 
-3. 在项目根目录运行，并把 `Profile 1` 换成上一步看到的目录名：
+1. 在 Chrome 中登录 B站，并确认当前账号能打开目标收藏夹、充电视频或充电动态。
+2. 在这个 Chrome 窗口打开 `chrome://version`，找到“个人资料路径”。路径末尾通常是 `Default`、`Profile 1` 或 `Profile 2`。
+3. 启动 Local Note Studio 桌面应用，在“运行环境”中填写“B站 Cookie 文件”。留空时点击刷新会自动使用项目根目录的 `./bili_cookies.txt`；也可以填写其他本机私有路径。
+4. 在“Chrome 个人资料路径”右侧点击“选择”，选择上一步看到的完整 Profile 目录。例如：
+
+```text
+/Users/xxx/Library/Application Support/Google/Chrome/Default
+```
+
+5. 点击“刷新 Cookie”。如果 macOS 弹出钥匙串访问提示，确认这是当前 Local Note Studio/终端进程发起的 Chrome Cookie 读取后再允许。
+6. 查看下方日志。成功时应依次看到 Cookie 提取、B站域筛选、登录态校验和保存路径，最后包含类似信息：
+
+```text
+登录态校验通过: 已登录 mid=...
+[OK] Bilibili cookie file - ...；已登录 mid=...
+```
+
+刷新过程只保留 `.bilibili.com` 和 `.bilibili.cn` Cookie，不会把其他网站 Cookie 写入文件，也不会访问具体视频。只有出现 `已登录 mid=...`，才表示这份文件可以继续用于收藏夹、充电视频和充电动态的权限验证。
+
+“B站 Cookie 文件”和“Chrome 个人资料路径”默认以密码形式隐藏，点击右侧眼睛按钮可以临时显示或再次隐藏。输入内容会保存在 App 的本地配置中，不必再重复写入 `worker/env.local`。点击“检查依赖”可以随时重新检查 Cookie 文件和登录态；详细状态只显示在日志中。
+
+如果刷新失败，按日志依次检查：
+
+- `Chrome 个人资料路径` 是否精确指向 `Default` / `Profile N` 目录，而不是它们的上级目录。
+- 当前 Profile 中是否已经登录 B站，以及登录账号是否真的拥有目标内容权限。
+- 所选 conda 环境是否安装 `yt-dlp`；缺失时运行 `conda run -n course-whisper python3 -m pip install -U yt-dlp`。
+- macOS 是否拒绝了 Chrome Safe Storage/钥匙串访问。
+
+#### 备用：使用命令行导出
+
+桌面刷新不可用时，可以在项目根目录运行专用脚本。它与 App 使用相同的筛选和登录态校验逻辑：
 
 ```bash
 conda run --no-capture-output -n course-whisper \
   python3 worker/scripts/export_bilibili_cookies.py \
   --browser chrome \
-  --profile "Profile 1" \
+  --profile "/Users/xxx/Library/Application Support/Google/Chrome/Default" \
   --output ./bili_cookies.txt
 ```
 
-这条命令会：
-
-- 从指定的 Chrome 个人资料读取登录态。
-- 只保留 `.bilibili.com` 和 `.bilibili.cn` Cookie，不导出其他网站 Cookie。
-- 调用 B站登录态接口校验账号；通过后才覆盖原文件。
-- 把 Cookie 保存到项目根目录的 `bili_cookies.txt`，不下载或请求任何视频。
-
-如果 `chrome://version` 显示的是完整路径，也可以直接传入：
-
-```bash
-conda run --no-capture-output -n course-whisper \
-  python3 worker/scripts/export_bilibili_cookies.py \
-  --profile "/Users/xxx/Library/Application Support/Google/Chrome/Profile 1"
-```
-
-不确定 Profile 时可以先不写 `--profile`，但多账号 Chrome 可能自动选中另一个最近使用的资料：
-
-```bash
-conda run --no-capture-output -n course-whisper \
-  python3 worker/scripts/export_bilibili_cookies.py
-```
-
-也可以把 cookie 保存到本机私有目录，例如：
+也可以把 Cookie 保存到本机私有目录，例如：
 
 ```text
 /Users/xxx/.local/share/local-note-studio/bili_cookies.txt
 ```
 
-4. 在 `worker/env.local` 中填写绝对路径：
+仅在主要使用命令行而不是桌面 App 时，才需要在 `worker/env.local` 中填写路径：
 
 ```bash
 BILIBILI_COOKIES_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
@@ -119,19 +126,6 @@ BILI_COOKIE_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
 BILIBILI_COOKIES_FILE="./bili_cookies.txt"
 BILI_COOKIE_FILE="./bili_cookies.txt"
 ```
-
-5. 在应用界面的“B站 Cookie 文件”输入框中也可以填写同一个路径，然后点击“检查依赖”。只有显示 `已登录 mid=...` 才表示这份文件可用于收藏夹、充电视频和充电动态。
-
-桌面应用也支持直接刷新 Cookie：
-
-1. 在 Chrome 当前账号窗口打开 `chrome://version`，复制“个人资料路径”，或在应用中点击“选择”。
-2. 将路径填入“Chrome 个人资料路径”，例如 `/Users/xxx/Library/Application Support/Google/Chrome/Default`。
-3. 确认“B站 Cookie 文件”路径；留空时应用会使用项目根目录的 `./bili_cookies.txt`。
-4. 点击“刷新 Cookie”。程序只保留 B站域 Cookie，刷新后会自动校验登录态，并把结果写入日志；输入框下方不重复显示 Cookie 状态。
-
-“B站 Cookie 文件”和“Chrome 个人资料路径”默认以密码形式隐藏，点击输入框右侧的眼睛按钮可以临时显示或再次隐藏路径。
-
-如果状态没有显示 `已登录 mid=...`，通常是选错了 Chrome Profile，或该 Profile 中的 B站登录已过期。
 
 #### 遇到 HTTP 412 怎么办
 
@@ -151,7 +145,7 @@ yt-dlp --cookies-from-browser chrome --cookies ./bili_cookies.txt \
 - 只导出 B站域名相关 cookie，不要导出全部网站 cookie。
 - Cookie 等同于一段时间内的登录凭证，不要提交到 git，不要发给别人。
 - 如果 B站退出登录、修改密码或 cookie 过期，需要重新导出。
-- `worker/env.local` 已被 `.gitignore` 忽略，真实 cookie 路径应放在这里。
+- `worker/env.local` 已被 `.gitignore` 忽略；命令行工作流可把真实 Cookie 路径写在这里，桌面 App 则使用本地保存的界面配置。
 - 项目根目录的 `bili_cookies.txt` 和 `*_cookies.txt` 已加入 `.gitignore`。
 
 ## 3. 启动桌面应用
