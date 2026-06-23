@@ -1,0 +1,16 @@
+{
+  "code": 0,
+  "data": {
+    "item": {
+      "id_str": "1000000000000000000",
+      "modules": {
+        "module_dynamic": {
+          "major": {
+            "type": "MAJOR_TYPE_OPUS",
+            "opus": {"title": "已授权充电动态夹具", "summary": "正文可见"}
+          }
+        }
+      }
+    }
+  }
+}

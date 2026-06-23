@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, replace
 from typing import Any
@@ -70,6 +71,10 @@ class TaskRequest:
     browser_profile: str = ""
     subtitle_strategy: str = "yt-dlp"
     favorite_limit: int = 1
+    collection_type: str = "favorite"
+    collection_id: str = ""
+    collection_mid: str = ""
+    retry_failed: bool = False
     extract_keyframes: bool = False
     dialogue_detection: bool = False
     keep_original_subtitles: bool = True
@@ -95,6 +100,10 @@ class TaskRequest:
             browser_profile=str(data.get("browser_profile") or ""),
             subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
             favorite_limit=parse_int(data.get("favorite_limit"), 1),
+            collection_type=str(data.get("collection_type") or "favorite"),
+            collection_id=str(data.get("collection_id") or ""),
+            collection_mid=str(data.get("collection_mid") or ""),
+            retry_failed=parse_bool(data.get("retry_failed")),
             extract_keyframes=parse_bool(data.get("extract_keyframes")),
             dialogue_detection=parse_bool(data.get("dialogue_detection")),
             keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", True)),
@@ -150,6 +159,8 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["BILI_COOKIE_FILE"] = req.cookies
     if req.output_dir:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
+    if req.collection_id:
+        env["BILIBILI_FAV_MEDIA_ID"] = req.collection_id
     env["EXTRACT_KEYFRAMES"] = "true" if req.extract_keyframes else "false"
     env["ENABLE_DIALOGUE_DETECTION"] = "true" if req.dialogue_detection else "false"
     env["KEEP_ORIGINAL_SUBTITLES"] = "true" if req.keep_original_subtitles else "false"
@@ -262,6 +273,172 @@ def check_bilibili_cookie(req: TaskRequest) -> str:
     login_ok, login_detail = bilibili_cookie_login_detail(path)
     status = "OK" if login_ok else "WARN"
     return f"[{status}] Bilibili cookie file - {inspect_cookie_file(path)}；{login_detail}\n"
+
+
+def bilibili_error_category(code: object = None, message: str = "", http_status: int | None = None) -> str:
+    """Return a stable, actionable category for Bilibili failures."""
+    text = message.strip()
+    if http_status == 412 or str(code) == "-412" or "412" in text or "请求被拦截" in text:
+        return "接口风控/HTTP 412：请稍后再试；若持续出现，请从已登录 Chrome Profile 刷新 Cookie。"
+    if str(code) in {"-101", "-111"} or "未登录" in text or "账号未登录" in text:
+        return "未登录：Cookie 已失效或未包含登录凭据，请刷新 Cookie 后重新验证登录态。"
+    if str(code) in {"-403", "11010", "11011"} or any(token in text for token in ("权限不足", "无权限", "充电", "仅粉丝")):
+        return "账号无对应内容权限：请确认当前账号已加入所需充电档位或具备私密内容访问权限。"
+    if str(code) in {"-404", "62002"} or "不存在" in text:
+        return "目标内容不存在或已删除：请核对链接/ID。"
+    return f"B站接口失败：code={code} message={text or '未知错误'}"
+
+
+def bilibili_json(req: TaskRequest, url: str, referer: str = "https://www.bilibili.com/") -> dict[str, Any]:
+    local_env = load_env_file(WORKER_DIR / "env.local")
+    raw_cookie = req.cookies.strip() or local_env.get("BILIBILI_COOKIES_FILE", "") or local_env.get("BILI_COOKIE_FILE", "")
+    handlers: list[urllib.request.BaseHandler] = []
+    if raw_cookie:
+        cookie_path = resolve_local_path(raw_cookie)
+        if not cookie_path.exists():
+            raise FileNotFoundError(f"B站 Cookie 文件不存在: {cookie_path}")
+        jar = http.cookiejar.MozillaCookieJar()
+        jar.load(str(cookie_path), ignore_discard=True, ignore_expires=True)
+        mirror_bilibili_auth_cookies(jar)
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
+    opener = urllib.request.build_opener(*handlers)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": referer,
+        },
+    )
+    try:
+        with opener.open(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(bilibili_error_category(http_status=exc.code, message=str(exc))) from exc
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"B站接口连接或响应解析失败：{first_line(str(exc))}") from exc
+    if payload.get("code") != 0:
+        raise RuntimeError(bilibili_error_category(payload.get("code"), str(payload.get("message") or payload.get("msg") or "")))
+    return payload
+
+
+def bilibili_login_data(req: TaskRequest) -> dict[str, Any]:
+    payload = bilibili_json(req, "https://api.bilibili.com/x/web-interface/nav")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if not data.get("isLogin"):
+        raise RuntimeError(bilibili_error_category(-101, "未登录"))
+    return data
+
+
+def validate_bilibili_target_payload(kind: str, payload: dict[str, Any]) -> None:
+    """Validate sanitized API payload shapes used by authorized-content regressions."""
+    if payload.get("code") != 0:
+        raise RuntimeError(bilibili_error_category(payload.get("code"), str(payload.get("message") or "")))
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if kind == "video":
+        if not data.get("bvid") or not data.get("title"):
+            raise RuntimeError("视频元数据抓取失败：接口缺少 bvid 或 title。")
+        return
+    item = data.get("item") if isinstance(data.get("item"), dict) else {}
+    if not item:
+        raise RuntimeError("动态正文为空：内容可能已删除、接口风控或账号没有目标权限。")
+    modules = item.get("modules") if isinstance(item.get("modules"), dict) else {}
+    dynamic = modules.get("module_dynamic") if isinstance(modules.get("module_dynamic"), dict) else {}
+    major = dynamic.get("major") if isinstance(dynamic.get("major"), dict) else {}
+    if major.get("type") == "MAJOR_TYPE_BLOCKED":
+        raise RuntimeError("账号无对应充电权限：接口返回权限占位，请确认当前账号已加入该内容要求的充电档位。")
+
+
+def list_bilibili_collections(req: TaskRequest) -> str:
+    login = bilibili_login_data(req)
+    mid = str(login.get("mid") or "")
+    favorites_payload = bilibili_json(
+        req,
+        "https://api.bilibili.com/x/v3/fav/folder/created/list-all?" + urllib.parse.urlencode({"up_mid": mid}),
+        f"https://space.bilibili.com/{mid}/favlist",
+    )
+    fav_data = favorites_payload.get("data") if isinstance(favorites_payload.get("data"), dict) else {}
+    favorites = []
+    for item in fav_data.get("list") or []:
+        if not isinstance(item, dict):
+            continue
+        favorites.append({
+            "type": "favorite",
+            "id": str(item.get("id") or item.get("media_id") or ""),
+            "mid": mid,
+            "title": str(item.get("title") or "未命名收藏夹"),
+            "count": parse_int(item.get("media_count"), 0),
+        })
+
+    series: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    try:
+        series_payload = bilibili_json(
+            req,
+            "https://api.bilibili.com/x/polymer/space/seasons_series_list?" + urllib.parse.urlencode({"mid": mid, "page_num": 1, "page_size": 100}),
+            f"https://space.bilibili.com/{mid}/lists",
+        )
+        data = series_payload.get("data") if isinstance(series_payload.get("data"), dict) else {}
+        items_lists = data.get("items_lists") if isinstance(data.get("items_lists"), dict) else data
+        for item in items_lists.get("series_list") or []:
+            meta = item.get("meta") if isinstance(item, dict) and isinstance(item.get("meta"), dict) else item
+            if not isinstance(meta, dict):
+                continue
+            series.append({
+                "type": "series",
+                "id": str(meta.get("series_id") or meta.get("id") or ""),
+                "mid": str(meta.get("mid") or mid),
+                "title": str(meta.get("name") or meta.get("title") or "未命名系列"),
+                "count": parse_int(meta.get("total") or meta.get("count"), 0),
+            })
+    except Exception as exc:
+        warnings.append(f"系列列表读取失败（收藏夹仍可使用）：{exc}")
+
+    result = {"mid": mid, "name": str(login.get("uname") or ""), "items": [*favorites, *series], "warnings": warnings}
+    return "COLLECTIONS_JSON:" + json.dumps(result, ensure_ascii=False) + "\n"
+
+
+def check_bilibili_target_access(req: TaskRequest) -> str:
+    login = bilibili_login_data(req)
+    lines = [f"[OK] 登录态：{login.get('uname') or 'B站用户'} (mid={login.get('mid')})"]
+    if req.collection_id:
+        if req.collection_type == "series":
+            url = "https://api.bilibili.com/x/series/archives?" + urllib.parse.urlencode({
+                "mid": req.collection_mid or login.get("mid"), "series_id": req.collection_id, "pn": 1, "ps": 1,
+            })
+        else:
+            url = "https://api.bilibili.com/x/v3/fav/resource/list?" + urllib.parse.urlencode({"media_id": req.collection_id, "pn": 1, "ps": 1})
+        bilibili_json(req, url)
+        lines.append(f"[OK] 目标权限：可读取{('系列' if req.collection_type == 'series' else '收藏夹')} {req.collection_id}")
+    elif req.source:
+        opus = re.search(r"/opus/(\d+)", req.source)
+        bvid = re.search(r"(BV[0-9A-Za-z]+)", req.source)
+        if opus:
+            url = "https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?" + urllib.parse.urlencode({"id": opus.group(1), "features": "itemOpusStyle"})
+            payload = bilibili_json(req, url, req.source)
+            validate_bilibili_target_payload("opus", payload)
+        elif bvid:
+            view_payload = bilibili_json(req, "https://api.bilibili.com/x/web-interface/view?" + urllib.parse.urlencode({"bvid": bvid.group(1)}), req.source)
+            validate_bilibili_target_payload("video", view_payload)
+            command = tool_cmd(req, "yt-dlp", "--simulate", "--no-warnings")
+            cookie_value = req.cookies.strip() or build_env(req).get("BILIBILI_COOKIES_FILE", "")
+            if cookie_value:
+                command.extend(["--cookies", str(resolve_local_path(cookie_value))])
+            command.append(req.source)
+            ok, detail = probe(command, build_env(req), timeout=90)
+            if not ok:
+                lowered = detail.lower()
+                if "412" in lowered:
+                    raise RuntimeError(bilibili_error_category(http_status=412, message=detail))
+                if any(token in detail for token in ("充电", "权限", "会员")) or "login" in lowered:
+                    raise RuntimeError("账号无对应视频权限或登录态未被 yt-dlp 接受：" + first_line(detail))
+                raise RuntimeError("视频元数据/播放权限抓取失败：" + first_line(detail))
+        else:
+            raise ValueError("目标权限验证需要 B站视频/动态链接，或已选择收藏夹/系列。")
+        lines.append("[OK] 目标权限：目标内容元数据可读取")
+    else:
+        lines.append("[WARN] 未指定目标，仅验证了登录态。")
+    return "\n".join(lines) + "\n"
 
 
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
@@ -600,9 +777,16 @@ def command_for(req: TaskRequest) -> list[str]:
         command = [
             *python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"),
             "--favorite",
+            "--collection-type",
+            req.collection_type,
+            "--collection-id",
+            req.collection_id,
         ]
-        if req.favorite_limit > 0:
-            command.extend(["--limit", str(req.favorite_limit)])
+        command.extend(["--limit", str(max(0, req.favorite_limit))])
+        if req.collection_mid:
+            command.extend(["--collection-mid", req.collection_mid])
+        if req.retry_failed:
+            command.append("--retry-failed")
         if req.overwrite_outputs:
             command.append("--overwrite")
         return command
@@ -843,6 +1027,89 @@ def archive_legacy_bilibili_drafts(output_dir: pathlib.Path) -> None:
         print(f"旧草稿已移入隐藏备份目录: {target}")
 
 
+def output_snapshot(output_dir: str) -> dict[pathlib.Path, tuple[int, int]]:
+    root = pathlib.Path(output_dir).expanduser()
+    if not root.exists():
+        return {}
+    snapshot: dict[pathlib.Path, tuple[int, int]] = {}
+    for pattern in ("*.md", "*.epub"):
+        for path in root.rglob(pattern):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[path.resolve()] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def changed_outputs(output_dir: str, before: dict[pathlib.Path, tuple[int, int]]) -> list[pathlib.Path]:
+    after = output_snapshot(output_dir)
+    return sorted(path for path, signature in after.items() if before.get(path) != signature)
+
+
+def markdown_image_targets(markdown: str) -> list[str]:
+    targets = [match.group(1).strip() for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", markdown)]
+    targets.extend(match.group(1).strip() for match in re.finditer(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", markdown, re.I))
+    return targets
+
+
+def validate_markdown_output(path: pathlib.Path, req: TaskRequest) -> list[str]:
+    markdown = path.read_text(encoding="utf-8", errors="replace")
+    errors: list[str] = []
+    if re.search(r"(?m)^draft_path:\s*", markdown) or "local-note-studio-drafts-" in markdown:
+        errors.append("包含系统临时草稿路径或 draft_path")
+    if not re.search(r"(?m)^(source_path|source_url):\s*\S", markdown) and "## 来源追溯" not in markdown:
+        errors.append("缺少来源追溯信息")
+    for target in markdown_image_targets(markdown):
+        clean = target.split(maxsplit=1)[0].strip("<>").split("#", 1)[0].split("?", 1)[0]
+        if not clean or re.match(r"^(?:https?:|data:|//)", clean, re.I):
+            continue
+        decoded = urllib.parse.unquote(clean)
+        resolved = pathlib.Path(decoded) if pathlib.Path(decoded).is_absolute() else path.parent / decoded
+        if not resolved.exists():
+            errors.append(f"图片相对路径无法解析: {target}")
+
+    raw_subtitle = re.search(r"(?m)^(?:##\s+原始字幕|<summary>📄\s*原始字幕</summary>)", markdown) is not None
+    if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
+        if req.keep_original_subtitles and not raw_subtitle:
+            errors.append("界面要求保留原始字幕，但输出中缺少原始字幕")
+        if not req.keep_original_subtitles and raw_subtitle:
+            errors.append("界面要求移除原始字幕，但输出中仍含原始字幕")
+
+    if req.task in {"web-url", "source-file", "ai-chat", "bilibili-opus", "bilibili-up-opus"}:
+        if not re.search(r"(?m)^status:\s*organized\s*$", markdown):
+            errors.append("缺少 Qwen 整理完成标记 status: organized")
+        original = re.search(r"(?ms)^##\s+原文抽取\s*$\n(.+)", markdown)
+        if not original or not original.group(1).strip():
+            errors.append("缺少完整原文（## 原文抽取）")
+    if req.task == "paper-quickread":
+        translated = re.search(r"(?ms)^##\s+全文翻译\s*$\n(.+)", markdown)
+        if not translated or not translated.group(1).strip():
+            errors.append("缺少全文翻译（## 全文翻译）")
+    return errors
+
+
+def validate_task_outputs(req: TaskRequest, before: dict[pathlib.Path, tuple[int, int]]) -> None:
+    if req.dry_run or not req.output_dir:
+        return
+    outputs = changed_outputs(req.output_dir, before)
+    if not outputs:
+        print("[完整性 WARN] 本次没有新增或更新输出（可能全部命中跳过策略）。")
+        return
+    failures: list[str] = []
+    for path in outputs:
+        if path.suffix.lower() == ".epub":
+            if path.stat().st_size == 0:
+                failures.append(f"{path.name}: EPUB 文件为空")
+            continue
+        for error in validate_markdown_output(path, req):
+            failures.append(f"{path.name}: {error}")
+    if failures:
+        detail = "\n".join(f"- {item}" for item in failures)
+        raise RuntimeError(f"输出完整性检查失败：\n{detail}")
+    print(f"[完整性 OK] 已检查 {len(outputs)} 个本次输出：来源、正文/翻译、字幕选项和图片路径均符合要求。")
+
+
 def render_command(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
@@ -906,6 +1173,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Preferred Bilibili transcript source.",
     )
     parser.add_argument("--favorite-limit", type=int, default=1, help="Maximum videos to process in favorite mode. Use 0 for full run.")
+    parser.add_argument("--collection-type", default="favorite", choices=["favorite", "series"], help="Selected Bilibili collection type.")
+    parser.add_argument("--collection-id", default="", help="Selected Bilibili favorite/series ID.")
+    parser.add_argument("--collection-mid", default="", help="Owner mid for a selected Bilibili series.")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry the failed entries saved by the previous batch.")
     parser.add_argument("--extract-keyframes", action="store_true", help="Extract key frames for Bilibili or local video notes.")
     parser.add_argument("--dialogue-detection", action="store_true", help="Detect dialogue and label speakers in video transcripts.")
     parser.add_argument("--no-keep-original-subtitles", action="store_true", help="Do not keep the raw subtitle section in video notes.")
@@ -934,6 +1205,10 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         browser_profile=args.browser_profile,
         subtitle_strategy=args.subtitle_strategy,
         favorite_limit=args.favorite_limit,
+        collection_type=args.collection_type,
+        collection_id=args.collection_id,
+        collection_mid=args.collection_mid,
+        retry_failed=args.retry_failed,
         extract_keyframes=args.extract_keyframes,
         dialogue_detection=args.dialogue_detection,
         keep_original_subtitles=not args.no_keep_original_subtitles,
@@ -955,11 +1230,20 @@ def main(argv: list[str] | None = None) -> int:
     if req.task == "bilibili-cookie-status":
         sys.stdout.write(check_bilibili_cookie(req))
         return 0
+    if req.task == "bilibili-collections":
+        sys.stdout.write(list_bilibili_collections(req))
+        return 0
+    if req.task == "bilibili-access-check":
+        sys.stdout.write(check_bilibili_target_access(req))
+        return 0
+    before = output_snapshot(req.output_dir)
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
         sys.stdout.write(run_convert_and_organize_task(req, env))
+        validate_task_outputs(req, before)
         return 0
     command = command_for(req)
     sys.stdout.write(run_command(command, env, req.dry_run))
+    validate_task_outputs(req, before)
     return 0
 
 

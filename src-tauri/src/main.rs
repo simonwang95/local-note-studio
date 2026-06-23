@@ -44,14 +44,21 @@ fn cancel_worker(
     app: tauri::AppHandle,
     state: State<'_, Arc<WorkerState>>,
 ) -> Result<bool, String> {
+    if state.child.lock().map_err(|err| err.to_string())?.is_some() {
+        emit_log(&app, "Cancel requested. Stopping current worker...\n");
+    }
+    stop_worker(&state)
+}
+
+fn stop_worker(state: &WorkerState) -> Result<bool, String> {
     state.cancel_requested.store(true, Ordering::SeqCst);
     let mut child_guard = state.child.lock().map_err(|err| err.to_string())?;
-    if let Some(child) = child_guard.as_mut() {
-        emit_log(&app, "Cancel requested. Stopping current worker...\n");
-        child.kill().map_err(|err| err.to_string())?;
-        Ok(true)
-    } else {
-        Ok(false)
+    match child_guard.as_mut() {
+        Some(child) => {
+            child.kill().map_err(|err| err.to_string())?;
+            Ok(true)
+        }
+        None => Ok(false),
     }
 }
 
@@ -231,4 +238,28 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Local Note Studio");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_kills_the_active_child_and_sets_the_flag() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .expect("spawn cancellation fixture");
+        let state = WorkerState {
+            child: Mutex::new(Some(child)),
+            cancel_requested: AtomicBool::new(false),
+        };
+
+        assert!(stop_worker(&state).expect("cancel child"));
+        assert!(state.cancel_requested.load(Ordering::SeqCst));
+        let mut guard = state.child.lock().expect("lock child");
+        let status = guard.as_mut().expect("child present").wait().expect("wait child");
+        assert!(!status.success());
+    }
 }

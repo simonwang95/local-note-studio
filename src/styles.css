@@ -143,6 +143,10 @@ label {
   grid-template-columns: minmax(0, 1fr) repeat(3, auto);
 }
 
+.input-row.collection-row {
+  grid-template-columns: minmax(220px, 1fr) repeat(2, auto);
+}
+
 .input-row button + button {
   margin-left: 0;
 }
@@ -293,6 +297,10 @@ pre {
   }
 
   .input-row.profile-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .input-row.collection-row {
     grid-template-columns: minmax(0, 1fr);
   }
 }

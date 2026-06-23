@@ -28,6 +28,9 @@ type SavedSettings = {
   outputRoot: string;
   subtitleStrategy: SubtitleStrategy;
   favoriteLimit: string;
+  collectionType: "favorite" | "series";
+  collectionId: string;
+  collectionMid: string;
   extractKeyframes: boolean;
   dialogueDetection: boolean;
   keepOriginalSubtitles: boolean;
@@ -66,7 +69,7 @@ const taskLabels: Record<TaskType, string> = {
 
 const taskHints: Record<TaskType, string> = {
   "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
-  "bilibili-favorite": "使用 worker/env.local 中的 BILIBILI_FAV_MEDIA_ID。需要 cookie 时先在上方配置。",
+  "bilibili-favorite": "先读取当前登录账号的收藏夹/系列并选择目标。批量中单条失败不会阻断其余条目，结束后可只重试失败项。",
   "bilibili-opus": "输入 B站动态或充电动态链接。会使用 B站 Cookie 调接口抓取正文，账号无权限时会明确报错。",
   "bilibili-up-opus": "输入 UP 主空间图文页链接或 UID。程序会分页读取、过滤视频动态，并逐篇下载图片、调用 Qwen 整理；处理数量为 0 时读取全部图文。",
   "web-url": "输入微信公众号文章或普通网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
@@ -131,6 +134,9 @@ const defaults: SavedSettings = {
   outputRoot: "",
   subtitleStrategy: "yt-dlp",
   favoriteLimit: "1",
+  collectionType: "favorite",
+  collectionId: "",
+  collectionMid: "",
   extractKeyframes: false,
   dialogueDetection: false,
   keepOriginalSubtitles: true,
@@ -246,6 +252,7 @@ app.innerHTML = `
             <h2>任务执行</h2>
           </div>
           <div class="actions">
+            <button id="checkBilibiliAccess" type="button" class="secondary hidden">验证B站目标权限</button>
             <button id="runDry" type="button" class="secondary">预览命令</button>
             <button id="runTask" type="button">运行任务</button>
             <button id="cancelTask" type="button" class="danger" disabled>取消任务</button>
@@ -286,6 +293,17 @@ app.innerHTML = `
           <label id="favoriteLimitField" class="hidden">
             <span id="batchLimitLabel">批量处理数量（0=全部）</span>
             <input id="favoriteLimit" type="number" min="0" step="1" value="${escapeHtml(savedSettings.favoriteLimit)}" placeholder="1" />
+          </label>
+          <label id="collectionField" class="full-row hidden">
+            收藏夹/系列
+            <div class="input-row collection-row">
+              <select id="collectionSelect" data-type="${escapeHtml(savedSettings.collectionType)}" data-id="${escapeHtml(savedSettings.collectionId)}" data-mid="${escapeHtml(savedSettings.collectionMid)}">
+                <option value="">点击“读取列表”获取当前账号的收藏夹/系列</option>
+              </select>
+              <button id="loadCollections" type="button" class="secondary compact-button">读取列表</button>
+              <button id="retryFailed" type="button" class="secondary compact-button hidden">只重试失败项</button>
+            </div>
+            <p id="batchResult" class="field-note">尚未运行批量任务。</p>
           </label>
           <label id="extractKeyframesField" class="checkbox-field hidden">
             <span>关键帧图文笔记</span>
@@ -365,6 +383,10 @@ document.querySelector<HTMLButtonElement>("#saveSettings")?.addEventListener("cl
 });
 document.querySelector<HTMLButtonElement>("#checkEnv")?.addEventListener("click", () => runEnvironmentCheck());
 document.querySelector<HTMLButtonElement>("#refreshCookies")?.addEventListener("click", () => refreshBilibiliCookies());
+document.querySelector<HTMLButtonElement>("#loadCollections")?.addEventListener("click", () => loadBilibiliCollections());
+document.querySelector<HTMLButtonElement>("#checkBilibiliAccess")?.addEventListener("click", () => checkBilibiliTargetAccess());
+document.querySelector<HTMLButtonElement>("#retryFailed")?.addEventListener("click", () => runTask(false, true));
+document.querySelector<HTMLSelectElement>("#collectionSelect")?.addEventListener("change", syncSelectedCollection);
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
 document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
@@ -418,9 +440,11 @@ function currentTask(): TaskType {
   return (inputValue("taskType") || "bilibili-url") as TaskType;
 }
 
-function payload(dryRun: boolean) {
+function payload(dryRun: boolean, retryFailed = false) {
+  const collection = document.querySelector<HTMLSelectElement>("#collectionSelect");
+  const task = currentTask();
   return {
-    task: currentTask(),
+    task,
     source: inputValue("source"),
     output_dir: inputValue("outputDir"),
     output_filename: inputValue("outputFilename"),
@@ -432,7 +456,11 @@ function payload(dryRun: boolean) {
     cookies: inputValue("cookies"),
     browser_profile: inputValue("chromeProfile"),
     subtitle_strategy: inputValue("subtitleStrategy"),
-    favorite_limit: inputValue("favoriteLimit"),
+    favorite_limit: retryFailed ? "0" : inputValue("favoriteLimit"),
+    collection_type: collection?.selectedOptions[0]?.dataset.type || collection?.dataset.type || "favorite",
+    collection_id: task === "bilibili-favorite" ? collection?.value || collection?.dataset.id || "" : "",
+    collection_mid: task === "bilibili-favorite" ? collection?.selectedOptions[0]?.dataset.mid || collection?.dataset.mid || "" : "",
+    retry_failed: retryFailed,
     extract_keyframes: checkboxChecked("extractKeyframes"),
     dialogue_detection: checkboxChecked("dialogueDetection"),
     keep_original_subtitles: checkboxChecked("keepOriginalSubtitles"),
@@ -497,7 +525,84 @@ async function refreshBilibiliCookies(): Promise<void> {
   }
 }
 
-async function runTask(dryRun: boolean): Promise<void> {
+type BilibiliCollection = { type: "favorite" | "series"; id: string; mid: string; title: string; count: number };
+type CollectionResponse = { mid: string; name: string; items: BilibiliCollection[]; warnings?: string[] };
+
+function structuredJson<T>(text: string, prefix: string): T | null {
+  const line = text.split("\n").find((item) => item.startsWith(prefix));
+  if (!line) return null;
+  try {
+    return JSON.parse(line.slice(prefix.length)) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function loadBilibiliCollections(): Promise<void> {
+  if (isWorkerRunning) return;
+  setWorkerRunning(true);
+  setState("读取收藏夹/系列中...");
+  setOutput("正在验证登录态并读取收藏夹/系列...\n");
+  try {
+    const result = await invokeWorker({ ...payload(false), task: "bilibili-collections", source: "", output_dir: "" });
+    const data = structuredJson<CollectionResponse>(result, "COLLECTIONS_JSON:");
+    if (!data) throw new Error("worker 未返回可识别的收藏夹列表");
+    const select = document.querySelector<HTMLSelectElement>("#collectionSelect");
+    if (!select) return;
+    const previous = select.dataset.id || savedSettings.collectionId;
+    select.innerHTML = data.items.length
+      ? data.items.map((item) => {
+          const label = `${item.type === "series" ? "系列" : "收藏夹"} · ${item.title}（${item.count}）`;
+          return `<option value="${escapeHtml(item.id)}" data-type="${item.type}" data-mid="${escapeHtml(item.mid)}" ${item.id === previous ? "selected" : ""}>${escapeHtml(label)}</option>`;
+        }).join("")
+      : '<option value="">当前账号没有可读取的收藏夹/系列</option>';
+    syncSelectedCollection();
+    setOutput(`账号：${data.name || data.mid}\n读取到 ${data.items.length} 个收藏夹/系列。${data.warnings?.length ? `\n${data.warnings.join("\n")}` : ""}`);
+    setState("列表读取完成");
+  } catch (error) {
+    appendOutput(`\n读取失败：${errorMessage(error)}\n`);
+    setState("列表读取失败");
+  } finally {
+    setWorkerRunning(false);
+  }
+}
+
+function syncSelectedCollection(): void {
+  const select = document.querySelector<HTMLSelectElement>("#collectionSelect");
+  const option = select?.selectedOptions[0];
+  if (!select || !option) return;
+  select.dataset.type = option.dataset.type || "favorite";
+  select.dataset.id = select.value;
+  select.dataset.mid = option.dataset.mid || "";
+  saveSettings();
+}
+
+async function checkBilibiliTargetAccess(): Promise<void> {
+  if (isWorkerRunning) return;
+  setWorkerRunning(true);
+  setState("验证目标权限中...");
+  setOutput("正在分别检查登录态和目标内容权限...\n");
+  try {
+    const result = await invokeWorker({ ...payload(false), task: "bilibili-access-check", output_dir: "" });
+    if (!currentOutput().trim()) setOutput(result);
+    setState("目标权限可用");
+  } catch (error) {
+    appendOutput(`\n权限验证失败：${errorMessage(error)}\n`);
+    setState("目标权限不可用");
+  } finally {
+    setWorkerRunning(false);
+  }
+}
+
+function updateBatchResult(text: string): void {
+  const data = structuredJson<{ total: number; processed?: number; success: number; failed: number; current: string }>(text, "BATCH_RESULT_JSON:");
+  if (!data) return;
+  const summary = document.querySelector<HTMLParagraphElement>("#batchResult");
+  if (summary) summary.textContent = `总数 ${data.total} · 已处理 ${data.processed ?? data.success + data.failed} · 成功 ${data.success} · 失败 ${data.failed}${data.current ? ` · 当前/最后：${data.current}` : ""}`;
+  document.querySelector<HTMLButtonElement>("#retryFailed")?.classList.toggle("hidden", data.failed <= 0);
+}
+
+async function runTask(dryRun: boolean, retryFailed = false): Promise<void> {
   if (isWorkerRunning) return;
   saveSettings();
   const task = currentTask();
@@ -511,14 +616,20 @@ async function runTask(dryRun: boolean): Promise<void> {
     setOutput("请填写 URL、文件路径或目录路径。");
     return;
   }
+  if (task === "bilibili-favorite" && !String((payload(false) as { collection_id?: string }).collection_id || "")) {
+    setState("未选择收藏夹/系列");
+    setOutput("请先点击“读取列表”，然后选择一个收藏夹或系列。");
+    return;
+  }
 
   setWorkerRunning(true);
   setState(dryRun ? "生成预览中..." : "任务运行中...");
   setOutput("");
   appendOutput(dryRun ? "正在生成命令预览...\n" : "任务已启动，日志会实时追加到这里。\n");
   try {
-    const result = await invokeWorker(payload(dryRun));
+    const result = await invokeWorker(payload(dryRun, retryFailed));
     if (!currentOutput().trim()) setOutput(result || "(worker 没有返回输出)");
+    updateBatchResult(result || currentOutput());
     setState(dryRun ? "预览完成" : "任务完成");
   } catch (error) {
     const message = errorMessage(error);
@@ -537,6 +648,7 @@ async function runTask(dryRun: boolean): Promise<void> {
           : "任务失败",
     );
   } finally {
+    updateBatchResult(currentOutput());
     setWorkerRunning(false);
   }
 }
@@ -663,6 +775,11 @@ function hydrateTaskControls(): void {
       label.textContent = task === "bilibili-favorite" ? "收藏夹处理数量（0=全部）" : "图文处理数量（0=全部）";
     }
   }
+  document.querySelector<HTMLElement>("#collectionField")?.classList.toggle("hidden", task !== "bilibili-favorite");
+  document.querySelector<HTMLElement>("#checkBilibiliAccess")?.classList.toggle(
+    "hidden",
+    !["bilibili-url", "bilibili-favorite", "bilibili-opus"].includes(task),
+  );
   const extractKeyframesField = document.querySelector<HTMLElement>("#extractKeyframesField");
   if (extractKeyframesField) {
     extractKeyframesField.classList.toggle("hidden", !["bilibili-url", "bilibili-favorite", "local-video"].includes(task));
@@ -738,6 +855,7 @@ function loadSettings(): SavedSettings {
 }
 
 function saveSettings(): void {
+  const collection = document.querySelector<HTMLSelectElement>("#collectionSelect");
   const settings: SavedSettings = {
     condaEnv: inputValue("condaEnv") || defaults.condaEnv,
     pythonBin: inputValue("pythonBin") || defaults.pythonBin,
@@ -749,6 +867,9 @@ function saveSettings(): void {
     outputRoot: inputValue("outputRoot"),
     subtitleStrategy: (inputValue("subtitleStrategy") || defaults.subtitleStrategy) as SubtitleStrategy,
     favoriteLimit: inputValue("favoriteLimit") || defaults.favoriteLimit,
+    collectionType: (collection?.dataset.type || defaults.collectionType) as "favorite" | "series",
+    collectionId: collection?.value || collection?.dataset.id || "",
+    collectionMid: collection?.selectedOptions[0]?.dataset.mid || collection?.dataset.mid || "",
     extractKeyframes: checkboxChecked("extractKeyframes"),
     dialogueDetection: checkboxChecked("dialogueDetection"),
     keepOriginalSubtitles: checkboxChecked("keepOriginalSubtitles"),
@@ -783,7 +904,7 @@ function setState(text: string): void {
 
 function setWorkerRunning(running: boolean): void {
   isWorkerRunning = running;
-  for (const id of ["checkEnv", "refreshCookies", "runDry", "runTask"]) {
+  for (const id of ["checkEnv", "refreshCookies", "loadCollections", "checkBilibiliAccess", "retryFailed", "runDry", "runTask"]) {
     const button = document.querySelector<HTMLButtonElement>(`#${id}`);
     if (button) button.disabled = running;
   }

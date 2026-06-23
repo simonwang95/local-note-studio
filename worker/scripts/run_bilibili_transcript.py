@@ -42,6 +42,7 @@ DEFAULTS = {
     "ENABLE_DIALOGUE_DETECTION": "false",
     "KEEP_ORIGINAL_SUBTITLES": "true",
     "OVERWRITE_OUTPUT": "false",
+    "COOLDOWN_DELAY": "30",
 }
 
 
@@ -595,29 +596,100 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
     return summary_code
 
 
-def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: int, dry_run: bool) -> int:
+def batch_failure_path(cfg: dict[str, str]) -> pathlib.Path:
+    return pathlib.Path(cfg["BILIBILI_OUTPUT_DIR"]).expanduser() / ".local-note-studio-batch-failures.json"
+
+
+def save_batch_failures(cfg: dict[str, str], collection: dict[str, str], failures: list[dict[str, str]]) -> pathlib.Path:
+    path = batch_failure_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"collection": collection, "failures": failures, "updated_at": now_iso()}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def load_batch_failures(cfg: dict[str, str], collection: dict[str, str]) -> list[dict[str, str]]:
+    path = batch_failure_path(cfg)
+    if not path.exists():
+        raise RuntimeError("没有可重试的失败列表；请先运行一次收藏夹/系列批处理。")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    saved = payload.get("collection") or {}
+    if saved.get("type") != collection.get("type") or str(saved.get("id")) != str(collection.get("id")):
+        raise RuntimeError("失败列表属于另一个收藏夹/系列，请先切回原目标或重新运行当前批次。")
+    return [item for item in payload.get("failures") or [] if isinstance(item, dict)]
+
+
+def collection_llm_cooldown(cfg: dict[str, str]) -> float:
+    try:
+        return max(0.0, float(cfg.get("COOLDOWN_DELAY") or 0))
+    except (TypeError, ValueError):
+        print("COOLDOWN_DELAY 配置无效，本次收藏夹批处理不执行 LLM Cool Down。", file=sys.stderr)
+        return 0.0
+
+
+def wait_for_collection_llm_cooldown(delay: float, next_index: int, total: int) -> None:
+    if delay <= 0:
+        return
+    deadline = time.monotonic() + delay
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        print(
+            f"[Qwen {next_index}/{total}] LLM Cool Down，剩余 {int(remaining + 0.999)} 秒...",
+            flush=True,
+        )
+        time.sleep(min(1.0, remaining))
+
+
+def run_collection_batch(
+    project_dir: pathlib.Path,
+    cfg: dict[str, str],
+    limit: int,
+    dry_run: bool,
+    collection_type: str,
+    collection_id: str,
+    collection_mid: str,
+    retry_failed: bool,
+) -> int:
     env = project_env(cfg)
     script_dir = project_dir / "scripts" / "bilibili"
     scanner = script_dir / "bilibili_scanner.py"
     transcript = script_dir / "bilibili_transcript.sh"
     batch = script_dir / "batch_transcribe.py"
-    scan_command = python_command(cfg, scanner)
+    collection = {"type": collection_type, "id": collection_id, "mid": collection_mid}
+    scan_command = python_command(cfg, scanner) + [
+        "--collection-type", collection_type,
+        "--collection-id", collection_id,
+    ]
+    if collection_mid:
+        scan_command.extend(["--collection-mid", collection_mid])
+    llm_cooldown = collection_llm_cooldown(cfg)
     print("scan:", " ".join(scan_command))
     if dry_run:
-        print(f"then process first {limit} new video(s)")
+        scope = "all" if limit == 0 else str(limit)
+        print(f"then process {scope} new video(s); retry_failed={retry_failed}; LLM Cool Down={llm_cooldown:g}s")
         return 0
+    print(f"LLM Cool Down：{llm_cooldown:g} 秒（两次 Qwen 调用之间）")
 
-    scan_code, scan_output = stream_command(scan_command, project_dir, env, timeout=120)
-    if scan_code != 0:
-        return scan_code
-    videos = parse_scanner_output(scan_output)
+    if retry_failed:
+        videos = load_batch_failures(cfg, collection)
+        print(f"读取失败列表：{len(videos)} 条待重试")
+    else:
+        scan_code, scan_output = stream_command(scan_command, project_dir, env, timeout=120)
+        if scan_code != 0:
+            return scan_code
+        videos = parse_scanner_output(scan_output)
     if not videos:
-        print("没有新视频需要转录")
+        print("没有新视频或失败条目需要处理")
+        result = {"total": 0, "processed": 0, "success": 0, "failed": 0, "current": "", "failures": []}
+        print("BATCH_RESULT_JSON:" + json.dumps(result, ensure_ascii=False))
         return 0
 
-    selected = videos[:limit]
-    print(f"\n限量处理 {len(selected)}/{len(videos)} 个新视频")
-    failures = 0
+    selected = videos if limit <= 0 else videos[:limit]
+    print(f"\n批量处理 {len(selected)}/{len(videos)} 个视频")
+    failed_items: list[dict[str, str]] = []
+    success_count = 0
     processed_paths: list[str] = []
     extras: dict[str, dict[str, str]] = {}
     for index, video in enumerate(selected, 1):
@@ -626,20 +698,22 @@ def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: 
         title = video.get("title", bvid)
         if not bvid:
             print(f"跳过无 BVID 条目: {video}", file=sys.stderr)
-            failures += 1
+            failed_items.append({**video, "stage": "scan", "error": "缺少 BVID"})
             continue
-        print(f"\n[{index}/{len(selected)}] {title} ({bvid})")
-        transcribe_command = bash_command(cfg, transcript, f"https://www.bilibili.com/video/{bvid}/")
-        code, output = stream_command(transcribe_command, project_dir, env, timeout=36000)
-        if code != 0:
-            failures += 1
+        print(f"\n[转录 {index}/{len(selected)}] {title} ({bvid})")
+        existing_path = str(video.get("path") or "") if retry_failed and video.get("stage") == "qwen" else ""
+        if existing_path and pathlib.Path(existing_path).exists():
+            paths = [existing_path]
+            code = 0
+        else:
+            transcribe_command = bash_command(cfg, transcript, f"https://www.bilibili.com/video/{bvid}/")
+            code, output = stream_command(transcribe_command, project_dir, env, timeout=36000)
+            paths = extract_markdown_paths(output) if code == 0 else []
+        if code != 0 or not paths:
+            failed_items.append({**video, "stage": "transcribe", "error": "转录失败或未生成 Markdown"})
+            print(f"[转录 {index}/{len(selected)}] 失败", file=sys.stderr)
             continue
-        if avid:
-            append_processed(avid, cfg)
-        paths = extract_markdown_paths(output)
-        if not paths:
-            print("未从输出中识别到 Markdown 路径，跳过 summary-only")
-            continue
+        print(f"[转录 {index}/{len(selected)}] 完成")
         for path in paths[-1:]:
             extras[path] = {
                 "avid": avid,
@@ -650,13 +724,35 @@ def run_favorite_limited(project_dir: pathlib.Path, cfg: dict[str, str], limit: 
             }
             postprocess_video_notes([path], cfg, extras)
             summary_command = python_command(cfg, batch) + ["--summary-only", path]
-            print("\nsummary:", " ".join(summary_command))
+            print(f"\n[Qwen {index}/{len(selected)}] {title}")
+            print("summary:", " ".join(summary_command))
             summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=36000)
             if summary_code != 0:
-                failures += 1
-            processed_paths.append(path)
+                failed_items.append({**video, "stage": "qwen", "path": path, "error": "Qwen 整理失败"})
+                print(f"[Qwen {index}/{len(selected)}] 失败", file=sys.stderr)
+            else:
+                print(f"[Qwen {index}/{len(selected)}] 完成")
+                if avid:
+                    append_processed(avid, cfg)
+                success_count += 1
+                processed_paths.append(path)
+            if index < len(selected) and llm_cooldown > 0:
+                wait_for_collection_llm_cooldown(llm_cooldown, index + 1, len(selected))
     postprocess_video_notes(processed_paths, cfg, extras)
-    return 1 if failures else 0
+    failure_file = save_batch_failures(cfg, collection, failed_items)
+    result = {
+        "total": len(selected),
+        "processed": success_count + len(failed_items),
+        "success": success_count,
+        "failed": len(failed_items),
+        "current": selected[-1].get("title", "") if selected else "",
+        "failure_file": str(failure_file),
+        "failures": failed_items,
+    }
+    print(f"\n批量完成：总数 {len(selected)}，成功 {success_count}，失败 {len(failed_items)}。")
+    print("BATCH_RESULT_JSON:" + json.dumps(result, ensure_ascii=False))
+    # A single failure must not abort remaining entries; the structured result drives retry.
+    return 0
 
 
 def main() -> int:
@@ -670,6 +766,10 @@ def main() -> int:
     parser.add_argument("--summary-only", action="store_true", help="fill summaries for existing Markdown outputs")
     parser.add_argument("--repair-local-durations", help="repair unknown durations in existing local-video Markdown files")
     parser.add_argument("--limit", type=int, default=0, help="in favorite mode, process only the first N new videos")
+    parser.add_argument("--collection-type", choices=["favorite", "series"], default="favorite")
+    parser.add_argument("--collection-id", default="")
+    parser.add_argument("--collection-mid", default="")
+    parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--no-video-manifest", action="store_true", help="skip writing indexes/video-manifest.json after postprocessing")
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing Markdown outputs")
     parser.add_argument("--output-filename", default="", help="custom Markdown file name for one URL/local file; directory separators are not allowed")
@@ -688,8 +788,14 @@ def main() -> int:
     if selected != 1:
         parser.error("choose exactly one of --favorite, --url, --local-file, --local-dir, --summary-only")
 
-    if args.favorite and args.limit > 0:
-        return run_favorite_limited(project_dir, cfg, args.limit, args.dry_run)
+    if args.favorite:
+        collection_id = args.collection_id or cfg.get("BILIBILI_FAV_MEDIA_ID", "")
+        if not collection_id:
+            parser.error("请先在界面读取并选择收藏夹/系列")
+        return run_collection_batch(
+            project_dir, cfg, max(0, args.limit), args.dry_run,
+            args.collection_type, collection_id, args.collection_mid, args.retry_failed,
+        )
 
     if args.repair_local_durations:
         repair_root = pathlib.Path(os.path.expanduser(os.path.expandvars(args.repair_local_durations))).resolve()

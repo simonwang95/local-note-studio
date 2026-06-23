@@ -613,8 +613,16 @@ def fetch_json_with_cookies(url: str, referer: str, cfg: dict[str, str]) -> dict
     }
     request = urllib.request.Request(url, headers=headers)
     timeout = int(cfg["WEB_FETCH_TIMEOUT_SECONDS"])
-    with opener.open(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8", errors="replace"))
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 412:
+            raise RuntimeError(
+                "B站接口风控/HTTP 412：请求被拦截。请稍后再试；若持续出现，"
+                "请从已登录 Chrome Profile 刷新 Cookie 后先验证登录态和目标权限。"
+            ) from exc
+        raise RuntimeError(f"B站接口 HTTP {exc.code}：{exc.reason}") from exc
 
 
 def bilibili_nav_status(cfg: dict[str, str]) -> dict[str, Any]:
@@ -633,8 +641,8 @@ def ensure_bilibili_cookie_login(cfg: dict[str, str]) -> None:
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     if payload.get("code") != 0 or not data.get("isLogin"):
         raise RuntimeError(
-            "B站 Cookie 未登录或已失效，无法读取充电动态正文。"
-            "请在有权限的浏览器账号中重新导出 cookies.txt，并确认环境检查里 B站 Cookie 显示为已登录。"
+            "B站 Cookie 未登录或已失效。请从已登录 Chrome Profile 刷新 Cookie，"
+            "然后先运行登录态验证；这与账号缺少充电档位权限是两类不同问题。"
         )
 
 
@@ -782,10 +790,18 @@ def collect_opus_images(value: Any) -> list[str]:
 
 def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, Any]:
     if payload.get("code") != 0:
-        raise RuntimeError(f"B站动态接口返回错误: code={payload.get('code')} message={payload.get('message')}")
+        code = payload.get("code")
+        message = str(payload.get("message") or payload.get("msg") or "")
+        if str(code) == "-412":
+            raise RuntimeError("B站接口风控/HTTP 412：请稍后再试，并在持续出现时刷新 Cookie。")
+        if str(code) in {"-101", "-111"}:
+            raise RuntimeError("B站 Cookie 未登录或已失效，请刷新 Cookie 后重新验证登录态。")
+        if str(code) in {"-403", "11010", "11011"} or "权限" in message:
+            raise RuntimeError("账号无对应充电权限：请确认当前账号已加入该内容要求的充电档位。")
+        raise RuntimeError(f"B站动态接口返回错误: code={code} message={message}")
     item = ((payload.get("data") or {}).get("item") or {})
     if not isinstance(item, dict) or not item:
-        raise RuntimeError("B站动态接口没有返回动态内容，可能是 cookie 无权限、内容不存在或接口风控。")
+        raise RuntimeError("B站动态正文为空：接口未返回内容。请分别检查目标是否存在、账号权限，以及是否触发接口风控。")
 
     modules = item.get("modules") or {}
     author = modules.get("module_author") or {}
@@ -820,7 +836,7 @@ def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, 
         module_keys = ", ".join(sorted(str(key) for key in modules.keys())) or "无"
         major_type = str(major.get("type") or "unknown") if isinstance(major, dict) else "unknown"
         raise RuntimeError(
-            "未读取到 B站动态正文。"
+            "B站动态正文为空。"
             f"接口模块：{module_keys}；动态类型：{major_type}。"
             "请确认 cookie 对该动态有权限；如果是充电动态，请确认账号已加入对应档位并重新导出 B站 cookie。"
         )

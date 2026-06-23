@@ -13,6 +13,7 @@ B站收藏夹快速扫描脚本 v1.2 - 只扫描，不转录
       python3 worker/scripts/export_bilibili_cookies.py --browser chrome --profile "Profile 1"
 """
 
+import argparse
 import os
 import re
 import sys
@@ -44,25 +45,26 @@ _env = _load_env_local()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
-FAV_MEDIA_ID = _env.get("FAV_MEDIA_ID", _env.get("BILIBILI_FAV_MEDIA_ID", ""))
+FAV_MEDIA_ID = os.environ.get("BILIBILI_FAV_MEDIA_ID") or os.environ.get("FAV_MEDIA_ID") or _env.get("FAV_MEDIA_ID", _env.get("BILIBILI_FAV_MEDIA_ID", ""))
 
 def _expand_path(raw):
     """展开路径中的 $HOME / $VAR 和 ~"""
     return os.path.expanduser(os.path.expandvars(raw))
 
 STATE_DIR = _expand_path(
-    _env.get("STATE_DIR", _env.get("BILIBILI_STATE_DIR", os.path.join(PROJECT_DIR, "indexes", "bilibili-state")))
+    os.environ.get("BILIBILI_STATE_DIR") or os.environ.get("STATE_DIR") or _env.get("STATE_DIR", _env.get("BILIBILI_STATE_DIR", os.path.join(PROJECT_DIR, "indexes", "bilibili-state")))
 )
 OUTPUT_DIR = _expand_path(
-    _env.get("OUTPUT_DIR", _env.get("BILIBILI_OUTPUT_DIR", os.path.join(PROJECT_DIR, "notes", "_inbox", "bilibili")))
+    os.environ.get("BILIBILI_OUTPUT_DIR") or os.environ.get("OUTPUT_DIR") or _env.get("OUTPUT_DIR", _env.get("BILIBILI_OUTPUT_DIR", os.path.join(PROJECT_DIR, "notes", "_inbox", "bilibili")))
 )
-NOTES_DIR = _expand_path(_env.get("NOTES_DIR", os.path.join(PROJECT_DIR, "notes")))
-BILIBILI_DEDUPE_DIRS = _env.get("BILIBILI_DEDUPE_DIRS", NOTES_DIR)
+NOTES_DIR = _expand_path(os.environ.get("NOTES_DIR") or _env.get("NOTES_DIR", os.path.join(PROJECT_DIR, "notes")))
+BILIBILI_DEDUPE_DIRS = os.environ.get("BILIBILI_DEDUPE_DIRS") or _env.get("BILIBILI_DEDUPE_DIRS", NOTES_DIR)
 COOKIE_FILE = _expand_path(
-    _env.get("BILI_COOKIE_FILE", _env.get("BILIBILI_COOKIES_FILE", ""))
+    os.environ.get("BILIBILI_COOKIES_FILE") or os.environ.get("BILI_COOKIE_FILE") or _env.get("BILI_COOKIE_FILE", _env.get("BILIBILI_COOKIES_FILE", ""))
 )
 PROCESSED_FILE = os.path.join(STATE_DIR, "processed_videos.txt")
-API_BASE = "https://api.bilibili.com/x/v3/fav/resource/list"
+FAVORITE_API = "https://api.bilibili.com/x/v3/fav/resource/list"
+SERIES_API = "https://api.bilibili.com/x/series/archives"
 
 
 def _load_cookies():
@@ -85,8 +87,19 @@ def _load_cookies():
     return cookies
 
 
-def fetch_all_medias():
-    """分页获取收藏夹中的所有视频"""
+def _api_error(code, message, status=None):
+    text = str(message or "")
+    if status == 412 or str(code) == "-412" or "412" in text:
+        return "接口风控/HTTP 412：请稍后再试；若持续出现，请从已登录 Chrome Profile 刷新 Cookie。"
+    if str(code) in {"-101", "-111"} or "未登录" in text:
+        return "未登录：Cookie 已失效，请刷新 Cookie 后重新验证登录态。"
+    if str(code) in {"-403", "11010", "11011"} or "权限" in text:
+        return "账号无对应内容权限：请确认收藏夹可见或账号具备目标内容权限。"
+    return f"B站API返回错误 (code={code}) - {text or '未知错误'}"
+
+
+def fetch_all_medias(collection_type="favorite", collection_id="", collection_mid=""):
+    """分页获取收藏夹或 UP 主系列中的所有视频。"""
     all_medias = []
     pn = 1
     headers = {
@@ -105,11 +118,17 @@ def fetch_all_medias():
         print("STATUS:NO_COOKIE", file=sys.stderr)
 
     while True:
-        url = f"{API_BASE}?media_id={FAV_MEDIA_ID}&ps=20&pn={pn}"
+        if collection_type == "series":
+            url = f"{SERIES_API}?mid={collection_mid}&series_id={collection_id}&ps=30&pn={pn}"
+        else:
+            url = f"{FAVORITE_API}?media_id={collection_id}&ps=20&pn={pn}"
         try:
             resp = requests.get(
                 url, headers=headers, cookies=cookies if cookies else None, timeout=30
             )
+            if resp.status_code >= 400:
+                print(f"ERROR: {_api_error(None, resp.reason, resp.status_code)}")
+                sys.exit(1)
             data = resp.json()
         except requests.exceptions.RequestException as e:
             print(f"ERROR: 网络请求失败 - {e}")
@@ -120,23 +139,18 @@ def fetch_all_medias():
 
         if data.get("code") != 0:
             msg = data.get("message", "未知错误")
-            if "权限不足" in msg or "访问权限" in msg:
-                print(f"ERROR: {msg}")
-                print("HINT: 收藏夹可能为私有，请选择以下任一方式解决：")
-                print("  1) 在B站将收藏夹设为「公开」")
-                print("  2) 在 env.local 中设置 BILI_COOKIE_FILE 指向 Cookie 文件")
-                print("     Cookie 文件生成方法：")
-                print("     conda run --no-capture-output -n course-whisper python3 \\")
-                print("       worker/scripts/export_bilibili_cookies.py --browser chrome \\")
-                print("       --profile \"Profile 1\" --output ./bili_cookies.txt")
-            else:
-                print(f"ERROR: B站API返回错误 (code={data.get('code')}) - {msg}")
+            print(f"ERROR: {_api_error(data.get('code'), msg)}")
             sys.exit(1)
 
-        medias = data["data"].get("medias", [])
+        payload_data = data.get("data") or {}
+        medias = payload_data.get("archives", []) if collection_type == "series" else payload_data.get("medias", [])
         all_medias.extend(medias)
 
-        if not data["data"].get("has_more"):
+        if collection_type == "series":
+            page = payload_data.get("page") or {}
+            if pn * int(page.get("size") or 30) >= int(page.get("total") or len(all_medias)):
+                break
+        elif not payload_data.get("has_more"):
             break
         pn += 1
 
@@ -207,14 +221,22 @@ def _find_existing_ids():
 
 
 def main():
-    if not FAV_MEDIA_ID:
-        print("ERROR: 请先设置收藏夹ID！编辑项目根目录的 env.local，设置 FAV_MEDIA_ID")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--collection-type", choices=["favorite", "series"], default="favorite")
+    parser.add_argument("--collection-id", default=FAV_MEDIA_ID)
+    parser.add_argument("--collection-mid", default="")
+    args = parser.parse_args()
+    if not args.collection_id:
+        print("ERROR: 未选择收藏夹/系列，请先在界面读取并选择。")
+        return 1
+    if args.collection_type == "series" and not args.collection_mid:
+        print("ERROR: 系列缺少 UP 主 mid，请重新读取列表后选择。")
         return 1
 
     os.makedirs(STATE_DIR, exist_ok=True)
 
     # 分页获取收藏夹所有视频
-    medias = fetch_all_medias()
+    medias = fetch_all_medias(args.collection_type, args.collection_id, args.collection_mid)
     print(f"COLLECTION_TOTAL:{len(medias)}")
 
     # 扫描去重目录，磁盘 .md 文件是去重的权威来源
@@ -235,7 +257,7 @@ def main():
     # 找出新视频：磁盘上无对应 .md 文件
     new_videos = []
     for m in medias:
-        avid = str(m["id"])
+        avid = str(m.get("aid") or m.get("id") or "")
         bvid = m.get("bvid", "") or m.get("bv_id", "")
         if avid in disk_avids or bvid in disk_bvids:
             continue
@@ -243,8 +265,8 @@ def main():
             "avid": avid,
             "bvid": bvid,
             "title": m["title"],
-            "duration": m["duration"],
-            "upper": m["upper"]["name"],
+            "duration": m.get("duration") or 0,
+            "upper": ((m.get("upper") or {}).get("name") or m.get("author") or ""),
             "pubtime": m.get("pubtime", 0),
         })
 

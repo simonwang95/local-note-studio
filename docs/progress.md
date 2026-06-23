@@ -40,9 +40,15 @@ Implemented since the initial checkpoint:
 - Temporary staging for conversion drafts so the final directory only receives organized notes and promoted assets.
 - Incremental `[抓取 i/n]` and `[整理 i/n]` progress for one-UP Bilibili opus batches.
 - Local-media duration probing through `ffprobe` and task-specific temporary media caches.
+- P0 automated regression suite with local fixtures for worker request/command contracts, naming and overwrite flags, original-text retention, relative image assets, restricted-content payloads, batch failure persistence, and Rust worker cancellation.
+- One-command pre-commit verification through `npm run check` (TypeScript/Vite build, Python compile and regression tests, Rust tests).
+- In-app Bilibili favorite/series discovery and selection for the logged-in account, replacing the normal need to edit `BILIBILI_FAV_MEDIA_ID` by hand.
+- Isolated favorite/series batch processing with `[转录 i/n]` and `[Qwen i/n]` progress, `COOLDOWN_DELAY` between Qwen calls, structured totals, persistent failed-entry records, and retry-failures-only execution.
+- Separate Bilibili diagnostics for expired login, missing charging/private-content permission, HTTP 412 risk control, empty opus content, and failed video extraction, plus independent login/target access verification.
+- Worker-level output integrity gates covering temporary draft leakage, source traceability, Qwen organization, complete source/translation sections, raw-subtitle preference, EPUB non-empty output, and local Markdown image resolution.
 
 ## Current Todo Backlog
 
-The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). The next P0 work is automated regression coverage, Bilibili favorites/series UX, restricted-content diagnostics, and output-integrity checks.
+The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). P0 stability and verifiability work is complete; the next work starts at P1 daily-use experience.
 
 Packaging decision: T-108 app-managed runtime must be completed before T-109 release packaging. A clean Mac without conda or Homebrew should run the main workflows after in-app initialization; LLM/OCR remains API-configured and ASR model assets are managed separately.
