@@ -86,6 +86,39 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def format_duration_seconds(value: str | float | int) -> str:
+    try:
+        total = max(0, int(float(value) + 0.5))
+    except (TypeError, ValueError):
+        return ""
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}小时{minutes}分{seconds}秒"
+    return f"{minutes}分{seconds}秒"
+
+
+def probe_media_duration(path: pathlib.Path) -> str:
+    commands = [
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        ["ffprobe", "-v", "error", "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        values: list[float] = []
+        for line in result.stdout.splitlines():
+            try:
+                values.append(float(line.strip()))
+            except ValueError:
+                continue
+        if values:
+            return format_duration_seconds(max(values))
+    return ""
+
+
 def parse_bool(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
@@ -325,6 +358,18 @@ def postprocess_video_note(path: pathlib.Path, cfg: dict[str, str], extra: dict[
     if extra:
         fields.update({key: value for key, value in extra.items() if value})
 
+    if fields.get("source_type") == "local-video" and fields.get("duration", "") in {"", "未知"}:
+        source_path = pathlib.Path(fields.get("source_path", ""))
+        duration = probe_media_duration(source_path) if source_path.is_file() else ""
+        if duration:
+            fields["duration"] = duration
+            body = re.sub(
+                r"(?m)^>\s*\*\*视频时长\*\*：.*$",
+                f"> **视频时长**：{duration}",
+                body,
+                count=1,
+            )
+
     source_type = fields.get("source_type", "video")
     tags = ["video", f"source/{source_type}", "status/draft"]
     source_ref = fields.get("source_url") or fields.get("source_path") or rel(path)
@@ -419,6 +464,56 @@ def postprocess_video_notes(paths: list[str], cfg: dict[str, str], extras: dict[
             print(f"frontmatter: {rel(path)}")
     if manifest_enabled and manifest_path is not None:
         save_manifest(manifest_path, manifest)
+
+
+def repair_local_video_note_duration(path: pathlib.Path) -> str:
+    markdown = path.read_text(encoding="utf-8", errors="replace")
+    meta, body = parse_frontmatter(markdown)
+    fields = parse_markdown_metadata(body)
+    if fields.get("source_type") != "local-video" or fields.get("duration", "") not in {"", "未知"}:
+        return ""
+    source_path = pathlib.Path(fields.get("source_path", ""))
+    if not source_path.is_file():
+        return ""
+    duration = probe_media_duration(source_path)
+    if not duration:
+        return ""
+
+    updated_body = re.sub(
+        r"(?m)^>\s*\*\*视频时长\*\*：.*$",
+        f"> **视频时长**：{duration}",
+        body,
+        count=1,
+    )
+    if meta:
+        meta["duration"] = duration
+        updated = "\n\n".join([frontmatter(meta), updated_body]).rstrip() + "\n"
+    else:
+        updated = updated_body.rstrip() + "\n"
+    path.write_text(updated, encoding="utf-8")
+    return duration
+
+
+def repair_local_video_durations(root: pathlib.Path) -> int:
+    if not root.exists():
+        raise FileNotFoundError(root)
+    paths = [root] if root.is_file() else sorted(root.rglob("*.md"))
+    repaired = 0
+    missing_source = 0
+    for path in paths:
+        markdown = path.read_text(encoding="utf-8", errors="replace")
+        fields = parse_markdown_metadata(parse_frontmatter(markdown)[1])
+        if fields.get("source_type") != "local-video" or fields.get("duration", "") not in {"", "未知"}:
+            continue
+        duration = repair_local_video_note_duration(path)
+        if duration:
+            repaired += 1
+            print(f"duration repaired: {path} -> {duration}")
+        else:
+            missing_source += 1
+            print(f"duration skipped (source unavailable): {path}", file=sys.stderr)
+    print(f"duration repair done repaired={repaired} unavailable={missing_source}")
+    return 0 if missing_source == 0 else 1
 
 
 def append_processed(avid: str, cfg: dict[str, str]) -> None:
@@ -571,6 +666,7 @@ def main() -> int:
     parser.add_argument("--local-dir", help="process a local video directory")
     parser.add_argument("--recursive", action="store_true", help="recurse through local directory")
     parser.add_argument("--summary-only", action="store_true", help="fill summaries for existing Markdown outputs")
+    parser.add_argument("--repair-local-durations", help="repair unknown durations in existing local-video Markdown files")
     parser.add_argument("--limit", type=int, default=0, help="in favorite mode, process only the first N new videos")
     parser.add_argument("--no-video-manifest", action="store_true", help="skip writing indexes/video-manifest.json after postprocessing")
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing Markdown outputs")
@@ -586,12 +682,19 @@ def main() -> int:
     project_dir = ROOT
     script_dir = ROOT / "scripts" / "bilibili"
 
-    selected = sum(bool(item) for item in [args.favorite, args.url, args.local_file, args.local_dir, args.summary_only])
+    selected = sum(bool(item) for item in [args.favorite, args.url, args.local_file, args.local_dir, args.summary_only, args.repair_local_durations])
     if selected != 1:
         parser.error("choose exactly one of --favorite, --url, --local-file, --local-dir, --summary-only")
 
     if args.favorite and args.limit > 0:
         return run_favorite_limited(project_dir, cfg, args.limit, args.dry_run)
+
+    if args.repair_local_durations:
+        repair_root = pathlib.Path(os.path.expanduser(os.path.expandvars(args.repair_local_durations))).resolve()
+        print(f"repair local durations: {repair_root}")
+        if args.dry_run:
+            return 0
+        return repair_local_video_durations(repair_root)
 
     if args.url:
         if args.sync_env:

@@ -119,6 +119,36 @@ run_python() {
     fi
 }
 
+format_media_duration() {
+    local raw="${1:-}"
+    awk -v raw="$raw" 'BEGIN {
+        if (raw !~ /^[0-9]+([.][0-9]+)?$/) {
+            print "未知"
+            exit
+        }
+        total = int(raw + 0.5)
+        hours = int(total / 3600)
+        minutes = int((total % 3600) / 60)
+        seconds = total % 60
+        if (hours > 0) {
+            printf "%d小时%d分%d秒\n", hours, minutes, seconds
+        } else {
+            printf "%d分%d秒\n", minutes, seconds
+        }
+    }'
+}
+
+probe_media_duration() {
+    local file_path="$1"
+    local raw=""
+    raw=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file_path" 2>/dev/null | head -1 || true)
+    if [[ ! "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        raw=$(ffprobe -v error -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 "$file_path" 2>/dev/null \
+            | awk '/^[0-9]+([.][0-9]+)?$/ { if ($1 > max) max = $1 } END { if (max > 0) print max }' || true)
+    fi
+    format_media_duration "$raw"
+}
+
 # ===== 清理临时文件 =====
 cleanup_temp() {
     rm -f "$CACHE_DIR"/bilibili_subtitle*.srt "$CACHE_DIR"/bilibili_ai_subtitle*.srt \
@@ -676,6 +706,10 @@ transcribe_local_file() {
 
     echo "🎬 本地文件: $file_label"
 
+    local DURATION
+    DURATION=$(probe_media_duration "$file_path")
+    echo "   ⏱️  $file_label: 时长 $DURATION"
+
     # 提取音频（如果是视频文件）
     local ext="${filename##*.}"
     ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
@@ -726,7 +760,7 @@ transcribe_local_file() {
         if [ -n "$subtitle_text" ]; then
             local subtitle_output="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
             echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
-            write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "本地SRT字幕" "$subtitle_text"
+            write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "本地SRT字幕" "$subtitle_text"
             echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
             echo "$subtitle_output"
             return 0
@@ -814,7 +848,7 @@ transcribe_local_file() {
     local OUTPUT_FILE="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
 
     echo "   📝 $file_label: 写入 Markdown: $(basename "$OUTPUT_FILE")"
-    write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "未知" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
+    write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
 
     echo "   ✅ $file_label: 转录完成 → $(basename "$OUTPUT_FILE")"
     echo "$OUTPUT_FILE"

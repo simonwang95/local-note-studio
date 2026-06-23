@@ -35,6 +35,7 @@ REQUIRED_PYTHON_PACKAGES = {
 REQUIRED_COMMANDS = {
     "yt-dlp": "pip install yt-dlp",
     "ffmpeg": "Install ffmpeg with Homebrew (`brew install ffmpeg`) or conda.",
+    "ffprobe": "Install ffmpeg with Homebrew (`brew install ffmpeg`) or conda.",
 }
 
 OPTIONAL_PYTHON_PACKAGES = {
@@ -352,7 +353,7 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         lines.append(status_line(ok, f"Python package `{package}`", first_line(output), hint))
 
     for command, hint in REQUIRED_COMMANDS.items():
-        version_args = ("-version",) if command == "ffmpeg" else ("--version",)
+        version_args = ("-version",) if command in {"ffmpeg", "ffprobe"} else ("--version",)
         ok, output = probe(tool_cmd(req, command, *version_args), env)
         required_ok = required_ok and ok
         lines.append(status_line(ok, f"Command `{command}`", first_line(output), hint))

@@ -552,6 +552,14 @@ conda install -n course-whisper -c conda-forge pandoc
 
 本地视频/音频使用和 B站单链接相同的笔记结构，也支持“关键帧图文笔记”和“保留原始字幕”。如果媒体文件旁边已有同名 `.srt`，可以选择“同目录 SRT 字幕优先”；如果字幕质量差，可以切换为“ASR 语音转写优先”。
 
+本地媒体时长由 `ffprobe` 直接读取，统一显示为“X分Y秒”或“X小时Y分Z秒”。旧版本生成的笔记如果仍显示“未知”，可以只修复时长而不重跑转录和 Qwen：
+
+```bash
+conda run --no-capture-output -n course-whisper \
+  python3 worker/scripts/run_bilibili_transcript.py \
+  --repair-local-durations "/Users/xxx/Notes/LocalVideos"
+```
+
 目录输入默认只扫描当前目录。需要扫描子目录时，勾选“递归扫描目录”。
 
 ## 6. 常见问题
