@@ -38,6 +38,7 @@ DEFAULTS = {
     "QWEN_QUICKREAD_RETRY_DELAY": "5",
     "QWEN_QUICKREAD_COOLDOWN_DELAY": "",
     "QWEN_QUICKREAD_TRANSLATION_CHARS": "16000",
+    "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
 }
 
 
@@ -326,7 +327,7 @@ def build_manual_prompt(title: str, source_path: str) -> str:
 1. 用中文输出 Markdown，不要输出思考过程。
 2. 先做翻译式速读，保留论文核心问题、方法、实验、结论、局限和关键术语。
 3. 必须包含这些二级标题：## 中文速读、## 一句话概括、## 速读摘要、## 思维导图、## 值得精读的理由、## 待核验、## 全文翻译。
-4. ## 思维导图 使用纯 Mermaid mindmap 代码块，只保留层级结构；不要输出 %%{init}%%、theme、style、classDef、class、linkStyle、颜色、图标或 HTML 样式。
+4. ## 思维导图 使用纯 Mermaid mindmap 代码块，只保留层级结构；不要输出 %%{{init}}%%、theme、style、classDef、class、linkStyle、颜色、图标或 HTML 样式。
 5. ## 全文翻译 必须放在文件末尾，按原文顺序保留可读中文翻译；公式、表格、图示或引用不确定时，用 [公式待核验]、[表格待核验]、[图示待核验] 标注，不要编造。
 ```"""
 
@@ -455,27 +456,31 @@ def write_quickread(
     content += body.strip() + "\n"
     out_path.write_text(content, encoding="utf-8")
 
-    manifest_path = ROOT / cfg["INDEX_DIR"] / "quickread-manifest.json"
-    manifest = load_manifest(manifest_path)
-    update_manifest(
-        manifest,
-        {
-            "source_path": rel(source),
-            "source_hash": source_hash,
-            "output_path": rel(out_path),
-            "title": title,
-            "mode": mode,
-            "status": status,
-            "model": cfg["DEFAULT_LLM_MODEL"],
-            "created": meta["created"],
-            "updated": meta["updated"],
-            "page_count": page_count,
-            "input_chars": input_chars,
-            "used_chars": len(text),
-            "truncated": truncated,
-        },
-    )
-    save_manifest(manifest_path, manifest)
+    manifest_enabled = str(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")).strip().lower() not in {"1", "true", "yes", "on"}
+    if manifest_enabled:
+        manifest_path = ROOT / cfg["INDEX_DIR"] / "quickread-manifest.json"
+        manifest = load_manifest(manifest_path)
+        update_manifest(
+            manifest,
+            {
+                "source_path": rel(source),
+                "source_hash": source_hash,
+                "output_path": rel(out_path),
+                "title": title,
+                "mode": mode,
+                "status": status,
+                "model": cfg["DEFAULT_LLM_MODEL"],
+                "created": meta["created"],
+                "updated": meta["updated"],
+                "page_count": page_count,
+                "input_chars": input_chars,
+                "used_chars": len(text),
+                "truncated": truncated,
+            },
+        )
+        save_manifest(manifest_path, manifest)
+    else:
+        print("manifest disabled (incognito)")
     print(f"wrote: {rel(out_path)}")
     return out_path
 

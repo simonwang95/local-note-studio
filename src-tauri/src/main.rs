@@ -1,4 +1,6 @@
 use serde::Serialize;
+use serde_json::Value;
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -19,6 +21,9 @@ struct WorkerState {
 struct WorkerLogPayload {
     line: String,
 }
+
+const MANAGED_RUNTIME_VERSION: &str = "2026.06-py311";
+const PYTHON_STANDALONE_TAG: &str = "20260610";
 
 #[tauri::command]
 async fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> {
@@ -50,6 +55,44 @@ fn cancel_worker(
     stop_worker(&state)
 }
 
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err(format!("Path does not exist: {}", target.display()));
+    }
+    Command::new("open")
+        .arg(&target)
+        .status()
+        .map_err(|err| err.to_string())?
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("Failed to open {}", target.display()))
+}
+
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err(format!("Path does not exist: {}", target.display()));
+    }
+    Command::new("open")
+        .arg("-R")
+        .arg(&target)
+        .status()
+        .map_err(|err| err.to_string())?
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("Failed to reveal {}", target.display()))
+}
+
+#[tauri::command]
+async fn manage_runtime(app: tauri::AppHandle, action: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || manage_runtime_blocking(&app, &action))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
 fn stop_worker(state: &WorkerState) -> Result<bool, String> {
     state.cancel_requested.store(true, Ordering::SeqCst);
     let mut child_guard = state.child.lock().map_err(|err| err.to_string())?;
@@ -72,9 +115,10 @@ fn run_worker_blocking(
         .resource_dir()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let worker = resolve_worker_path(resource_dir)?;
-    let python =
-        std::env::var("LOCAL_NOTE_STUDIO_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let output = Command::new(python)
+    let python = resolve_python(&app, &request)?;
+    let mut command = Command::new(python);
+    configure_worker_command(&app, &mut command)?;
+    let output = command
         .arg(worker)
         .arg("--request-json")
         .arg(request)
@@ -111,9 +155,10 @@ fn run_worker_streaming(
         .resource_dir()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let worker = resolve_worker_path(resource_dir)?;
-    let python =
-        std::env::var("LOCAL_NOTE_STUDIO_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let mut child = Command::new(python)
+    let python = resolve_python(&app, &request)?;
+    let mut command = Command::new(python);
+    configure_worker_command(&app, &mut command)?;
+    let mut child = command
         .arg(worker)
         .arg("--request-json")
         .arg(request)
@@ -198,6 +243,362 @@ fn emit_log(app: &tauri::AppHandle, line: &str) {
     );
 }
 
+fn app_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return app
+            .path()
+            .home_dir()
+            .map(|home| home.join("Library/Application Support/Local Note Studio"))
+            .map_err(|err| err.to_string());
+    }
+    #[allow(unreachable_code)]
+    app.path().app_data_dir().map_err(|err| err.to_string())
+}
+
+fn configure_worker_command(app: &tauri::AppHandle, command: &mut Command) -> Result<(), String> {
+    let root = app_data_root(app)?;
+    let state_dir = root.join("state");
+    let index_dir = state_dir.join("indexes");
+    fs::create_dir_all(&index_dir).map_err(|err| err.to_string())?;
+    command
+        .env("LOCAL_NOTE_STUDIO_STATE_DIR", &state_dir)
+        .env("INDEX_DIR", &index_dir)
+        .env("BILIBILI_STATE_DIR", index_dir.join("bilibili-state"))
+        .env("OCR_CHECKPOINT_DIR", state_dir.join("ocr-checkpoints"));
+    let managed_bin = root.join("runtime").join("current").join("bin");
+    if managed_bin.exists() {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![managed_bin];
+        paths.extend(std::env::split_paths(&inherited));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_python(app: &tauri::AppHandle, request: &str) -> Result<PathBuf, String> {
+    let backend = serde_json::from_str::<Value>(request)
+        .ok()
+        .and_then(|value| value.get("runtime_backend").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| "conda".to_string());
+    if backend == "managed" {
+        let root = app_data_root(app)?;
+        let python = root.join("runtime/current/bin/python3");
+        if !python.exists() {
+            return Err("应用托管环境尚未安装；请先点击“安装/修复”。".to_string());
+        }
+        let task = serde_json::from_str::<Value>(request)
+            .ok()
+            .and_then(|value| value.get("task").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default();
+        if task == "epub-export" {
+            install_managed_pandoc(&root.join("runtime"), &root.join("runtime/current/bin"))?;
+        }
+        return Ok(python);
+    }
+    Ok(PathBuf::from(
+        std::env::var("LOCAL_NOTE_STUDIO_PYTHON").unwrap_or_else(|_| "python3".to_string()),
+    ))
+}
+
+fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<String, String> {
+    let root = app_data_root(app)?;
+    let runtime_root = root.join("runtime");
+    let current = runtime_root.join("current");
+    if action == "status" {
+        return Ok(runtime_status_text(&root));
+    }
+    if action == "remove" {
+        if runtime_root.exists() {
+            fs::remove_dir_all(&runtime_root).map_err(|err| err.to_string())?;
+        }
+        return Ok(format!("托管环境已移除：{}\n用户笔记、任务历史和模型目录未删除。\n", runtime_root.display()));
+    }
+    if action != "install" {
+        return Err(format!("Unsupported runtime action: {action}"));
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let worker = resolve_worker_path(resource_dir)?;
+    let requirements = worker
+        .parent()
+        .ok_or_else(|| "Cannot resolve worker directory".to_string())?
+        .join("requirements-managed.lock");
+    let version_dir = runtime_root.join("versions").join(MANAGED_RUNTIME_VERSION);
+    fs::create_dir_all(version_dir.parent().unwrap_or(&runtime_root)).map_err(|err| err.to_string())?;
+
+    if !version_dir.join("bin/python3").exists() {
+        install_standalone_python(&runtime_root, &version_dir)?;
+    }
+    let ensurepip = Command::new(version_dir.join("bin/python3"))
+        .args(["-m", "ensurepip", "--upgrade"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !ensurepip.status.success() {
+        return Err(String::from_utf8_lossy(&ensurepip.stderr).to_string());
+    }
+    let pip_output = Command::new(version_dir.join("bin/python3"))
+        .args(["-m", "pip", "install", "--disable-pip-version-check", "-r"])
+        .arg(&requirements)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !pip_output.status.success() {
+        return Err(format!(
+            "托管依赖安装失败：\n{}{}",
+            String::from_utf8_lossy(&pip_output.stdout),
+            String::from_utf8_lossy(&pip_output.stderr)
+        ));
+    }
+    install_managed_media_tools(&runtime_root, &version_dir.join("bin"))?;
+
+    if current.exists() {
+        fs::remove_file(&current).or_else(|_| fs::remove_dir_all(&current)).map_err(|err| err.to_string())?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&version_dir, &current).map_err(|err| err.to_string())?;
+    fs::create_dir_all(root.join("models")).map_err(|err| err.to_string())?;
+    fs::create_dir_all(root.join("tools")).map_err(|err| err.to_string())?;
+    fs::create_dir_all(root.join("state")).map_err(|err| err.to_string())?;
+    fs::write(
+        root.join("state/runtime-version.json"),
+        format!("{{\"version\":\"{MANAGED_RUNTIME_VERSION}\",\"active\":true}}\n"),
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(runtime_status_text(&root))
+}
+
+fn install_standalone_python(runtime_root: &std::path::Path, version_dir: &std::path::Path) -> Result<(), String> {
+    let (arch, checksum) = match std::env::consts::ARCH {
+        "aarch64" => ("aarch64", "8c56f1f59142e0f9f8861ad897bdfd97fd84403afa7b3d8b0f33b208ec471355"),
+        "x86_64" => ("x86_64", "8cd3878c656ba1698314cbcb65f78df4c37b7c8eabff958558115c6db11adb3d"),
+        other => return Err(format!("暂不支持的 Mac 架构：{other}")),
+    };
+    let file_name = format!(
+        "cpython-3.11.15+{PYTHON_STANDALONE_TAG}-{arch}-apple-darwin-install_only_stripped.tar.gz"
+    );
+    let encoded_name = file_name.replace('+', "%2B");
+    let url = format!(
+        "https://github.com/astral-sh/python-build-standalone/releases/download/{PYTHON_STANDALONE_TAG}/{encoded_name}"
+    );
+    let downloads = runtime_root.join("downloads");
+    let archive = downloads.join(&file_name);
+    let staging = runtime_root.join(format!(".installing-{MANAGED_RUNTIME_VERSION}"));
+    fs::create_dir_all(&downloads).map_err(|err| err.to_string())?;
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
+
+    let download = Command::new("curl")
+        .args(["-L", "--fail", "--show-error", "--retry", "3", "-o"])
+        .arg(&archive)
+        .arg(&url)
+        .output()
+        .map_err(|err| format!("无法启动系统 curl：{err}"))?;
+    if !download.status.success() {
+        return Err(format!("Python 运行时下载失败：{}", String::from_utf8_lossy(&download.stderr)));
+    }
+    let digest = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(&archive)
+        .output()
+        .map_err(|err| err.to_string())?;
+    let actual = String::from_utf8_lossy(&digest.stdout).split_whitespace().next().unwrap_or("").to_string();
+    if !digest.status.success() || actual != checksum {
+        let _ = fs::remove_file(&archive);
+        return Err(format!("Python 运行时 SHA-256 校验失败：期望 {checksum}，实际 {actual}"));
+    }
+    let extract = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staging)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !extract.status.success() {
+        return Err(format!("Python 运行时解压失败：{}", String::from_utf8_lossy(&extract.stderr)));
+    }
+    let extracted = staging.join("python");
+    if !extracted.join("bin/python3").exists() {
+        return Err("Python 运行时包结构异常：缺少 python/bin/python3".to_string());
+    }
+    if version_dir.exists() {
+        fs::remove_dir_all(version_dir).map_err(|err| err.to_string())?;
+    }
+    fs::rename(&extracted, version_dir).map_err(|err| err.to_string())?;
+    let _ = fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+fn install_managed_media_tools(runtime_root: &std::path::Path, bin_dir: &std::path::Path) -> Result<(), String> {
+    let tools = [
+        (
+            "ffmpeg",
+            "https://evermeet.cx/ffmpeg/ffmpeg-8.1.2.zip",
+            "e91df72a1ee7c26606f90dd2dd4dcccc6a75140ff9ea6fdd50faae828b82ba69",
+        ),
+        (
+            "ffprobe",
+            "https://evermeet.cx/ffmpeg/ffprobe-8.1.2.zip",
+            "399b93f0b9862f69767afa343e90c2f48d7e7958cadbb6deb76a012d0e3b7ce3",
+        ),
+    ];
+    for (name, url, checksum) in tools {
+        install_zip_tool(runtime_root, bin_dir, name, url, checksum)?;
+    }
+    Ok(())
+}
+
+fn install_managed_pandoc(runtime_root: &std::path::Path, bin_dir: &std::path::Path) -> Result<(), String> {
+    let (url, checksum) = match std::env::consts::ARCH {
+        "aarch64" => (
+            "https://github.com/jgm/pandoc/releases/download/3.10/pandoc-3.10-arm64-macOS.zip",
+            "d9cad01d96ae774a0dc8c8c45bb1ad3e4c5ff2cc2e24f45958f5f9b7974aee34",
+        ),
+        "x86_64" => (
+            "https://github.com/jgm/pandoc/releases/download/3.10/pandoc-3.10-x86_64-macOS.zip",
+            "6334f4d9af7c9e37e761dfad56fa5507685f6d29724ebf31c4be6d5c654a3161",
+        ),
+        other => return Err(format!("暂不支持的 Mac 架构：{other}")),
+    };
+    install_zip_tool(runtime_root, bin_dir, "pandoc", url, checksum)
+}
+
+fn install_zip_tool(
+    runtime_root: &std::path::Path,
+    bin_dir: &std::path::Path,
+    name: &str,
+    url: &str,
+    checksum: &str,
+) -> Result<(), String> {
+    let target = bin_dir.join(name);
+    if target.exists() {
+        return Ok(());
+    }
+    let downloads = runtime_root.join("downloads");
+    let archive = downloads.join(format!("{name}.zip"));
+    let staging = runtime_root.join(format!(".installing-{name}"));
+    fs::create_dir_all(&downloads).map_err(|err| err.to_string())?;
+    fs::create_dir_all(bin_dir).map_err(|err| err.to_string())?;
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
+    let download = Command::new("curl")
+        .args(["-L", "--fail", "--show-error", "--retry", "3", "-o"])
+        .arg(&archive)
+        .arg(url)
+        .output()
+        .map_err(|err| format!("无法启动系统 curl：{err}"))?;
+    if !download.status.success() {
+        return Err(format!("{name} 下载失败：{}", String::from_utf8_lossy(&download.stderr)));
+    }
+    let digest = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(&archive)
+        .output()
+        .map_err(|err| err.to_string())?;
+    let actual = String::from_utf8_lossy(&digest.stdout).split_whitespace().next().unwrap_or("").to_string();
+    if !digest.status.success() || actual != checksum {
+        let _ = fs::remove_file(&archive);
+        return Err(format!("{name} SHA-256 校验失败：期望 {checksum}，实际 {actual}"));
+    }
+    let extract = Command::new("ditto")
+        .args(["-x", "-k"])
+        .arg(&archive)
+        .arg(&staging)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !extract.status.success() {
+        return Err(format!("{name} 解压失败：{}", String::from_utf8_lossy(&extract.stderr)));
+    }
+    let extracted = find_named_file(&staging, name).ok_or_else(|| format!("{name} 压缩包中缺少可执行文件"))?;
+    fs::copy(&extracted, &target).map_err(|err| err.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).map_err(|err| err.to_string())?;
+    }
+    let _ = fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+fn find_named_file(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_file() && path.file_name().and_then(|value| value.to_str()) == Some(name) {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_named_file(&path, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn runtime_status_text(root: &std::path::Path) -> String {
+    let python = root.join("runtime/current/bin/python3");
+    let bin = root.join("runtime/current/bin");
+    let tools = ["python3", "yt-dlp", "ffmpeg", "ffprobe", "pandoc"];
+    let mut lines = vec![
+        format!("托管环境目录：{}", root.join("runtime").display()),
+        format!("版本：{MANAGED_RUNTIME_VERSION}"),
+        format!("状态：{}", if python.exists() { "已安装" } else { "未安装" }),
+        format!("磁盘占用：{}", human_bytes(directory_size(&root.join("runtime")))),
+        "".to_string(),
+        "组件：".to_string(),
+    ];
+    for tool in tools {
+        let ready = bin.join(tool).exists() || (tool != "python3" && command_available(tool));
+        lines.push(format!("- {} {tool}", if ready { "[OK]" } else { "[MISSING]" }));
+    }
+    lines.push("".to_string());
+    lines.push(format!("模型目录：{}", root.join("models").display()));
+    lines.push("pandoc 为 EPUB 功能按需组件；ASR 模型与运行时分开管理。".to_string());
+    lines.join("\n") + "\n"
+}
+
+fn directory_size(path: &std::path::Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        return metadata.len();
+    }
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| directory_size(&entry.path()))
+        .sum()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+fn command_available(name: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", "command -v \"$1\" >/dev/null 2>&1", "sh", name])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn resolve_worker_path(resource_dir: PathBuf) -> Result<PathBuf, String> {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -214,6 +615,10 @@ fn resolve_worker_path(resource_dir: PathBuf) -> Result<PathBuf, String> {
             .map(|path| path.join("worker").join("local_note_studio_worker.py"))
             .unwrap_or_else(|| PathBuf::from("worker").join("local_note_studio_worker.py")),
         resource_dir
+            .join("worker")
+            .join("local_note_studio_worker.py"),
+        resource_dir
+            .join("_up_")
             .join("worker")
             .join("local_note_studio_worker.py"),
     ];
@@ -234,7 +639,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             run_worker,
             run_worker_stream,
-            cancel_worker
+            cancel_worker,
+            open_path,
+            reveal_path,
+            manage_runtime
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Local Note Studio");

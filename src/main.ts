@@ -1,6 +1,17 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
+import {
+  createHistoryEntry,
+  loadTaskHistory,
+  progressFromLine,
+  saveTaskHistory,
+  taskResultFromLog,
+  upsertHistoryEntry,
+  type ProgressEvent,
+  type TaskHistoryEntry,
+  type TaskHistoryStatus,
+} from "./p1";
 import "./styles.css";
 
 type TaskType =
@@ -18,11 +29,13 @@ type TaskType =
 type SubtitleStrategy = "yt-dlp" | "web" | "asr";
 
 type SavedSettings = {
+  runtimeBackend: "managed" | "conda";
   condaEnv: string;
   pythonBin: string;
   apiBase: string;
   apiKey: string;
   model: string;
+  asrModel: string;
   cookies: string;
   chromeProfile: string;
   outputRoot: string;
@@ -36,12 +49,16 @@ type SavedSettings = {
   keepOriginalSubtitles: boolean;
   recursiveSearch: boolean;
   overwriteOutputs: boolean;
+  incognitoMode: boolean;
   stockTerms: boolean;
   enableOcr: boolean;
-};
-
-type TauriWindow = Window & {
-  __TAURI_INTERNALS__?: unknown;
+  webCaptureMode: "static" | "browser";
+  browserExecutable: string;
+  timeoutSeconds: string;
+  retryCount: string;
+  cooldownDelay: string;
+  chunkChars: string;
+  ocrResume: boolean;
 };
 
 type WorkerLogPayload = {
@@ -53,6 +70,8 @@ class TauriRuntimeUnavailableError extends Error {}
 const settingsKey = "local-note-studio.settings.v1";
 let isWorkerRunning = false;
 let workerLogListenerReady: Promise<void> | null = null;
+let taskHistory = loadTaskHistory();
+let activeHistoryEntry: TaskHistoryEntry | null = null;
 
 const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
@@ -73,7 +92,7 @@ const taskHints: Record<TaskType, string> = {
   "bilibili-opus": "输入 B站动态或充电动态链接。会使用 B站 Cookie 调接口抓取正文，账号无权限时会明确报错。",
   "bilibili-up-opus": "输入 UP 主空间图文页链接或 UID。程序会分页读取、过滤视频动态，并逐篇下载图片、调用 Qwen 整理；处理数量为 0 时读取全部图文。",
   "web-url": "输入微信公众号文章或普通网页 URL。Qwen 整理会插入原文之上，并保留完整原文。",
-  "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html 或图片文件。支持扫描版 PDF 的 OCR 回退；抽取后会调用 Qwen 整理，并在末尾保留原文。",
+  "source-file": "输入本地 .doc、.docx、.pdf、.pptx、.xlsx/.csv、.html、图片文件或包含这些文件的目录。批量图片和扫描 PDF 会显示文件/页进度，并可从检查点续跑；抽取后调用 Qwen 整理并保留原文。",
   "ai-chat": "输入 LM Studio 导出的 .conversation.json 文件，转换为 Markdown 对话笔记。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
   "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
@@ -124,11 +143,13 @@ const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy;
 };
 
 const defaults: SavedSettings = {
+  runtimeBackend: "conda",
   condaEnv: "course-whisper",
   pythonBin: "python3",
   apiBase: "http://127.0.0.1:1234/v1",
   apiKey: "lm-studio",
   model: "qwen3.6-35b-a3b-nvfp4",
+  asrModel: "",
   cookies: "",
   chromeProfile: "",
   outputRoot: "",
@@ -142,8 +163,16 @@ const defaults: SavedSettings = {
   keepOriginalSubtitles: true,
   recursiveSearch: false,
   overwriteOutputs: false,
+  incognitoMode: false,
   stockTerms: false,
   enableOcr: false,
+  webCaptureMode: "static",
+  browserExecutable: "",
+  timeoutSeconds: "",
+  retryCount: "",
+  cooldownDelay: "",
+  chunkChars: "",
+  ocrResume: true,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -179,6 +208,13 @@ app.innerHTML = `
         </div>
         <div class="form-grid compact">
           <label>
+            运行时后端
+            <select id="runtimeBackend">
+              <option value="managed" ${savedSettings.runtimeBackend === "managed" ? "selected" : ""}>应用托管环境</option>
+              <option value="conda" ${savedSettings.runtimeBackend === "conda" ? "selected" : ""}>现有 Conda / Python（高级）</option>
+            </select>
+          </label>
+          <label>
             Conda 环境
             <input id="condaEnv" value="${escapeHtml(savedSettings.condaEnv)}" placeholder="course-whisper" />
           </label>
@@ -202,6 +238,21 @@ app.innerHTML = `
           <label>
             模型
             <input id="model" value="${escapeHtml(savedSettings.model)}" />
+          </label>
+          <label>
+            ASR 模型目录（可选）
+            <div class="input-row">
+              <input id="asrModel" value="${escapeHtml(savedSettings.asrModel)}" placeholder="选择已有 Whisper 模型" />
+              <button id="chooseAsrModel" type="button" class="secondary compact-button">选择</button>
+            </div>
+          </label>
+          <label>
+            托管环境
+            <div class="input-row runtime-row">
+              <button id="runtimeStatus" type="button" class="secondary compact-button">查看状态</button>
+              <button id="runtimeInstall" type="button" class="secondary compact-button">安装/修复</button>
+              <button id="runtimeRemove" type="button" class="secondary compact-button">卸载</button>
+            </div>
           </label>
           <label>
             B站 Cookie 文件
@@ -325,6 +376,11 @@ app.innerHTML = `
             <span>覆盖同名文件</span>
             <input id="overwriteOutputs" type="checkbox" ${savedSettings.overwriteOutputs ? "checked" : ""} />
           </label>
+          <label class="checkbox-field incognito-field">
+            <span>隐身模式</span>
+            <input id="incognitoMode" type="checkbox" ${savedSettings.incognitoMode ? "checked" : ""} />
+          </label>
+          <p class="field-note full-row incognito-note">开启后仍会生成笔记并保留任务历史，但不会读取或写入 source/video/quickread Manifest、关键帧 Manifest、B站已处理列表和批量失败状态。</p>
           <label id="stockTermsField" class="checkbox-field">
             <span>A股术语校验</span>
             <input id="stockTerms" type="checkbox" ${savedSettings.stockTerms ? "checked" : ""} />
@@ -332,6 +388,21 @@ app.innerHTML = `
           <label id="enableOcrField" class="checkbox-field hidden">
             <span>启用 OCR</span>
             <input id="enableOcr" type="checkbox" ${savedSettings.enableOcr ? "checked" : ""} />
+          </label>
+          <label id="ocrResumeField" class="checkbox-field hidden">
+            <span>OCR 中断后续跑</span>
+            <input id="ocrResume" type="checkbox" ${savedSettings.ocrResume ? "checked" : ""} />
+          </label>
+          <label id="webCaptureModeField" class="hidden">
+            网页采集方式
+            <select id="webCaptureMode">
+              <option value="static" ${savedSettings.webCaptureMode === "static" ? "selected" : ""}>静态 HTTP（不读取浏览器 Cookie）</option>
+              <option value="browser" ${savedSettings.webCaptureMode === "browser" ? "selected" : ""}>指定浏览器会话（登录/JS 页面）</option>
+            </select>
+          </label>
+          <label id="browserExecutableField" class="hidden">
+            Chrome / Chromium 可执行文件（可选）
+            <input id="browserExecutable" value="${escapeHtml(savedSettings.browserExecutable)}" placeholder="留空自动查找 Google Chrome" />
           </label>
         </div>
 
@@ -344,6 +415,46 @@ app.innerHTML = `
           </div>
         </label>
         <p id="taskHint" class="field-note"></p>
+        <details class="advanced-options">
+          <summary>长任务参数覆盖</summary>
+          <div class="form-grid compact advanced-grid">
+            <label>超时（秒）<input id="timeoutSeconds" type="number" min="0" value="${escapeHtml(savedSettings.timeoutSeconds)}" placeholder="使用稳定默认值" /></label>
+            <label>重试次数<input id="retryCount" type="number" min="0" value="${escapeHtml(savedSettings.retryCount)}" placeholder="使用稳定默认值" /></label>
+            <label>模型冷却（秒）<input id="cooldownDelay" type="number" min="0" value="${escapeHtml(savedSettings.cooldownDelay)}" placeholder="使用稳定默认值" /></label>
+            <label>分块字符数<input id="chunkChars" type="number" min="0" value="${escapeHtml(savedSettings.chunkChars)}" placeholder="使用稳定默认值" /></label>
+          </div>
+        </details>
+      </section>
+
+      <section id="progressPanel" class="panel hidden">
+        <div class="panel-header compact-header"><h2>任务进度</h2><span id="progressText">等待进度事件</span></div>
+        <progress id="taskProgress" max="100" value="0"></progress>
+      </section>
+
+      <section id="resultPanel" class="panel">
+        <div class="panel-header">
+          <div><span class="step">4</span><h2 id="resultTitle">本次输出</h2></div>
+          <button id="copyOutputDir" type="button" class="secondary">复制输出目录</button>
+        </div>
+        <div id="resultList" class="result-list"><p class="empty-state">任务完成后会在这里列出所有新增或更新的文件。</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div><span class="step">5</span><h2>处理记录与文件状态</h2></div>
+          <button id="refreshManifests" type="button" class="secondary">重新检查</button>
+        </div>
+        <p class="manifest-help">这是程序用于避免重复处理的本地记录。通常只需关注“处理失败”和“输出缺失”；“本次跳过”表示文件已经存在，因此没有重复生成。</p>
+        <div id="manifestSummary" class="summary-chips"></div>
+        <div id="manifestList" class="manifest-list"><p class="empty-state">点击“重新检查”，查看视频、文档、论文和 B站批次的处理记录。</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div><span class="step">6</span><h2>任务历史与恢复</h2></div>
+          <button id="clearHistory" type="button" class="secondary">清空历史</button>
+        </div>
+        <div id="historyList" class="history-list"></div>
       </section>
 
       <section class="log-panel">
@@ -362,9 +473,15 @@ const outputRoot = document.querySelector<HTMLInputElement>("#outputRoot");
 const outputDir = document.querySelector<HTMLInputElement>("#outputDir");
 const taskHint = document.querySelector<HTMLParagraphElement>("#taskHint");
 
-hydrateTaskControls();
-hydrateTaskOutput();
-bindSettingsPersistence();
+try {
+  hydrateTaskControls();
+  hydrateTaskOutput();
+  bindSettingsPersistence();
+  renderHistory();
+} catch (error) {
+  setState("界面数据恢复失败");
+  setOutput(`本地界面数据恢复失败，但依赖检查和任务按钮仍可使用。\n${errorMessage(error)}\n`);
+}
 
 taskType?.addEventListener("change", () => {
   hydrateTaskControls();
@@ -390,11 +507,18 @@ document.querySelector<HTMLSelectElement>("#collectionSelect")?.addEventListener
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
 document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
+document.querySelector<HTMLButtonElement>("#copyOutputDir")?.addEventListener("click", () => copyPath(inputValue("outputDir")));
+document.querySelector<HTMLButtonElement>("#refreshManifests")?.addEventListener("click", () => refreshManifestStatus());
+document.querySelector<HTMLButtonElement>("#clearHistory")?.addEventListener("click", clearHistory);
+document.querySelector<HTMLButtonElement>("#runtimeStatus")?.addEventListener("click", () => manageRuntime("status"));
+document.querySelector<HTMLButtonElement>("#runtimeInstall")?.addEventListener("click", () => manageRuntime("install"));
+document.querySelector<HTMLButtonElement>("#runtimeRemove")?.addEventListener("click", () => manageRuntime("remove"));
 document.querySelector<HTMLButtonElement>("#chooseOutputRoot")?.addEventListener("click", () => chooseDirectory("outputRoot"));
 document.querySelector<HTMLButtonElement>("#chooseOutputDir")?.addEventListener("click", () => chooseDirectory("outputDir"));
 document.querySelector<HTMLButtonElement>("#chooseSourceFile")?.addEventListener("click", () => chooseSourceFile());
 document.querySelector<HTMLButtonElement>("#chooseSourceDir")?.addEventListener("click", () => chooseDirectory("source"));
 document.querySelector<HTMLButtonElement>("#chooseChromeProfile")?.addEventListener("click", () => chooseDirectory("chromeProfile"));
+document.querySelector<HTMLButtonElement>("#chooseAsrModel")?.addEventListener("click", () => chooseDirectory("asrModel"));
 document.querySelector<HTMLButtonElement>("#toggleApiKey")?.addEventListener("click", () => toggleSecretField("apiKey", "toggleApiKey", "API Key"));
 document.querySelector<HTMLButtonElement>("#toggleCookies")?.addEventListener("click", () => toggleSecretField("cookies", "toggleCookies", "Cookie 文件路径"));
 document.querySelector<HTMLButtonElement>("#toggleChromeProfile")?.addEventListener("click", () =>
@@ -405,9 +529,11 @@ if (!hasTauriRuntime()) {
   setState("浏览器预览");
   setOutput(tauriRuntimeHint());
 } else {
+  setState("准备检查依赖...");
+  setOutput("应用已启动，正在自动检查运行环境...\n");
   window.setTimeout(() => {
     void runEnvironmentCheck();
-  }, 250);
+  }, 100);
 }
 
 function inputValue(id: string): string {
@@ -445,6 +571,7 @@ function payload(dryRun: boolean, retryFailed = false) {
   const task = currentTask();
   return {
     task,
+    runtime_backend: inputValue("runtimeBackend"),
     source: inputValue("source"),
     output_dir: inputValue("outputDir"),
     output_filename: inputValue("outputFilename"),
@@ -453,6 +580,7 @@ function payload(dryRun: boolean, retryFailed = false) {
     api_base: inputValue("apiBase"),
     api_key: inputValue("apiKey"),
     model: inputValue("model"),
+    asr_model: inputValue("asrModel"),
     cookies: inputValue("cookies"),
     browser_profile: inputValue("chromeProfile"),
     subtitle_strategy: inputValue("subtitleStrategy"),
@@ -466,14 +594,25 @@ function payload(dryRun: boolean, retryFailed = false) {
     keep_original_subtitles: checkboxChecked("keepOriginalSubtitles"),
     recursive_search: checkboxChecked("recursiveSearch"),
     overwrite_outputs: checkboxChecked("overwriteOutputs"),
+    incognito_mode: checkboxChecked("incognitoMode"),
     stock_terms: checkboxChecked("stockTerms"),
     enable_ocr: checkboxChecked("enableOcr"),
+    web_capture_mode: inputValue("webCaptureMode") || "static",
+    browser_executable: inputValue("browserExecutable"),
+    timeout_seconds: inputValue("timeoutSeconds"),
+    retry_count: inputValue("retryCount"),
+    cooldown_delay: inputValue("cooldownDelay"),
+    chunk_chars: inputValue("chunkChars"),
+    ocr_resume: checkboxChecked("ocrResume"),
     dry_run: dryRun,
   };
 }
 
 async function runEnvironmentCheck(): Promise<void> {
-  if (isWorkerRunning) return;
+  if (isWorkerRunning) {
+    setState("已有任务正在运行");
+    return;
+  }
   setWorkerRunning(true);
   saveSettings();
   setState("检查依赖中...");
@@ -602,10 +741,15 @@ function updateBatchResult(text: string): void {
   document.querySelector<HTMLButtonElement>("#retryFailed")?.classList.toggle("hidden", data.failed <= 0);
 }
 
-async function runTask(dryRun: boolean, retryFailed = false): Promise<void> {
+async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): Promise<void> {
   if (isWorkerRunning) return;
   saveSettings();
   const task = currentTask();
+  if (retryFailed && task === "bilibili-favorite" && checkboxChecked("incognitoMode")) {
+    setState("隐身模式不读取失败状态");
+    setOutput("“只重试失败项”依赖上次保存的 B站批量失败状态。请关闭隐身模式后再重试。\n");
+    return;
+  }
   if (!inputValue("outputDir")) {
     setState("缺少输出目录");
     setOutput("请先填写默认输出根目录，或手动填写本次输出目录。");
@@ -622,14 +766,27 @@ async function runTask(dryRun: boolean, retryFailed = false): Promise<void> {
     return;
   }
 
+  const request = payload(dryRun, retryFailed);
+  if (!dryRun) {
+    activeHistoryEntry = createHistoryEntry(task, request as Record<string, unknown>, retryOf);
+    taskHistory = upsertHistoryEntry(taskHistory, activeHistoryEntry);
+    saveTaskHistory(taskHistory);
+    renderHistory();
+  }
   setWorkerRunning(true);
   setState(dryRun ? "生成预览中..." : "任务运行中...");
   setOutput("");
   appendOutput(dryRun ? "正在生成命令预览...\n" : "任务已启动，日志会实时追加到这里。\n");
   try {
-    const result = await invokeWorker(payload(dryRun, retryFailed));
+    const result = await invokeWorker(request);
     if (!currentOutput().trim()) setOutput(result || "(worker 没有返回输出)");
     updateBatchResult(result || currentOutput());
+    const taskResult = taskResultFromLog(result || currentOutput());
+    if (taskResult) renderOutputs(taskResult.outputs);
+    if (activeHistoryEntry) {
+      activeHistoryEntry.status = "completed";
+      activeHistoryEntry.outputs = taskResult?.outputs ?? [];
+    }
     setState(dryRun ? "预览完成" : "任务完成");
   } catch (error) {
     const message = errorMessage(error);
@@ -647,8 +804,20 @@ async function runTask(dryRun: boolean, retryFailed = false): Promise<void> {
           ? "已取消"
           : "任务失败",
     );
+    if (activeHistoryEntry) {
+      activeHistoryEntry.status = message.startsWith("Task cancelled.") ? "cancelled" : "failed";
+      activeHistoryEntry.error = message;
+    }
   } finally {
     updateBatchResult(currentOutput());
+    if (activeHistoryEntry) {
+      activeHistoryEntry.log = currentOutput();
+      activeHistoryEntry.endedAt = new Date().toISOString();
+      taskHistory = upsertHistoryEntry(taskHistory, activeHistoryEntry);
+      saveTaskHistory(taskHistory);
+      activeHistoryEntry = null;
+      renderHistory();
+    }
     setWorkerRunning(false);
   }
 }
@@ -659,6 +828,13 @@ async function invokeWorker(request: object): Promise<string> {
   }
   await ensureWorkerLogListener();
   return invoke<string>("run_worker_stream", { request: JSON.stringify(request) });
+}
+
+async function invokeWorkerQuiet(request: object): Promise<string> {
+  if (!hasTauriRuntime()) {
+    throw new TauriRuntimeUnavailableError(tauriRuntimeHint());
+  }
+  return invoke<string>("run_worker", { request: JSON.stringify(request) });
 }
 
 async function cancelWorker(): Promise<void> {
@@ -677,7 +853,7 @@ async function cancelWorker(): Promise<void> {
   }
 }
 
-async function chooseDirectory(targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile"): Promise<void> {
+async function chooseDirectory(targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile" | "asrModel"): Promise<void> {
   await choosePath(targetId, { directory: true, multiple: false });
 }
 
@@ -702,7 +878,7 @@ async function chooseSourceFile(): Promise<void> {
 }
 
 async function choosePath(
-  targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile",
+  targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile" | "asrModel",
   options: OpenDialogOptions,
 ): Promise<void> {
   if (!hasTauriRuntime()) {
@@ -726,6 +902,8 @@ async function ensureWorkerLogListener(): Promise<void> {
   if (workerLogListenerReady) return workerLogListenerReady;
   workerLogListenerReady = listen<WorkerLogPayload>("worker-log", (event) => {
     appendOutput(event.payload.line);
+    const progress = progressFromLine(event.payload.line);
+    if (progress) renderProgress(progress);
   }).then(() => undefined);
   return workerLogListenerReady;
 }
@@ -735,7 +913,7 @@ function errorMessage(error: unknown): string {
 }
 
 function hasTauriRuntime(): boolean {
-  return Boolean((window as TauriWindow).__TAURI_INTERNALS__);
+  return isTauri();
 }
 
 function tauriRuntimeHint(): string {
@@ -807,6 +985,12 @@ function hydrateTaskControls(): void {
   if (enableOcrField) {
     enableOcrField.classList.toggle("hidden", task !== "source-file");
   }
+  document.querySelector<HTMLElement>("#ocrResumeField")?.classList.toggle("hidden", task !== "source-file");
+  document.querySelector<HTMLElement>("#webCaptureModeField")?.classList.toggle("hidden", task !== "web-url");
+  document.querySelector<HTMLElement>("#browserExecutableField")?.classList.toggle(
+    "hidden",
+    task !== "web-url" || inputValue("webCaptureMode") !== "browser",
+  );
   const outputFilenameField = document.querySelector<HTMLElement>("#outputFilenameField");
   if (outputFilenameField) {
     outputFilenameField.classList.toggle(
@@ -829,17 +1013,38 @@ function hydrateSubtitleStrategy(task: TaskType): void {
 }
 
 function bindSettingsPersistence(): void {
-  for (const id of ["condaEnv", "pythonBin", "apiBase", "apiKey", "model", "cookies", "chromeProfile", "subtitleStrategy", "favoriteLimit"]) {
+  for (const id of [
+    "runtimeBackend",
+    "condaEnv",
+    "pythonBin",
+    "apiBase",
+    "apiKey",
+    "model",
+    "asrModel",
+    "cookies",
+    "chromeProfile",
+    "subtitleStrategy",
+    "favoriteLimit",
+    "webCaptureMode",
+    "browserExecutable",
+    "timeoutSeconds",
+    "retryCount",
+    "cooldownDelay",
+    "chunkChars",
+  ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
+  document.querySelector<HTMLSelectElement>("#webCaptureMode")?.addEventListener("change", hydrateTaskControls);
   for (const id of [
     "extractKeyframes",
     "dialogueDetection",
     "keepOriginalSubtitles",
     "recursiveSearch",
     "overwriteOutputs",
+    "incognitoMode",
     "stockTerms",
     "enableOcr",
+    "ocrResume",
   ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
@@ -857,11 +1062,13 @@ function loadSettings(): SavedSettings {
 function saveSettings(): void {
   const collection = document.querySelector<HTMLSelectElement>("#collectionSelect");
   const settings: SavedSettings = {
+    runtimeBackend: (inputValue("runtimeBackend") || defaults.runtimeBackend) as "managed" | "conda",
     condaEnv: inputValue("condaEnv") || defaults.condaEnv,
     pythonBin: inputValue("pythonBin") || defaults.pythonBin,
     apiBase: inputValue("apiBase") || defaults.apiBase,
     apiKey: inputValue("apiKey") || defaults.apiKey,
     model: inputValue("model") || defaults.model,
+    asrModel: inputValue("asrModel"),
     cookies: inputValue("cookies"),
     chromeProfile: inputValue("chromeProfile"),
     outputRoot: inputValue("outputRoot"),
@@ -875,8 +1082,16 @@ function saveSettings(): void {
     keepOriginalSubtitles: checkboxChecked("keepOriginalSubtitles"),
     recursiveSearch: checkboxChecked("recursiveSearch"),
     overwriteOutputs: checkboxChecked("overwriteOutputs"),
+    incognitoMode: checkboxChecked("incognitoMode"),
     stockTerms: checkboxChecked("stockTerms"),
     enableOcr: checkboxChecked("enableOcr"),
+    webCaptureMode: (inputValue("webCaptureMode") || defaults.webCaptureMode) as "static" | "browser",
+    browserExecutable: inputValue("browserExecutable"),
+    timeoutSeconds: inputValue("timeoutSeconds"),
+    retryCount: inputValue("retryCount"),
+    cooldownDelay: inputValue("cooldownDelay"),
+    chunkChars: inputValue("chunkChars"),
+    ocrResume: checkboxChecked("ocrResume"),
   };
   localStorage.setItem(settingsKey, JSON.stringify(settings));
 }
@@ -904,12 +1119,293 @@ function setState(text: string): void {
 
 function setWorkerRunning(running: boolean): void {
   isWorkerRunning = running;
-  for (const id of ["checkEnv", "refreshCookies", "loadCollections", "checkBilibiliAccess", "retryFailed", "runDry", "runTask"]) {
+  for (const id of [
+    "checkEnv",
+    "refreshCookies",
+    "loadCollections",
+    "checkBilibiliAccess",
+    "retryFailed",
+    "runDry",
+    "runTask",
+    "refreshManifests",
+    "runtimeInstall",
+    "runtimeRemove",
+  ]) {
     const button = document.querySelector<HTMLButtonElement>(`#${id}`);
     if (button) button.disabled = running;
   }
   const cancelButton = document.querySelector<HTMLButtonElement>("#cancelTask");
   if (cancelButton) cancelButton.disabled = !running;
+}
+
+function renderProgress(progress: ProgressEvent): void {
+  document.querySelector<HTMLElement>("#progressPanel")?.classList.remove("hidden");
+  const bar = document.querySelector<HTMLProgressElement>("#taskProgress");
+  const current = Math.max(0, Number(progress.current) || 0);
+  const total = Math.max(1, Number(progress.total) || 1);
+  if (bar) bar.value = Math.min(100, (current / total) * 100);
+  const details = [progress.phase, `${current}/${total}`, progress.backend, progress.resumed ? "从检查点续跑" : "", progress.label]
+    .filter(Boolean)
+    .join(" · ");
+  const text = document.querySelector<HTMLElement>("#progressText");
+  if (text) text.textContent = details;
+}
+
+function renderOutputs(paths: string[], title = "本次输出", focus = false): void {
+  const target = document.querySelector<HTMLElement>("#resultList");
+  if (!target) return;
+  const heading = document.querySelector<HTMLElement>("#resultTitle");
+  if (heading) heading.textContent = title;
+  if (!paths.length) {
+    target.innerHTML = '<p class="empty-state">本次没有新增或更新文件，可能命中了跳过策略。</p>';
+  } else {
+    target.innerHTML = paths
+      .map(
+        (path) => `<article class="result-item">
+          <div><strong>${escapeHtml(path.split("/").at(-1) || path)}</strong><small>${escapeHtml(path)}</small></div>
+          <div class="row-actions">
+            ${path.toLowerCase().endsWith(".md") ? `<button type="button" class="secondary" data-output-action="open" data-path="${encodeURIComponent(path)}">打开 Markdown</button>` : ""}
+            <button type="button" class="secondary" data-output-action="reveal" data-path="${encodeURIComponent(path)}">Finder 中显示</button>
+            <button type="button" class="secondary" data-output-action="copy" data-path="${encodeURIComponent(path)}">复制路径</button>
+          </div>
+        </article>`,
+      )
+      .join("");
+  }
+  target.querySelectorAll<HTMLButtonElement>("button[data-output-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const path = decodeURIComponent(button.dataset.path || "");
+      const action = button.dataset.outputAction;
+      if (action === "copy") void copyPath(path);
+      else void invoke(action === "open" ? "open_path" : "reveal_path", { path });
+    });
+  });
+  if (focus) {
+    const panel = document.querySelector<HTMLElement>("#resultPanel");
+    panel?.classList.remove("result-highlight");
+    window.requestAnimationFrame(() => {
+      panel?.classList.add("result-highlight");
+      panel?.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.setTimeout(() => panel?.classList.remove("result-highlight"), 1400);
+    });
+  }
+}
+
+async function copyPath(path: string): Promise<void> {
+  if (!path) return;
+  try {
+    await navigator.clipboard.writeText(path);
+    setState("路径已复制");
+  } catch {
+    setOutput(path);
+    setState("请从日志区复制路径");
+  }
+}
+
+type ManifestStatus = {
+  manifests: Array<{
+    path: string;
+    name: string;
+    counts: Record<"processed" | "skipped" | "failed" | "rebuild", number>;
+    items: Array<{ source: string; output: string; status: string; error: string; reason?: string }>;
+    error?: string;
+  }>;
+  totals: Record<"processed" | "skipped" | "failed" | "rebuild", number>;
+};
+
+async function refreshManifestStatus(): Promise<void> {
+  if (isWorkerRunning) return;
+  setWorkerRunning(true);
+  setState("读取 Manifest...");
+  try {
+    const result = await invokeWorkerQuiet({ ...payload(false), task: "manifest-status", source: inputValue("outputRoot") });
+    const data = structuredJson<ManifestStatus>(result, "MANIFEST_STATUS_JSON:");
+    if (!data) throw new Error("worker 未返回 Manifest 状态");
+    renderManifestStatus(data);
+    setState("Manifest 已刷新");
+  } catch (error) {
+    setState("Manifest 读取失败");
+    appendOutput(`\nManifest 读取失败：${errorMessage(error)}\n`);
+  } finally {
+    setWorkerRunning(false);
+  }
+}
+
+function renderManifestStatus(data: ManifestStatus): void {
+  const summary = document.querySelector<HTMLElement>("#manifestSummary");
+  if (summary) {
+    summary.innerHTML = [
+      ["记录正常", data.totals.processed, "ok"],
+      ["本次跳过", data.totals.skipped, "muted"],
+      ["处理失败", data.totals.failed, "danger"],
+      ["输出缺失", data.totals.rebuild, "warning"],
+    ]
+      .map(([label, count, tone]) => `<span class="chip ${tone}">${label} ${count}</span>`)
+      .join("");
+  }
+  const list = document.querySelector<HTMLElement>("#manifestList");
+  if (!list) return;
+  list.innerHTML = data.manifests.length
+    ? [...data.manifests]
+        .sort((left, right) => right.counts.failed + right.counts.rebuild - (left.counts.failed + left.counts.rebuild))
+        .map((manifest) => {
+          const label = manifestLabel(manifest.name);
+          const total = Object.values(manifest.counts).reduce((sum, count) => sum + count, 0);
+          const attention = manifest.counts.failed + manifest.counts.rebuild;
+          const notableItems = manifest.items.filter((item) => item.status !== "processed").slice(0, 100);
+          const health = attention > 0 ? `${attention} 条需要处理` : "状态正常";
+          return `<details class="manifest-card ${attention > 0 ? "has-issues" : ""}">
+            <summary>
+              <span class="manifest-title"><strong>${escapeHtml(label.title)}</strong><small>${escapeHtml(label.description)}</small></span>
+              <span class="manifest-health ${attention > 0 ? "warning" : "ok"}">${total} 条记录 · ${health}</span>
+            </summary>
+            <div class="manifest-detail">
+              <p class="manifest-counts">正常 ${manifest.counts.processed} · 本次跳过 ${manifest.counts.skipped} · 失败 ${manifest.counts.failed} · 输出缺失 ${manifest.counts.rebuild}</p>
+              ${manifest.error ? `<p class="error-text">读取记录失败：${escapeHtml(manifest.error)}</p>` : ""}
+              ${notableItems.length
+                ? `<div class="manifest-items">${notableItems
+                    .map((item) => `<div><span class="status ${escapeHtml(item.status)}">${manifestStatusLabel(item.status)}</span><code>${escapeHtml(item.source || item.output || "未命名条目")}</code>${item.reason || item.error ? `<small>${escapeHtml(item.reason || item.error)}</small>` : ""}</div>`)
+                    .join("")}</div>`
+                : '<p class="empty-state">没有需要处理的条目。</p>'}
+              <small class="manifest-path">记录文件：${escapeHtml(manifest.path)}</small>
+            </div>
+          </details>`;
+        })
+        .join("")
+    : '<p class="empty-state">尚未找到 Manifest。运行一次支持增量状态的任务后再刷新。</p>';
+}
+
+function manifestLabel(name: string): { title: string; description: string } {
+  const labels: Record<string, { title: string; description: string }> = {
+    "quickread-manifest.json": { title: "论文速读", description: "论文 PDF 的速读与翻译记录" },
+    "source-manifest.json": { title: "文档与网页", description: "文档、图片、网页转换及 Qwen 整理记录" },
+    "video-manifest.json": { title: "视频笔记", description: "B站与本地媒体的笔记和关键帧记录" },
+    "B站增量状态": { title: "B站已处理列表", description: "批量任务用它避免重复处理同一视频" },
+    "B站批量失败状态": { title: "B站失败列表", description: "可用于“只重试失败项”的批次记录" },
+  };
+  return labels[name] ?? { title: name, description: "本地增量处理记录" };
+}
+
+function manifestStatusLabel(status: string): string {
+  return {
+    processed: "正常",
+    skipped: "已跳过",
+    failed: "失败",
+    rebuild: "输出缺失",
+  }[status] ?? status;
+}
+
+const historyStatusLabels: Record<TaskHistoryStatus, string> = {
+  running: "运行中",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+function renderHistory(): void {
+  const target = document.querySelector<HTMLElement>("#historyList");
+  if (!target) return;
+  target.innerHTML = taskHistory.length
+    ? taskHistory
+        .map((entry) => {
+          const source = String(entry.request.source || "");
+          return `<article class="history-item">
+            <div><span class="status ${entry.status}">${historyStatusLabels[entry.status]}</span><strong>${escapeHtml(taskLabels[entry.task as TaskType] || entry.task)}</strong><small>${escapeHtml(new Date(entry.startedAt).toLocaleString())}${source ? ` · ${escapeHtml(source)}` : ""}</small></div>
+            <div class="row-actions">
+              <button type="button" class="secondary" data-history-action="log" data-id="${entry.id}">查看日志</button>
+              ${entry.outputs.length ? `<button type="button" class="secondary" data-history-action="outputs" data-id="${entry.id}">查看 ${entry.outputs.length} 个输出</button>` : ""}
+              <button type="button" class="secondary" data-history-action="rerun" data-id="${entry.id}">${entry.status === "failed" ? "重试" : "重新运行"}</button>
+            </div>
+          </article>`;
+        })
+        .join("")
+    : '<p class="empty-state">还没有任务历史。运行中的任务若遇到应用退出，会在下次启动时标记为“已中断”并可重新运行。</p>';
+  target.querySelectorAll<HTMLButtonElement>("button[data-history-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const entry = taskHistory.find((item) => item.id === button.dataset.id);
+      if (!entry) return;
+      if (button.dataset.historyAction === "log") {
+        setOutput(entry.log || entry.error || "该任务没有保存日志。");
+        setState(`历史：${historyStatusLabels[entry.status]}`);
+      } else if (button.dataset.historyAction === "outputs") {
+        renderOutputs(entry.outputs, `历史输出 · ${taskLabels[entry.task as TaskType] || entry.task}`, true);
+        setState(`已显示历史输出（${entry.outputs.length} 个文件）`);
+      } else {
+        applyHistoryRequest(entry.request);
+        void runTask(false, entry.status === "failed" || Boolean(entry.request.retry_failed), entry.id);
+      }
+    });
+  });
+}
+
+function applyHistoryRequest(request: Record<string, unknown>): void {
+  const mappings: Record<string, string> = {
+    task: "taskType",
+    source: "source",
+    output_dir: "outputDir",
+    output_filename: "outputFilename",
+    conda_env: "condaEnv",
+    python_bin: "pythonBin",
+    api_base: "apiBase",
+    model: "model",
+    asr_model: "asrModel",
+    subtitle_strategy: "subtitleStrategy",
+    favorite_limit: "favoriteLimit",
+    runtime_backend: "runtimeBackend",
+    web_capture_mode: "webCaptureMode",
+    browser_executable: "browserExecutable",
+    timeout_seconds: "timeoutSeconds",
+    retry_count: "retryCount",
+    cooldown_delay: "cooldownDelay",
+    chunk_chars: "chunkChars",
+  };
+  for (const [key, id] of Object.entries(mappings)) {
+    if (request[key] !== undefined) setInputValue(id, String(request[key]));
+  }
+  const booleans: Record<string, string> = {
+    extract_keyframes: "extractKeyframes",
+    dialogue_detection: "dialogueDetection",
+    keep_original_subtitles: "keepOriginalSubtitles",
+    recursive_search: "recursiveSearch",
+    overwrite_outputs: "overwriteOutputs",
+    incognito_mode: "incognitoMode",
+    stock_terms: "stockTerms",
+    enable_ocr: "enableOcr",
+    ocr_resume: "ocrResume",
+  };
+  for (const [key, id] of Object.entries(booleans)) {
+    const input = document.querySelector<HTMLInputElement>(`#${id}`);
+    if (input && request[key] !== undefined) input.checked = Boolean(request[key]);
+  }
+  hydrateTaskControls();
+  saveSettings();
+}
+
+function clearHistory(): void {
+  if (isWorkerRunning) return;
+  taskHistory = [];
+  saveTaskHistory(taskHistory);
+  renderHistory();
+}
+
+async function manageRuntime(action: "status" | "install" | "remove"): Promise<void> {
+  if (!hasTauriRuntime()) {
+    setOutput(tauriRuntimeHint());
+    return;
+  }
+  setWorkerRunning(true);
+  setState(action === "status" ? "读取托管环境..." : action === "install" ? "安装/修复托管环境..." : "卸载托管环境...");
+  try {
+    const result = await invoke<string>("manage_runtime", { action });
+    setOutput(result);
+    setState(action === "remove" ? "托管环境已卸载" : "托管环境就绪");
+  } catch (error) {
+    setOutput(errorMessage(error));
+    setState("托管环境操作失败");
+  } finally {
+    setWorkerRunning(false);
+  }
 }
 
 function joinPath(root: string, subdir: string): string {

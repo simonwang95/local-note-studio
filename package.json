@@ -6,12 +6,14 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc && vite build",
-    "check:python": "python3 -m compileall -q worker tests && python3 -m unittest discover -s tests -v",
+    "check:frontend": "node tests/test_p1.mjs",
+    "check:python": "PYTHONPYCACHEPREFIX=/tmp/local-note-studio-pycache python3 -m compileall -q worker tests && PYTHONPYCACHEPREFIX=/tmp/local-note-studio-pycache python3 -m unittest discover -s tests -v",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "check": "npm run build && npm run check:python && npm run test:rust",
+    "check": "npm run build && npm run check:frontend && npm run check:python && npm run test:rust",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "release:check": "npm run check && python3 scripts/release_check.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

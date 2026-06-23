@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import json
+import math
 import pathlib
 import re
 import shutil
@@ -102,6 +104,90 @@ def _choose_timestamps(duration: float, candidates: list[float], max_frames: int
     return sorted(selected[:max_frames])
 
 
+def _structured_semantic_points(markdown: str, duration: float, max_frames: int) -> list[dict[str, Any]]:
+    visible = re.split(r"(?m)^##\s+(?:原始字幕|完整原文|原文抽取)\s*$|<details>", markdown, maxsplit=1)[0]
+    visible = re.sub(r"(?ms)^---\n.*?\n---\n", "", visible, count=1)
+    visible = re.sub(r"(?ms)^##\s+关键帧图文笔记\s*$.*?(?=^##\s+|\Z)", "", visible)
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", visible) if block.strip()]
+    scored: list[tuple[float, int, str, str]] = []
+    current_heading = "内容要点"
+    keywords = re.compile(r"核心|结论|原因|关键|风险|步骤|方法|对比|因此|意味着|建议|首先|其次|最后")
+    for index, block in enumerate(blocks):
+        if block.startswith("#"):
+            current_heading = re.sub(r"^#+\s*", "", block).strip() or current_heading
+            continue
+        plain = re.sub(r"[`>*_\[\]()]", "", block)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if len(plain) < 18:
+            continue
+        score = min(len(plain), 240) / 80.0
+        score += 2.0 if keywords.search(plain) else 0.0
+        score += 1.0 if re.search(r"\d|：|:", plain) else 0.0
+        scored.append((score, index, current_heading, plain[:110]))
+    selected: list[tuple[float, int, str, str]] = []
+    for item in sorted(scored, reverse=True):
+        if any(abs(item[1] - old[1]) < max(2, len(blocks) // max(max_frames * 2, 1)) for old in selected):
+            continue
+        selected.append(item)
+        if len(selected) >= max_frames:
+            break
+    points = []
+    for _, index, heading, snippet in sorted(selected, key=lambda item: item[1]):
+        ratio = (index + 0.5) / max(len(blocks), 1)
+        points.append({"timestamp": max(2.0, min(duration - 2.0, ratio * duration)), "section": heading, "snippet": snippet})
+    return points
+
+
+def _snap_semantic_timestamps(points: list[dict[str, Any]], scenes: list[float], duration: float) -> list[dict[str, Any]]:
+    snapped: list[dict[str, Any]] = []
+    max_distance = max(12.0, duration * 0.08)
+    for point in points:
+        target = float(point["timestamp"])
+        nearest = min(scenes, key=lambda value: abs(value - target), default=target)
+        timestamp = nearest if abs(nearest - target) <= max_distance else target
+        snapped.append({**point, "timestamp": round(timestamp, 2)})
+    return snapped
+
+
+def _frame_fingerprint(video_path: pathlib.Path, timestamp: float) -> bytes:
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{timestamp:.2f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=16:16,format=gray",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return bytes(result.stdout[:256]) if result.returncode == 0 else b""
+
+
+def _usable_fingerprint(fingerprint: bytes, previous: list[bytes]) -> bool:
+    if len(fingerprint) != 256:
+        return False
+    average = sum(fingerprint) / len(fingerprint)
+    variance = sum((value - average) ** 2 for value in fingerprint) / len(fingerprint)
+    if average < 18 or average > 245 or math.sqrt(variance) < 7:
+        return False
+    for old in previous:
+        mean_delta = sum(abs(left - right) for left, right in zip(fingerprint, old)) / len(fingerprint)
+        if mean_delta < 10:
+            return False
+    return True
+
+
 def _extract_frame(video_path: pathlib.Path, timestamp: float, out_path: pathlib.Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     code, output = _run(
@@ -157,13 +243,13 @@ def _format_timestamp(seconds: float) -> str:
 def _keyframe_section(asset_dir_name: str, frames: list[dict[str, str]]) -> str:
     lines = [
         "## 关键帧图文笔记",
-        "> 关键帧按画面切换和内容位置抽取，用来快速回看讲解节奏；摘录为按全文位置估算的就近文本，不等同于严格时间轴字幕。",
+        "> 关键帧优先对齐结构化正文中的核心论点，并经过黑屏、转场和近似画面过滤；语义位置仍是估算值，不等同于严格时间轴字幕。",
     ]
     for frame in frames:
         lines.extend(
             [
                 "",
-                f"### {frame['title']}",
+                f"### {frame['section']} · {frame['title']}",
                 "",
                 f"![{frame['title']}](assets/{asset_dir_name}/{frame['file_name']})",
                 "",
@@ -229,13 +315,34 @@ def add_keyframes_to_note(
         markdown = note_path.read_text(encoding="utf-8", errors="replace")
         transcript_text = _extract_transcript_text(markdown)
         duration = _ffprobe_duration(video_path)
-        timestamps = _choose_timestamps(duration, _scene_timestamps(video_path, max_frames), max_frames)
-        if not timestamps:
+        scenes = _scene_timestamps(video_path, max_frames * 5)
+        semantic = _snap_semantic_timestamps(_structured_semantic_points(markdown, duration, max_frames), scenes, duration)
+        fallback = [
+            {"timestamp": value, "section": "内容回看", "snippet": ""}
+            for value in _choose_timestamps(duration, scenes, max_frames * 3)
+        ]
+        candidates = sorted([*semantic, *fallback], key=lambda item: float(item["timestamp"]))
+        selected: list[dict[str, Any]] = []
+        fingerprints: list[bytes] = []
+        for candidate in candidates:
+            timestamp = float(candidate["timestamp"])
+            if any(abs(timestamp - float(old["timestamp"])) < 5.0 for old in selected):
+                continue
+            fingerprint = _frame_fingerprint(video_path, timestamp)
+            if not _usable_fingerprint(fingerprint, fingerprints):
+                continue
+            selected.append(candidate)
+            fingerprints.append(fingerprint)
+            if len(selected) >= max_frames:
+                break
+        if not selected:
             return {"enabled": True, "status": "skipped", "reason": "no keyframe timestamps detected", "assets": []}
 
         asset_dir = note_path.parent / "assets" / f"{note_path.stem}-keyframes"
+        asset_dir.mkdir(parents=True, exist_ok=True)
         frames: list[dict[str, str]] = []
-        for index, timestamp in enumerate(timestamps, start=1):
+        for index, candidate in enumerate(selected, start=1):
+            timestamp = float(candidate["timestamp"])
             file_name = f"frame-{index:02d}-{int(round(timestamp)):04d}.jpg"
             frame_path = asset_dir / file_name
             _extract_frame(video_path, timestamp, frame_path)
@@ -243,20 +350,40 @@ def add_keyframes_to_note(
                 {
                     "title": f"关键帧 {index} · {_format_timestamp(timestamp)}",
                     "file_name": file_name,
-                    "snippet": _snippet_for_timestamp(transcript_text, timestamp, duration),
+                    "section": str(candidate.get("section") or "内容回看"),
+                    "snippet": str(candidate.get("snippet") or "") or _snippet_for_timestamp(transcript_text, timestamp, duration),
                     "timestamp": _format_timestamp(timestamp),
+                    "timestamp_seconds": f"{timestamp:.2f}",
                 }
             )
+
+        expected = {frame["file_name"] for frame in frames}
+        for old_path in asset_dir.glob("frame-*.jpg"):
+            if old_path.name not in expected:
+                old_path.unlink(missing_ok=True)
 
         markdown = _replace_or_insert_keyframe_section(markdown, _keyframe_section(asset_dir.name, frames))
         note_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
 
-        return {
+        result = {
             "enabled": True,
             "status": "generated",
             "assets": [f"assets/{asset_dir.name}/{frame['file_name']}" for frame in frames],
             "timestamps": [frame["timestamp"] for frame in frames],
+            "frames": [
+                {
+                    "timestamp": frame["timestamp"],
+                    "timestamp_seconds": float(frame["timestamp_seconds"]),
+                    "section": frame["section"],
+                    "source_video": str(video_path),
+                    "resource_path": f"assets/{asset_dir.name}/{frame['file_name']}",
+                }
+                for frame in frames
+            ],
         }
+        if os.environ.get("KEYFRAME_MANIFEST_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}:
+            (asset_dir / "keyframes-manifest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return result
     finally:
         if video_path.parent.name.startswith("local-note-bili-video-"):
             shutil.rmtree(video_path.parent, ignore_errors=True)

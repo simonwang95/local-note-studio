@@ -46,9 +46,20 @@ Implemented since the initial checkpoint:
 - Isolated favorite/series batch processing with `[转录 i/n]` and `[Qwen i/n]` progress, `COOLDOWN_DELAY` between Qwen calls, structured totals, persistent failed-entry records, and retry-failures-only execution.
 - Separate Bilibili diagnostics for expired login, missing charging/private-content permission, HTTP 412 risk control, empty opus content, and failed video extraction, plus independent login/target access verification.
 - Worker-level output integrity gates covering temporary draft leakage, source traceability, Qwen organization, complete source/translation sections, raw-subtitle preference, EPUB non-empty output, and local Markdown image resolution.
+- P1 local task history with completed/failed/cancelled/interrupted states, bounded logs, output lists, rerun, and conversion-draft recovery for organize-step retries.
+- Output quick actions for Markdown/Finder/path copy, plus structured single and batch result lists.
+- In-app Manifest status for video/source/quickread indexes, Bilibili processed state, batch failures, skipped entries, and missing outputs that require rebuild.
+- Structured file/page progress for OCR with explicit Qwen Vision, Tesseract/Poppler, and macOS Vision backends; persistent page checkpoints support interrupted-task resume.
+- Semantic keyframe selection aligned to structured note sections, black/transition/near-duplicate filtering, stale-frame cleanup, and detailed keyframe manifests.
+- Explicit static-HTTP versus selected-Chrome-Profile browser capture for authenticated or JavaScript-rendered webpages.
+- Per-task timeout, retry, cooldown, and chunk-size overrides for long batches.
+- Versioned Application Support runtime management with checksum-pinned standalone Python, locked packages, yt-dlp, ffmpeg/ffprobe, on-demand Pandoc, disk usage, repair/uninstall, and advanced Conda fallback.
+- macOS `.app`/DMG bundle configuration, generated icon set, worker resource whitelist, release checks, and a signing/notarization/clean-Mac acceptance checklist. A debug `.app` bundle was built and inspected successfully; Developer ID notarization and independent clean-Mac acceptance remain release gates.
+- Startup dependency checks now tolerate legacy task-history records and use the public Tauri runtime detector; the check runs automatically on app launch and remains manually retryable.
+- Optional incognito tasks generate normal outputs and local task history without reading or writing source/video/quickread/keyframe manifests or Bilibili incremental/failure state.
 
 ## Current Todo Backlog
 
-The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). P0 stability and verifiability work is complete; the next work starts at P1 daily-use experience.
+The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). P0 and P1 development work is implemented. T-108/T-109 still require the documented independent clean-Mac, Developer ID signing, and notarization release gates before distribution.
 
 Packaging decision: T-108 app-managed runtime must be completed before T-109 release packaging. A clean Mac without conda or Homebrew should run the main workflows after in-app initialization; LLM/OCR remains API-configured and ASR model assets are managed separately.

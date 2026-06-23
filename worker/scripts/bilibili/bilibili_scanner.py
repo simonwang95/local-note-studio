@@ -63,6 +63,7 @@ COOKIE_FILE = _expand_path(
     os.environ.get("BILIBILI_COOKIES_FILE") or os.environ.get("BILI_COOKIE_FILE") or _env.get("BILI_COOKIE_FILE", _env.get("BILIBILI_COOKIES_FILE", ""))
 )
 PROCESSED_FILE = os.path.join(STATE_DIR, "processed_videos.txt")
+INCREMENTAL_STATE_ENABLED = (os.environ.get("BILIBILI_INCREMENTAL_STATE_ENABLED") or "true").strip().lower() not in {"0", "false", "no", "off"}
 FAVORITE_API = "https://api.bilibili.com/x/v3/fav/resource/list"
 SERIES_API = "https://api.bilibili.com/x/series/archives"
 
@@ -233,7 +234,8 @@ def main():
         print("ERROR: 系列缺少 UP 主 mid，请重新读取列表后选择。")
         return 1
 
-    os.makedirs(STATE_DIR, exist_ok=True)
+    if INCREMENTAL_STATE_ENABLED:
+        os.makedirs(STATE_DIR, exist_ok=True)
 
     # 分页获取收藏夹所有视频
     medias = fetch_all_medias(args.collection_type, args.collection_id, args.collection_mid)
@@ -244,7 +246,7 @@ def main():
 
     # 加载文本记录（仅用于日志参考，不作为去重依据）
     text_processed = set()
-    if os.path.exists(PROCESSED_FILE):
+    if INCREMENTAL_STATE_ENABLED and os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE) as f:
             text_processed = set(line.strip() for line in f if line.strip())
 

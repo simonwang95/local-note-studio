@@ -42,6 +42,7 @@ DEFAULTS = {
     "ENABLE_DIALOGUE_DETECTION": "false",
     "KEEP_ORIGINAL_SUBTITLES": "true",
     "OVERWRITE_OUTPUT": "false",
+    "BILIBILI_INCREMENTAL_STATE_ENABLED": "true",
     "COOLDOWN_DELAY": "30",
 }
 
@@ -437,6 +438,7 @@ def postprocess_video_note(path: pathlib.Path, cfg: dict[str, str], extra: dict[
         "transcribed_at": fields.get("transcribed_at", ""),
         "keyframe_status": keyframe_info.get("status", "disabled"),
         "keyframe_assets": keyframe_info.get("assets", []),
+        "keyframes": keyframe_info.get("frames", []),
         "keyframe_error": keyframe_info.get("reason", ""),
         "error": "",
     }
@@ -520,6 +522,8 @@ def repair_local_video_durations(root: pathlib.Path) -> int:
 
 
 def append_processed(avid: str, cfg: dict[str, str]) -> None:
+    if not parse_bool(cfg.get("BILIBILI_INCREMENTAL_STATE_ENABLED", "true")):
+        return
     state_dir = cfg.get("BILIBILI_STATE_DIR", str(ROOT / "indexes" / "bilibili-state"))
     if not pathlib.Path(state_dir).is_absolute():
         state_dir = str(ROOT / state_dir)
@@ -600,7 +604,9 @@ def batch_failure_path(cfg: dict[str, str]) -> pathlib.Path:
     return pathlib.Path(cfg["BILIBILI_OUTPUT_DIR"]).expanduser() / ".local-note-studio-batch-failures.json"
 
 
-def save_batch_failures(cfg: dict[str, str], collection: dict[str, str], failures: list[dict[str, str]]) -> pathlib.Path:
+def save_batch_failures(cfg: dict[str, str], collection: dict[str, str], failures: list[dict[str, str]]) -> pathlib.Path | None:
+    if not parse_bool(cfg.get("BILIBILI_INCREMENTAL_STATE_ENABLED", "true")):
+        return None
     path = batch_failure_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"collection": collection, "failures": failures, "updated_at": now_iso()}
@@ -609,6 +615,8 @@ def save_batch_failures(cfg: dict[str, str], collection: dict[str, str], failure
 
 
 def load_batch_failures(cfg: dict[str, str], collection: dict[str, str]) -> list[dict[str, str]]:
+    if not parse_bool(cfg.get("BILIBILI_INCREMENTAL_STATE_ENABLED", "true")):
+        raise RuntimeError("隐身模式不读取批量失败状态；请关闭隐身模式后再使用“只重试失败项”。")
     path = batch_failure_path(cfg)
     if not path.exists():
         raise RuntimeError("没有可重试的失败列表；请先运行一次收藏夹/系列批处理。")
@@ -746,7 +754,7 @@ def run_collection_batch(
         "success": success_count,
         "failed": len(failed_items),
         "current": selected[-1].get("title", "") if selected else "",
-        "failure_file": str(failure_file),
+        "failure_file": str(failure_file) if failure_file else "",
         "failures": failed_items,
     }
     print(f"\n批量完成：总数 {len(selected)}，成功 {success_count}，失败 {len(failed_items)}。")

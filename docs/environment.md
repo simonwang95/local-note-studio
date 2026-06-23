@@ -90,9 +90,9 @@ python3 worker/scripts/export_bilibili_cookies.py \
 
 QR login remains an optional later enhancement; Chrome Profile refresh is the current supported workflow.
 
-## Planned App-Managed Runtime
+## App-Managed Runtime
 
-The managed runtime is a prerequisite for the daily-use signed package. It should make the main workflows usable without requiring the user to install conda or Homebrew.
+The managed runtime is implemented for the daily-use package and is initialized from the desktop UI. It is designed to make the main workflows usable without requiring conda or Homebrew; independent clean-Mac acceptance remains a release gate.
 
 Target layout:
 

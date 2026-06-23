@@ -13,7 +13,7 @@ The first MVP reuses the proven processing scripts from the `knowledge-base` pro
 - Paper quick read.
 - Local video/audio transcription.
 
-The first version uses an existing user-managed conda environment, such as `course-whisper`, and an OpenAI-compatible LLM API. Bundling Whisper, ffmpeg, and a Python runtime is deferred until the app workflow stabilizes.
+Development can use an existing user-managed conda environment such as `course-whisper`. Daily use can initialize a versioned runtime under Application Support with Python, locked packages, yt-dlp and media tools; LLM/OCR remains an OpenAI-compatible API configuration and large ASR model weights remain separate optional resources.
 
 ## Project Layout
 
@@ -57,4 +57,4 @@ npm run tauri:dev
 
 ## Current Status
 
-This repository starts as an MVP scaffold. The processing engine is already useful from the Python worker; the Tauri UI is intentionally thin and should grow around stable task contracts.
+The app now includes the P0 regression baseline and P1 daily-use layer: task history/recovery, output actions, Manifest state, resumable OCR progress, semantic keyframes, explicit browser-session capture, long-task overrides, managed runtime initialization, and macOS bundle preparation. Signing, notarization, and clean-Mac release acceptance are documented external gates.

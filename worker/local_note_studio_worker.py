@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -67,6 +68,7 @@ class TaskRequest:
     api_base: str = ""
     api_key: str = ""
     model: str = ""
+    asr_model: str = ""
     cookies: str = ""
     browser_profile: str = ""
     subtitle_strategy: str = "yt-dlp"
@@ -80,8 +82,16 @@ class TaskRequest:
     keep_original_subtitles: bool = True
     recursive_search: bool = False
     overwrite_outputs: bool = False
+    incognito_mode: bool = False
     stock_terms: bool = False
     enable_ocr: bool = False
+    web_capture_mode: str = "static"
+    browser_executable: str = ""
+    timeout_seconds: int = 0
+    retry_count: int = 0
+    cooldown_delay: int = 0
+    chunk_chars: int = 0
+    ocr_resume: bool = True
     dry_run: bool = False
 
     @classmethod
@@ -96,6 +106,7 @@ class TaskRequest:
             api_base=str(data.get("api_base") or ""),
             api_key=str(data.get("api_key") or ""),
             model=str(data.get("model") or ""),
+            asr_model=str(data.get("asr_model") or ""),
             cookies=str(data.get("cookies") or ""),
             browser_profile=str(data.get("browser_profile") or ""),
             subtitle_strategy=str(data.get("subtitle_strategy") or "yt-dlp"),
@@ -109,8 +120,16 @@ class TaskRequest:
             keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", True)),
             recursive_search=parse_bool(data.get("recursive_search")),
             overwrite_outputs=parse_bool(data.get("overwrite_outputs")),
+            incognito_mode=parse_bool(data.get("incognito_mode")),
             stock_terms=parse_bool(data.get("stock_terms")),
             enable_ocr=parse_bool(data.get("enable_ocr")),
+            web_capture_mode=str(data.get("web_capture_mode") or "static"),
+            browser_executable=str(data.get("browser_executable") or ""),
+            timeout_seconds=parse_int(data.get("timeout_seconds"), 0),
+            retry_count=parse_int(data.get("retry_count"), 0),
+            cooldown_delay=parse_int(data.get("cooldown_delay"), 0),
+            chunk_chars=parse_int(data.get("chunk_chars"), 0),
+            ocr_resume=parse_bool(data.get("ocr_resume", True)),
             dry_run=bool(data.get("dry_run")),
         )
 
@@ -154,6 +173,8 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     if req.model:
         env["DEFAULT_LLM_MODEL"] = req.model
         env["SUMMARY_MODEL"] = req.model
+    if req.asr_model:
+        env["ASR_LOCAL_MODEL"] = req.asr_model
     if req.cookies:
         env["BILIBILI_COOKIES_FILE"] = req.cookies
         env["BILI_COOKIE_FILE"] = req.cookies
@@ -165,8 +186,29 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env["ENABLE_DIALOGUE_DETECTION"] = "true" if req.dialogue_detection else "false"
     env["KEEP_ORIGINAL_SUBTITLES"] = "true" if req.keep_original_subtitles else "false"
     env["OVERWRITE_OUTPUT"] = "true" if req.overwrite_outputs else "false"
+    env["LOCAL_NOTE_STUDIO_INCOGNITO"] = "true" if req.incognito_mode else "false"
+    env["VIDEO_MANIFEST_ENABLED"] = "false" if req.incognito_mode else env.get("VIDEO_MANIFEST_ENABLED", "true")
+    env["BILIBILI_INCREMENTAL_STATE_ENABLED"] = "false" if req.incognito_mode else env.get("BILIBILI_INCREMENTAL_STATE_ENABLED", "true")
+    env["KEYFRAME_MANIFEST_ENABLED"] = "false" if req.incognito_mode else env.get("KEYFRAME_MANIFEST_ENABLED", "true")
     env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
     env["ENABLE_OCR"] = "true" if req.enable_ocr else "false"
+    env["WEB_CAPTURE_MODE"] = req.web_capture_mode if req.web_capture_mode in {"static", "browser"} else "static"
+    env["BROWSER_EXECUTABLE"] = req.browser_executable
+    env["BROWSER_PROFILE"] = req.browser_profile if req.web_capture_mode == "browser" else ""
+    env["OCR_RESUME"] = "true" if req.ocr_resume else "false"
+    if req.timeout_seconds > 0:
+        env["WEB_FETCH_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
+        env["QWEN_PDF_POLISH_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
+        env["QWEN_QUICKREAD_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
+        env["QWEN_ORGANIZE_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
+    if req.retry_count > 0:
+        env["QWEN_QUICKREAD_MAX_RETRIES"] = str(req.retry_count)
+        env["QWEN_ORGANIZE_MAX_RETRIES"] = str(req.retry_count)
+    if req.cooldown_delay > 0:
+        env["COOLDOWN_DELAY"] = str(req.cooldown_delay)
+    if req.chunk_chars > 0:
+        env["QWEN_ORGANIZE_MAX_CHARS"] = str(req.chunk_chars)
+        env["QWEN_QUICKREAD_TRANSLATION_CHARS"] = str(req.chunk_chars)
     subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
     if subtitle_strategy == "web":
         env["BILIBILI_PREFER_WEB_SUBTITLE"] = "true"
@@ -818,9 +860,10 @@ def command_for(req: TaskRequest) -> list[str]:
             command.extend(["--output-filename", req.output_filename])
         return command
     if req.task in {"source-file", "ai-chat"}:
+        source_path = pathlib.Path(req.source)
         command = [
             *python_cmd(req, SCRIPTS_DIR / "convert_sources_to_md.py"),
-            "--source",
+            "--source-dir" if req.task == "source-file" and source_path.is_dir() else "--source",
             req.source,
             "--output-dir",
             req.output_dir,
@@ -895,12 +938,22 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         backfill_legacy_bilibili_originals(pathlib.Path(req.output_dir))
         archive_legacy_bilibili_drafts(pathlib.Path(req.output_dir))
 
+    recovery_base = pathlib.Path(env.get("LOCAL_NOTE_STUDIO_STATE_DIR") or pathlib.Path.home() / "Library/Application Support/Local Note Studio/state") / "recovery"
+    recovery_key = hashlib.sha256(f"{req.task}\0{req.source}\0{req.output_dir}".encode("utf-8")).hexdigest()
+    recovery_dir = recovery_base / recovery_key
+
     with tempfile.TemporaryDirectory(prefix="local-note-studio-drafts-") as staging_dir:
         staged_req = replace(req, output_dir=staging_dir)
-        convert_command = command_for(staged_req)
-        print("已创建临时草稿区；整理完成后会自动清理。")
-        output = run_process(convert_command, env)
-        if req.task == "bilibili-up-opus":
+        resumed_recovery = req.retry_failed and recovery_dir.exists() and any(recovery_dir.glob("*.md"))
+        if resumed_recovery:
+            shutil.copytree(recovery_dir, staging_dir, dirs_exist_ok=True)
+            print(f"[恢复] 已载入上次转换完成但整理失败的草稿：{recovery_dir}")
+            output = ""
+        else:
+            convert_command = command_for(staged_req)
+            print("已创建临时草稿区；整理完成后会自动清理。")
+            output = run_process(convert_command, env)
+        if req.task == "bilibili-up-opus" or resumed_recovery:
             converted_paths = [
                 str(path)
                 for path in sorted(
@@ -914,6 +967,12 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
             print("未从转换输出中识别到 Markdown 路径，跳过 Qwen 整理。", file=sys.stderr)
             return ""
 
+        recovery_dir.parent.mkdir(parents=True, exist_ok=True)
+        if recovery_dir.exists():
+            shutil.rmtree(recovery_dir)
+        shutil.copytree(staging_dir, recovery_dir)
+        print(f"[恢复点] 转换草稿已暂存；若 Qwen 失败，可从任务历史只重试整理步骤：{recovery_dir}")
+
         organize_command = [*python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py")]
         for converted_path in converted_paths:
             organize_command.extend(["--source", converted_path])
@@ -926,6 +985,7 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         print(f"开始 Qwen 整理：共 {len(converted_paths)} 篇，正式输出到 {req.output_dir}")
         run_process(organize_command, env)
         promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
+        shutil.rmtree(recovery_dir, ignore_errors=True)
 
     if req.task in {"bilibili-opus", "bilibili-up-opus"}:
         archive_legacy_bilibili_drafts(pathlib.Path(req.output_dir))
@@ -1047,6 +1107,163 @@ def changed_outputs(output_dir: str, before: dict[pathlib.Path, tuple[int, int]]
     return sorted(path for path, signature in after.items() if before.get(path) != signature)
 
 
+def _manifest_path_exists(raw: object) -> bool:
+    value = str(raw or "").strip()
+    if not value:
+        return False
+    if value.startswith("file://"):
+        value = urllib.parse.unquote(urllib.parse.urlparse(value).path)
+    path = pathlib.Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.exists()
+
+
+def _manifest_item_detail(item: dict[str, Any]) -> tuple[str, str, str]:
+    raw = str(item.get("status") or "").strip().lower()
+    organized_status = str(item.get("organized_status") or "").strip().lower()
+    error = str(item.get("organize_error") or item.get("error") or item.get("keyframe_error") or "").strip()
+    if organized_status in {"failed", "error"} or raw in {"failed", "error"} or error:
+        return "failed", str(item.get("organized_output_path") or item.get("output_path") or ""), error or "处理过程中记录了错误"
+
+    action = str(item.get("last_action") or "").strip().lower()
+    organized_output = item.get("organized_output_path")
+    if organized_status == "organized":
+        if organized_output and not _manifest_path_exists(organized_output):
+            return "rebuild", str(organized_output), "正式笔记文件已不存在，可以重新运行该来源"
+        return ("skipped" if action == "skipped" else "processed"), str(organized_output or ""), ""
+
+    output_value = organized_output or item.get("note_path") or item.get("output") or item.get("output_path")
+    if output_value:
+        if not _manifest_path_exists(output_value):
+            value = str(output_value)
+            return "rebuild", value, "记录指向的输出文件已不存在，可以重新运行该来源"
+    if action == "skipped" or raw in {"skipped", "skip"} or item.get("skipped") is True:
+        return "skipped", str(output_value or ""), ""
+    return "processed", str(output_value or ""), ""
+
+
+def _manifest_item_status(item: dict[str, Any]) -> str:
+    return _manifest_item_detail(item)[0]
+
+
+def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
+    roots: list[pathlib.Path] = []
+    index_value = env.get("INDEX_DIR", "indexes")
+    index_path = pathlib.Path(index_value).expanduser()
+    roots.append(index_path if index_path.is_absolute() else WORKER_DIR / index_path)
+    if req.output_dir:
+        roots.append(pathlib.Path(req.output_dir).expanduser())
+    if req.source:
+        roots.append(pathlib.Path(req.source).expanduser())
+
+    paths: list[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
+    for root in roots:
+        if root.is_file() and root.name.endswith("manifest.json"):
+            candidates = [root]
+        elif root.exists():
+            candidates = list(root.rglob("*manifest.json"))
+        else:
+            candidates = []
+        for path in candidates:
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                paths.append(resolved)
+
+    manifests: list[dict[str, Any]] = []
+    totals = {"processed": 0, "skipped": 0, "failed": 0, "rebuild": 0}
+    for path in sorted(paths):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            items = payload.get("items", []) if isinstance(payload, dict) else []
+            counts = {"processed": 0, "skipped": 0, "failed": 0, "rebuild": 0}
+            normalized_items: list[dict[str, str]] = []
+            for raw_item in items if isinstance(items, list) else []:
+                if not isinstance(raw_item, dict):
+                    continue
+                status, output, reason = _manifest_item_detail(raw_item)
+                counts[status] += 1
+                totals[status] += 1
+                normalized_items.append(
+                    {
+                        "source": str(raw_item.get("source_url") or raw_item.get("source_path") or raw_item.get("source") or raw_item.get("bvid") or ""),
+                        "output": output,
+                        "status": status,
+                        "error": str(raw_item.get("organize_error") or raw_item.get("error") or raw_item.get("keyframe_error") or ""),
+                        "reason": reason,
+                    }
+                )
+            manifests.append({"path": str(path), "name": path.name, "counts": counts, "items": normalized_items})
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            totals["failed"] += 1
+            manifests.append(
+                {
+                    "path": str(path),
+                    "name": path.name,
+                    "counts": {"processed": 0, "skipped": 0, "failed": 1, "rebuild": 0},
+                    "items": [],
+                    "error": str(exc),
+                }
+            )
+
+    state_files: list[pathlib.Path] = []
+    failure_files: list[pathlib.Path] = []
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        state_files.extend(root.rglob("processed_videos.txt"))
+        failure_files.extend(root.rglob(".local-note-studio-batch-failures.json"))
+    for path in sorted(set(state_files)):
+        try:
+            ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except (OSError, UnicodeError):
+            ids = []
+        totals["processed"] += len(ids)
+        manifests.append(
+            {
+                "path": str(path),
+                "name": "B站增量状态",
+                "counts": {"processed": len(ids), "skipped": 0, "failed": 0, "rebuild": 0},
+                "items": [{"source": avid, "output": "", "status": "processed", "error": ""} for avid in ids],
+            }
+        )
+    for path in sorted(set(failure_files)):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            failures = [item for item in payload.get("failures", []) if isinstance(item, dict)]
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            failures = []
+        totals["failed"] += len(failures)
+        manifests.append(
+            {
+                "path": str(path),
+                "name": "B站批量失败状态",
+                "counts": {"processed": 0, "skipped": 0, "failed": len(failures), "rebuild": 0},
+                "items": [
+                    {
+                        "source": str(item.get("bvid") or item.get("url") or ""),
+                        "output": str(item.get("path") or ""),
+                        "status": "failed",
+                        "error": str(item.get("error") or item.get("stage") or ""),
+                    }
+                    for item in failures
+                ],
+            }
+        )
+    result = {"manifests": manifests, "totals": totals}
+    return "MANIFEST_STATUS_JSON:" + json.dumps(result, ensure_ascii=False) + "\n"
+
+
+def emit_task_result(req: TaskRequest, before: dict[pathlib.Path, tuple[int, int]]) -> None:
+    if req.dry_run:
+        return
+    outputs = [str(path) for path in changed_outputs(req.output_dir, before)] if req.output_dir else []
+    result = {"task": req.task, "status": "completed", "outputs": outputs, "output_dir": req.output_dir}
+    print("TASK_RESULT_JSON:" + json.dumps(result, ensure_ascii=False))
+
+
 def markdown_image_targets(markdown: str) -> list[str]:
     targets = [match.group(1).strip() for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", markdown)]
     targets.extend(match.group(1).strip() for match in re.finditer(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", markdown, re.I))
@@ -1164,6 +1381,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-base", default="", help="OpenAI-compatible API base.")
     parser.add_argument("--api-key", default="", help="OpenAI-compatible API key.")
     parser.add_argument("--model", default="", help="LLM model name.")
+    parser.add_argument("--asr-model", default="", help="Local ASR model directory.")
     parser.add_argument("--cookies", default="", help="Bilibili Netscape cookies.txt path.")
     parser.add_argument("--browser-profile", default="", help="Chrome profile directory name or absolute path.")
     parser.add_argument(
@@ -1182,8 +1400,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-keep-original-subtitles", action="store_true", help="Do not keep the raw subtitle section in video notes.")
     parser.add_argument("--recursive-search", action="store_true", help="Recursively scan local video directories.")
     parser.add_argument("--overwrite-outputs", action="store_true", help="Overwrite existing output files.")
+    parser.add_argument("--incognito-mode", action="store_true", help="Do not read or write manifests and incremental state.")
     parser.add_argument("--stock-terms", action="store_true", help="Enable A-share stock terminology validation.")
     parser.add_argument("--enable-ocr", action="store_true", help="Enable OCR for images and scanned PDFs in source conversion.")
+    parser.add_argument("--web-capture-mode", default="static", choices=["static", "browser"], help="Use static HTTP or an explicit browser session for webpages.")
+    parser.add_argument("--browser-executable", default="", help="Chrome/Chromium executable for browser-session webpage capture.")
+    parser.add_argument("--timeout-seconds", type=int, default=0, help="Per-task network/model timeout override.")
+    parser.add_argument("--retry-count", type=int, default=0, help="Per-task retry-count override.")
+    parser.add_argument("--cooldown-delay", type=int, default=0, help="Delay between adjacent model calls.")
+    parser.add_argument("--chunk-chars", type=int, default=0, help="Per-task model chunk-size override.")
+    parser.add_argument("--no-ocr-resume", action="store_true", help="Disable OCR checkpoint resume.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
     return parser.parse_args(argv)
 
@@ -1201,6 +1427,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         api_base=args.api_base,
         api_key=args.api_key,
         model=args.model,
+        asr_model=args.asr_model,
         cookies=args.cookies,
         browser_profile=args.browser_profile,
         subtitle_strategy=args.subtitle_strategy,
@@ -1214,8 +1441,16 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         keep_original_subtitles=not args.no_keep_original_subtitles,
         recursive_search=args.recursive_search,
         overwrite_outputs=args.overwrite_outputs,
+        incognito_mode=args.incognito_mode,
         stock_terms=args.stock_terms,
         enable_ocr=args.enable_ocr,
+        web_capture_mode=args.web_capture_mode,
+        browser_executable=args.browser_executable,
+        timeout_seconds=args.timeout_seconds,
+        retry_count=args.retry_count,
+        cooldown_delay=args.cooldown_delay,
+        chunk_chars=args.chunk_chars,
+        ocr_resume=not args.no_ocr_resume,
         dry_run=args.dry_run,
     )
 
@@ -1224,6 +1459,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     req = request_from_args(args)
     env = build_env(req)
+    if req.incognito_mode and req.task not in {
+        "env-check",
+        "bilibili-cookie-status",
+        "bilibili-collections",
+        "bilibili-access-check",
+        "manifest-status",
+        "refresh-bilibili-cookies",
+    }:
+        print("[隐身模式] 本次任务不会读取或写入 Manifest、关键帧 Manifest 或 B站增量状态。", flush=True)
     if req.task == "env-check":
         sys.stdout.write(check_environment(req, env))
         return 0
@@ -1236,14 +1480,19 @@ def main(argv: list[str] | None = None) -> int:
     if req.task == "bilibili-access-check":
         sys.stdout.write(check_bilibili_target_access(req))
         return 0
+    if req.task == "manifest-status":
+        sys.stdout.write(manifest_status(req, env))
+        return 0
     before = output_snapshot(req.output_dir)
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
         sys.stdout.write(run_convert_and_organize_task(req, env))
         validate_task_outputs(req, before)
+        emit_task_result(req, before)
         return 0
     command = command_for(req)
     sys.stdout.write(run_command(command, env, req.dry_run))
     validate_task_outputs(req, before)
+    emit_task_result(req, before)
     return 0
 
 

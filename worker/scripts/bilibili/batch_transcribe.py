@@ -68,6 +68,7 @@ STATE_DIR = _expand_path(
 )
 PROCESSED_FILE = os.path.join(STATE_DIR, "processed_videos.txt")
 REPORT_FILE = os.path.join(STATE_DIR, "transcript_report.csv")
+INCREMENTAL_STATE_ENABLED = str(_env.get("BILIBILI_INCREMENTAL_STATE_ENABLED", "true")).strip().lower() not in {"0", "false", "no", "off"}
 OUTPUT_DIR = _expand_path(
     _env.get("OUTPUT_DIR", _env.get("BILIBILI_OUTPUT_DIR", os.path.join(PROJECT_DIR, "notes", "_inbox", "bilibili")))
 )
@@ -117,7 +118,8 @@ LEGACY_PLACEHOLDERS = {
 }
 ALL_PLACEHOLDERS = list(PLACEHOLDERS.values()) + list(LEGACY_PLACEHOLDERS.values())
 
-os.makedirs(STATE_DIR, exist_ok=True)
+if INCREMENTAL_STATE_ENABLED:
+    os.makedirs(STATE_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
@@ -138,6 +140,8 @@ def get_python_cmd():
 
 
 def load_processed():
+    if not INCREMENTAL_STATE_ENABLED:
+        return set()
     processed = set()
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE) as f:
@@ -146,6 +150,8 @@ def load_processed():
 
 
 def save_processed(avid):
+    if not INCREMENTAL_STATE_ENABLED:
+        return
     with open(PROCESSED_FILE, "a") as f:
         f.write(f"{avid}\n")
 
@@ -1298,7 +1304,7 @@ def main():
     print(f"   失败: {fail_count} 个 {'❌' if fail_count else '✅'}")
     print(f"   耗时: {int(total_time // 60)}分{int(total_time % 60)}秒")
 
-    if report_rows:
+    if report_rows and INCREMENTAL_STATE_ENABLED:
         with open(REPORT_FILE, "w", newline="", encoding="utf-8") as f:
             fieldnames = [
                 "bvid", "title", "author", "duration",

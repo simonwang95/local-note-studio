@@ -36,6 +36,7 @@ DEFAULTS = {
     "QWEN_ORGANIZE_RETRY_DELAY": "3",
     "QWEN_ORGANIZE_COOLDOWN_DELAY": "",
     "A_SHARE_TERMS_ENABLED": "false",
+    "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
 }
 
 
@@ -648,7 +649,8 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest_path = (ROOT / cfg["INDEX_DIR"] / "source-manifest.json").resolve()
-    manifest = load_manifest(manifest_path)
+    manifest_enabled = str(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")).strip().lower() not in {"1", "true", "yes", "on"}
+    manifest = load_manifest(manifest_path) if manifest_enabled else {"items": []}
     output_dir = (ROOT / args.output_dir).resolve()
 
     if args.source:
@@ -739,7 +741,10 @@ def main() -> int:
                     }
                 )
             print(f"{progress_label} 失败（{title}）：{exc}", file=sys.stderr, flush=True)
-    save_manifest(manifest_path, manifest)
+    if manifest_enabled:
+        save_manifest(manifest_path, manifest)
+    else:
+        print("manifest disabled (incognito)", flush=True)
     print(f"整理阶段完成：成功 {organized}，跳过 {skipped}，失败 {failed}。")
     return 1 if failed else 0
 

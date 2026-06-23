@@ -26,6 +26,9 @@ def load_module(name: str, path: pathlib.Path):
 
 worker = load_module("local_note_studio_worker_test", WORKER_PATH)
 runner = load_module("run_bilibili_transcript_test", ROOT / "worker" / "scripts" / "run_bilibili_transcript.py")
+converter = load_module("convert_sources_to_md_test", ROOT / "worker" / "scripts" / "convert_sources_to_md.py")
+quickread = load_module("quick_read_pdf_test", ROOT / "worker" / "scripts" / "quick_read_pdf.py")
+keyframes = sys.modules["video_keyframes"]
 
 
 class RequestAndCommandContractTests(unittest.TestCase):
@@ -41,6 +44,30 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual((req.favorite_limit, req.collection_type, req.collection_id, req.collection_mid), (0, "series", "42", "7"))
         self.assertTrue(req.retry_failed)
         self.assertFalse(req.keep_original_subtitles)
+
+    def test_p1_request_mapping_and_task_overrides(self):
+        req = worker.TaskRequest.from_mapping({
+            "task": "web-url", "web_capture_mode": "browser", "browser_executable": "/Applications/Chrome",
+            "timeout_seconds": "600", "retry_count": "3", "cooldown_delay": "12", "chunk_chars": "24000",
+            "ocr_resume": False,
+        })
+        env = worker.build_env(req)
+        self.assertEqual(req.web_capture_mode, "browser")
+        self.assertEqual(env["WEB_CAPTURE_MODE"], "browser")
+        self.assertEqual(env["QWEN_ORGANIZE_TIMEOUT_SECONDS"], "600")
+        self.assertEqual(env["QWEN_ORGANIZE_MAX_RETRIES"], "3")
+        self.assertEqual(env["COOLDOWN_DELAY"], "12")
+        self.assertEqual(env["QWEN_ORGANIZE_MAX_CHARS"], "24000")
+        self.assertEqual(env["OCR_RESUME"], "false")
+
+    def test_incognito_request_disables_all_manifest_state_flags(self):
+        req = worker.TaskRequest.from_mapping({"task": "source-file", "incognito_mode": True})
+        env = worker.build_env(req)
+        self.assertTrue(req.incognito_mode)
+        self.assertEqual(env["LOCAL_NOTE_STUDIO_INCOGNITO"], "true")
+        self.assertEqual(env["VIDEO_MANIFEST_ENABLED"], "false")
+        self.assertEqual(env["BILIBILI_INCREMENTAL_STATE_ENABLED"], "false")
+        self.assertEqual(env["KEYFRAME_MANIFEST_ENABLED"], "false")
 
     def test_major_task_command_contracts(self):
         cases = {
@@ -119,6 +146,96 @@ class IntegrityTests(unittest.TestCase):
         errors = worker.validate_markdown_output(path, worker.TaskRequest(task="paper-quickread"))
         self.assertTrue(any("全文翻译" in item for item in errors))
 
+    def test_manifest_status_classifies_processed_failed_and_rebuild(self):
+        existing = self.root / "ready.md"
+        existing.write_text("# ready\n", encoding="utf-8")
+        manifest = {
+            "items": [
+                {"source": "ok", "output_path": str(existing), "status": "converted"},
+                {"source": "bad", "error": "boom", "status": "failed"},
+                {"source": "missing", "output_path": str(self.root / "missing.md"), "status": "converted"},
+            ]
+        }
+        (self.root / "source-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        text = worker.manifest_status(
+            worker.TaskRequest(task="manifest-status", source=str(self.root)),
+            {"INDEX_DIR": str(self.root)},
+        )
+        data = json.loads(text.removeprefix("MANIFEST_STATUS_JSON:"))
+        self.assertEqual(data["totals"], {"processed": 1, "skipped": 0, "failed": 1, "rebuild": 1})
+
+    def test_manifest_prefers_organized_note_over_deleted_staging_draft(self):
+        organized = self.root / "organized.md"
+        organized.write_text("# organized\n", encoding="utf-8")
+        item = {
+            "status": "converted",
+            "output_path": "/tmp/local-note-studio-drafts-old/draft.md",
+            "organized_status": "organized",
+            "organized_output_path": str(organized),
+            "error": "",
+            "organize_error": "",
+        }
+        status, output, reason = worker._manifest_item_detail(item)
+        self.assertEqual((status, output, reason), ("processed", str(organized), ""))
+        organized.unlink()
+        status, _, reason = worker._manifest_item_detail(item)
+        self.assertEqual(status, "rebuild")
+        self.assertIn("正式笔记", reason)
+
+    def test_ocr_checkpoint_round_trip(self):
+        source = self.root / "scan.pdf"
+        source.write_bytes(b"fixture")
+        checkpoint_dir = self.root / "ocr-state"
+        with mock.patch.dict("os.environ", {"OCR_CHECKPOINT_DIR": str(checkpoint_dir), "OCR_RESUME": "true"}):
+            converter.save_ocr_checkpoint(source, "Fixture", ["page one", None])
+            self.assertEqual(converter.load_ocr_checkpoint(source, "Fixture", 2), ["page one", None])
+
+    def test_incognito_source_conversion_does_not_read_or_write_manifest(self):
+        source = self.root / "fixture.csv"
+        source.write_text("name,value\nalpha,1\n", encoding="utf-8")
+        output = self.root / "output"
+        index = self.root / "index"
+        index.mkdir()
+        manifest = index / "source-manifest.json"
+        sentinel = "not-json-and-must-stay-untouched\n"
+        manifest.write_text(sentinel, encoding="utf-8")
+        with (
+            mock.patch.dict("os.environ", {"LOCAL_NOTE_STUDIO_INCOGNITO": "true", "INDEX_DIR": str(index)}),
+            mock.patch.object(sys, "argv", ["convert_sources_to_md.py", "--source", str(source), "--output-dir", str(output)]),
+        ):
+            self.assertEqual(converter.main(), 0)
+        self.assertEqual(manifest.read_text(encoding="utf-8"), sentinel)
+        self.assertTrue(list(output.glob("*.md")))
+
+    def test_incognito_quickread_does_not_read_or_write_manifest(self):
+        source = self.root / "paper.pdf"
+        source.write_bytes(b"fixture")
+        output = self.root / "quickread"
+        index = self.root / "quickread-index"
+        index.mkdir()
+        manifest = index / "quickread-manifest.json"
+        sentinel = "not-json-and-must-stay-untouched\n"
+        manifest.write_text(sentinel, encoding="utf-8")
+        cfg = {
+            **quickread.DEFAULTS,
+            "INDEX_DIR": str(index),
+            "LOCAL_NOTE_STUDIO_INCOGNITO": "true",
+        }
+        with mock.patch.object(quickread, "extract_pdf", return_value=("Fixture Paper", 1, "body")):
+            path = quickread.write_quickread(source, output, cfg, overwrite=True, prompt_only=True)
+        self.assertTrue(path.exists())
+        self.assertEqual(manifest.read_text(encoding="utf-8"), sentinel)
+
+    def test_semantic_keyframe_selection_and_visual_filter(self):
+        markdown = "# 标题\n\n## 核心结论\n\n核心结论是增长来自效率提升，因此需要关注风险和关键指标。\n\n## 方法\n\n首先比较方案，然后验证数据，最后给出建议。"
+        points = keyframes._structured_semantic_points(markdown, 120.0, 2)
+        self.assertTrue(points)
+        self.assertTrue(all(0 < point["timestamp"] < 120 for point in points))
+        self.assertFalse(keyframes._usable_fingerprint(bytes([0] * 256), []))
+        varied = bytes([index % 256 for index in range(256)])
+        self.assertTrue(keyframes._usable_fingerprint(varied, []))
+        self.assertFalse(keyframes._usable_fingerprint(varied, [varied]))
+
 
 class BatchAndDiagnosticsTests(unittest.TestCase):
     def test_collection_batch_applies_cooldown_only_between_qwen_calls(self):
@@ -167,6 +284,26 @@ class BatchAndDiagnosticsTests(unittest.TestCase):
             self.assertEqual(runner.load_batch_failures(cfg, collection), failures)
             with self.assertRaises(RuntimeError):
                 runner.load_batch_failures(cfg, {"type": "favorite", "id": "other", "mid": "2"})
+
+    def test_incognito_collection_does_not_persist_processed_or_failure_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            cfg = {
+                "BILIBILI_OUTPUT_DIR": temp,
+                "BILIBILI_STATE_DIR": str(root / "state"),
+                "BILIBILI_INCREMENTAL_STATE_ENABLED": "false",
+            }
+            runner.append_processed("123", cfg)
+            failure_path = runner.save_batch_failures(
+                cfg,
+                {"type": "favorite", "id": "1", "mid": "2"},
+                [{"bvid": "BV123", "stage": "qwen"}],
+            )
+            self.assertIsNone(failure_path)
+            self.assertFalse((root / "state" / "processed_videos.txt").exists())
+            self.assertFalse((root / ".local-note-studio-batch-failures.json").exists())
+            with self.assertRaisesRegex(RuntimeError, "隐身模式"):
+                runner.load_batch_failures(cfg, {"type": "favorite", "id": "1", "mid": "2"})
 
     def test_restricted_content_categories_are_distinct(self):
         self.assertIn("未登录", worker.bilibili_error_category(-101, ""))

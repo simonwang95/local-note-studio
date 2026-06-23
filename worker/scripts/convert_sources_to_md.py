@@ -83,9 +83,13 @@ DEFAULTS = {
     "QWEN_PDF_POLISH_COOLDOWN_DELAY": "",
     "QWEN_PDF_POLISH_OVERLAP_PAGES": "1",
     "WEB_FETCH_TIMEOUT_SECONDS": "30",
+    "WEB_CAPTURE_MODE": "static",
+    "BROWSER_EXECUTABLE": "",
+    "BROWSER_PROFILE": "",
     "WEB_DOWNLOAD_ASSETS": "true",
     "WEB_ASSET_MAX_BYTES": str(50 * 1024 * 1024),
     "ENABLE_OCR": "false",
+    "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
     "WEB_USER_AGENT": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -240,6 +244,9 @@ def save_manifest(path: pathlib.Path, manifest: dict[str, Any]) -> None:
 
 
 def update_manifest(manifest: dict[str, Any], item: dict[str, Any]) -> None:
+    if "last_action" not in item:
+        item["last_action"] = "failed" if item.get("status") == "failed" or item.get("error") else "processed"
+    item["last_checked_at"] = now_iso()
     items = manifest.setdefault("items", [])
     source_path = item.get("source_path", "")
     source_url = item.get("source_url", "")
@@ -500,6 +507,8 @@ def regex_group(pattern: str, text: str) -> str:
 
 
 def fetch_webpage(url: str, cfg: dict[str, str]) -> tuple[str, bytes, str]:
+    if cfg.get("WEB_CAPTURE_MODE", "static").strip().lower() == "browser":
+        return fetch_webpage_with_browser(url, cfg)
     headers = {
         "User-Agent": cfg["WEB_USER_AGENT"],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -512,6 +521,61 @@ def fetch_webpage(url: str, cfg: dict[str, str]) -> tuple[str, bytes, str]:
         charset = response.headers.get_content_charset() or "utf-8"
         final_url = response.geturl()
     return body.decode(charset, errors="replace"), body, final_url
+
+
+def chrome_executable(cfg: dict[str, str]) -> str:
+    configured = cfg.get("BROWSER_EXECUTABLE", "").strip()
+    candidates = [
+        configured,
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        shutil.which("google-chrome") or "",
+        shutil.which("chromium") or "",
+    ]
+    for candidate in candidates:
+        if candidate and pathlib.Path(candidate).exists():
+            return candidate
+    raise RuntimeError("浏览器会话采集需要 Chrome/Chromium；请填写可执行文件路径")
+
+
+def fetch_webpage_with_browser(url: str, cfg: dict[str, str]) -> tuple[str, bytes, str]:
+    profile_value = cfg.get("BROWSER_PROFILE", "").strip()
+    if not profile_value:
+        raise RuntimeError("浏览器会话采集只会在明确选择后启用；请先选择 Chrome Profile")
+    profile = pathlib.Path(profile_value).expanduser().resolve()
+    if not profile.exists():
+        raise RuntimeError(f"Chrome Profile 不存在: {profile}")
+    if (profile / "Preferences").exists():
+        user_data_dir = profile.parent
+        profile_name = profile.name
+    else:
+        user_data_dir = profile
+        profile_name = "Default"
+    command = [
+        chrome_executable(cfg),
+        "--headless=new",
+        "--disable-gpu",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        f"--user-data-dir={user_data_dir}",
+        f"--profile-directory={profile_name}",
+        "--dump-dom",
+        url,
+    ]
+    print(f"[浏览器采集] 仅使用所选 Profile 访问当前 URL：{url}", flush=True)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        timeout=max(10, int(cfg["WEB_FETCH_TIMEOUT_SECONDS"])),
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace")
+        if "already in use" in detail.lower() or "singleton" in detail.lower():
+            detail += "\n所选 Chrome Profile 正被浏览器占用，请关闭对应 Chrome 窗口后重试。"
+        raise RuntimeError(f"浏览器会话采集失败: {compact_error_detail(detail)}")
+    body = bytes(result.stdout)
+    return body.decode("utf-8", errors="replace"), body, url
 
 
 def is_bilibili_opus_url(url: str) -> bool:
@@ -1305,6 +1369,11 @@ def should_skip_url(
 ) -> bool:
     if overwrite or not output.exists():
         return False
+    for item in manifest.get("items", []):
+        if isinstance(item, dict) and item.get("source_url") == url:
+            item["last_action"] = "skipped"
+            item["last_checked_at"] = now_iso()
+            break
     return True
 
 
@@ -1798,21 +1867,103 @@ def extract_pdf_page_images(path: pathlib.Path, max_pages: int | None = None) ->
     return image_paths
 
 
+def emit_progress(
+    phase: str,
+    current: int,
+    total: int,
+    *,
+    backend: str = "",
+    label: str = "",
+    resumed: bool = False,
+) -> None:
+    payload = {
+        "phase": phase,
+        "current": current,
+        "total": total,
+        "backend": backend,
+        "label": label,
+        "resumed": resumed,
+    }
+    print("PROGRESS_JSON:" + json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def ocr_checkpoint_path(path: pathlib.Path, backend: str) -> pathlib.Path:
+    configured = os.environ.get("OCR_CHECKPOINT_DIR", "").strip()
+    root = pathlib.Path(configured).expanduser() if configured else pathlib.Path.home() / "Library/Application Support/Local Note Studio/state/ocr-checkpoints"
+    signature = f"{path.resolve()}:{path.stat().st_size}:{path.stat().st_mtime_ns}:{backend}"
+    return root / f"{hashlib.sha256(signature.encode('utf-8')).hexdigest()}.json"
+
+
+def load_ocr_checkpoint(path: pathlib.Path, backend: str, total: int) -> list[str | None]:
+    pages: list[str | None] = [None] * total
+    if not parse_bool(os.environ.get("OCR_RESUME", "true")):
+        return pages
+    checkpoint = ocr_checkpoint_path(path, backend)
+    try:
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+        saved = payload.get("pages", [])
+        if payload.get("total") == total and isinstance(saved, list):
+            for index, text in enumerate(saved[:total]):
+                if isinstance(text, str):
+                    pages[index] = text
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        pass
+    return pages
+
+
+def save_ocr_checkpoint(path: pathlib.Path, backend: str, pages: list[str | None]) -> None:
+    checkpoint = ocr_checkpoint_path(path, backend)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    temp = checkpoint.with_suffix(".tmp")
+    temp.write_text(
+        json.dumps({"source": str(path.resolve()), "backend": backend, "total": len(pages), "pages": pages}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp.replace(checkpoint)
+
+
+def recognize_ocr_pages(
+    source: pathlib.Path,
+    backend: str,
+    page_images: list[pathlib.Path],
+    recognize: Any,
+) -> list[str]:
+    total = len(page_images)
+    pages = load_ocr_checkpoint(source, backend, total)
+    completed = sum(text is not None for text in pages)
+    if completed:
+        emit_progress("OCR", completed, total, backend=backend, label="读取已完成页", resumed=True)
+    for index, image_path in enumerate(page_images):
+        if pages[index] is not None:
+            continue
+        emit_progress("OCR", index, total, backend=backend, label=f"识别第 {index + 1} 页")
+        pages[index] = clean_text(str(recognize(image_path) or ""))
+        save_ocr_checkpoint(source, backend, pages)
+        emit_progress("OCR", index + 1, total, backend=backend, label=f"第 {index + 1} 页完成")
+    return [text or "" for text in pages]
+
+
 def ocr_document(path: pathlib.Path, cfg: dict[str, str], max_pages: int | None = None) -> list[str]:
     errors: list[str] = []
     try:
         return ocr_with_qwen(cfg, path, max_pages=max_pages)
     except Exception as exc:
-        errors.append(f"qwen vision backend failed: {compact_error_detail(exc)}")
+        detail = compact_error_detail(exc)
+        errors.append(f"qwen vision backend failed: {detail}")
+        emit_progress("OCR 回退", 0, 1, backend="Qwen Vision", label=detail)
     if shutil.which("tesseract"):
         try:
             return ocr_with_tesseract(path, max_pages=max_pages)
         except Exception as exc:
-            errors.append(f"tesseract backend failed: {compact_error_detail(exc)}")
+            detail = compact_error_detail(exc)
+            errors.append(f"tesseract backend failed: {detail}")
+            emit_progress("OCR 回退", 0, 1, backend="Tesseract/Poppler", label=detail)
     try:
         return ocr_with_swift(path, max_pages=max_pages)
     except Exception as exc:
-        errors.append(f"macOS Vision backend failed: {compact_error_detail(exc)}")
+        detail = compact_error_detail(exc)
+        errors.append(f"macOS Vision backend failed: {detail}")
+        emit_progress("OCR 失败", 0, 1, backend="macOS Vision", label=detail)
     raise RuntimeError(
         "OCR backend unavailable. "
         "Enable a multimodal Qwen/OpenAI-compatible model, or install `tesseract` (and `pdftoppm` for scanned PDFs), or fix local Xcode/Swift toolchain for the Vision fallback. "
@@ -1826,14 +1977,17 @@ def ocr_with_qwen(cfg: dict[str, str], path: pathlib.Path, max_pages: int | None
     if not api_base or not model:
         raise RuntimeError("LLM API base or model is not configured")
     if path.suffix.lower() in IMAGE_SOURCE_EXTS:
-        return [vision_ocr_image(cfg, path)]
+        emit_progress("OCR", 0, 1, backend="Qwen Vision", label=path.name)
+        text = vision_ocr_image(cfg, path)
+        emit_progress("OCR", 1, 1, backend="Qwen Vision", label=path.name)
+        return [text]
     if path.suffix.lower() != ".pdf":
         raise RuntimeError(f"unsupported Qwen OCR source: {path}")
     image_paths = extract_pdf_page_images(path, max_pages=max_pages)
     if not image_paths:
         raise RuntimeError("no page images found in PDF; cannot run vision OCR")
     try:
-        return [vision_ocr_image(cfg, image_path) for image_path in image_paths]
+        return recognize_ocr_pages(path, "Qwen Vision", image_paths, lambda image_path: vision_ocr_image(cfg, image_path))
     finally:
         temp_dir = image_paths[0].parent if image_paths else None
         if temp_dir and temp_dir.name.startswith("local-note-pdf-images-"):
@@ -1843,6 +1997,7 @@ def ocr_with_qwen(cfg: dict[str, str], path: pathlib.Path, max_pages: int | None
 def ocr_with_tesseract(path: pathlib.Path, max_pages: int | None = None) -> list[str]:
     langs = os.environ.get("OCR_LANGS", "chi_sim+eng")
     if path.suffix.lower() in IMAGE_SOURCE_EXTS:
+        emit_progress("OCR", 0, 1, backend="Tesseract", label=path.name)
         result = subprocess.run(
             ["tesseract", str(path), "stdout", "-l", langs],
             capture_output=True,
@@ -1851,6 +2006,7 @@ def ocr_with_tesseract(path: pathlib.Path, max_pages: int | None = None) -> list
         )
         if result.returncode != 0:
             raise RuntimeError(compact_error_detail(result.stderr or result.stdout or "tesseract failed"))
+        emit_progress("OCR", 1, 1, backend="Tesseract", label=path.name)
         return [clean_text(result.stdout)]
     if path.suffix.lower() != ".pdf":
         raise RuntimeError(f"unsupported tesseract OCR source: {path}")
@@ -1867,11 +2023,20 @@ def ocr_with_tesseract(path: pathlib.Path, max_pages: int | None = None) -> list
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(compact_error_detail(result.stderr or result.stdout or "pdftoppm failed"))
-        pages: list[str] = []
-        for image_path in sorted(temp_path.glob("page-*.png")):
-            text = ocr_with_tesseract(image_path)[0]
-            pages.append(text)
-        return pages
+        images = sorted(temp_path.glob("page-*.png"))
+
+        def recognize(image_path: pathlib.Path) -> str:
+            page_result = subprocess.run(
+                ["tesseract", str(image_path), "stdout", "-l", langs],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if page_result.returncode != 0:
+                raise RuntimeError(compact_error_detail(page_result.stderr or page_result.stdout or "tesseract failed"))
+            return page_result.stdout
+
+        return recognize_ocr_pages(path, "Tesseract/Poppler", images, recognize)
 
 
 def ocr_with_swift(path: pathlib.Path, max_pages: int | None = None) -> list[str]:
@@ -1898,14 +2063,19 @@ def ocr_with_swift(path: pathlib.Path, max_pages: int | None = None) -> list[str
         command = [str(binary_path), "--source", str(path)]
         if max_pages:
             command.extend(["--max-pages", str(max_pages)])
+        total = max_pages or 1
+        emit_progress("OCR", 0, total, backend="macOS Vision", label="启动系统 Vision 识别")
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(compact_error_detail(result.stderr or result.stdout or "OCR command failed"))
         payload = json.loads(result.stdout or "{}")
         pages = payload.get("pages")
         if isinstance(pages, list):
-            return [clean_text(str(item.get("text") or "")) for item in pages if isinstance(item, dict)]
+            texts = [clean_text(str(item.get("text") or "")) for item in pages if isinstance(item, dict)]
+            emit_progress("OCR", len(texts), len(texts) or total, backend="macOS Vision", label="识别完成")
+            return texts
         text = clean_text(str(payload.get("text") or ""))
+        emit_progress("OCR", 1 if text else 0, 1, backend="macOS Vision", label="识别完成")
         return [text] if text else []
 
 
@@ -2718,6 +2888,15 @@ def should_skip(
 ) -> bool:
     if overwrite or not output.exists():
         return False
+    source_value = rel(source)
+    output_value = rel(output)
+    for item in manifest.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("source_path") == source_value or item.get("source_hash") == source_hash or item.get("output_path") == output_value:
+            item["last_action"] = "skipped"
+            item["last_checked_at"] = now_iso()
+            break
     return True
 
 
@@ -2748,6 +2927,7 @@ def main() -> int:
     parser.add_argument("--qwen-polish-pdf", action="store_true", help="ask the configured local Qwen model to polish PDF extraction into Markdown")
     parser.add_argument("--overwrite", action="store_true", help="overwrite existing outputs")
     parser.add_argument("--source", action="append", help="specific source path to convert")
+    parser.add_argument("--source-dir", help="recursively convert supported documents and images from one directory")
     parser.add_argument("--url", action="append", help="web page URL to convert, including WeChat public-account articles")
     parser.add_argument("--bilibili-up-opus", help="Bilibili space opus URL or UP UID to batch convert")
     parser.add_argument("--limit", type=int, default=0, help="maximum Bilibili UP opus posts to process; 0 means all")
@@ -2769,25 +2949,28 @@ def main() -> int:
     parser.add_argument("--output-dir", default=cfg["SAMPLE_OUTPUT_DIR"], help="Markdown output directory")
     args = parser.parse_args()
 
-    source_dir = (ROOT / cfg["SOURCE_DIR"]).resolve()
+    source_dir = (ROOT / (args.source_dir or cfg["SOURCE_DIR"])).resolve()
     output_dir = (ROOT / args.output_dir).resolve()
     index_dir = (ROOT / cfg["INDEX_DIR"]).resolve()
     manifest_path = index_dir / "source-manifest.json"
-    manifest = load_manifest(manifest_path)
+    manifest_enabled = not parse_bool(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false"))
+    manifest = load_manifest(manifest_path) if manifest_enabled else {"items": []}
     model = cfg["DEFAULT_LLM_MODEL"]
     max_pages = None if args.all_pages else int(cfg["SOURCE_CONVERSION_MAX_PDF_PAGES"])
     download_assets = parse_bool(cfg["WEB_DOWNLOAD_ASSETS"]) if args.download_assets is None else args.download_assets
 
     if args.limit < 0:
         parser.error("--limit 不能小于 0")
-    if args.bilibili_up_opus and (args.source or args.url):
-        parser.error("--bilibili-up-opus 不能和 --source/--url 同时使用")
+    if args.bilibili_up_opus and (args.source or args.source_dir or args.url):
+        parser.error("--bilibili-up-opus 不能和 --source/--source-dir/--url 同时使用")
     urls = args.url or []
     if args.bilibili_up_opus:
         urls = fetch_bilibili_space_opus_urls(args.bilibili_up_opus, cfg, args.limit)
         print(f"发现 {len(urls)} 条 UP 主图文，开始逐条转换。")
     if args.source:
         sources = [(ROOT / item).resolve() for item in args.source]
+    elif args.source_dir:
+        sources = discover_sources(source_dir, False, cfg)
     elif urls:
         sources = []
     else:
@@ -2801,6 +2984,7 @@ def main() -> int:
     pdf_cooldown_delay = float(cfg.get("QWEN_PDF_POLISH_COOLDOWN_DELAY") or 0)
     for source_index, source in enumerate(sources, start=1):
         try:
+            emit_progress("文件转换", source_index - 1, len(sources), backend="source", label=source.name)
             if not source.exists():
                 raise FileNotFoundError(source)
             source_hash = sha256_file(source)
@@ -2891,6 +3075,7 @@ def main() -> int:
             update_manifest(manifest, item)
             converted += 1
             print(f"converted {rel(source)} -> {rel(out_path)}")
+            emit_progress("文件转换", source_index, len(sources), backend=str(item.get("source_type") or source.suffix), label=source.name)
             if args.qwen_polish_pdf and source.suffix.lower() == ".pdf" and pdf_cooldown_delay > 0 and source_index < len(sources):
                 print(f"cooldown {pdf_cooldown_delay:g}s before next PDF source", file=sys.stderr)
                 time.sleep(pdf_cooldown_delay)
@@ -2954,11 +3139,13 @@ def main() -> int:
             request_delay = float(cfg.get("BILIBILI_OPUS_REQUEST_DELAY_SECONDS") or 0)
             if request_delay > 0:
                 time.sleep(request_delay)
-    save_manifest(manifest_path, manifest)
+    if manifest_enabled:
+        save_manifest(manifest_path, manifest)
     if args.bilibili_up_opus:
         print(f"抓取阶段完成：成功 {converted}，跳过 {skipped}，失败 {failed}。")
     else:
-        print(f"done converted={converted} skipped={skipped} failed={failed} manifest={rel(manifest_path)}")
+        manifest_label = rel(manifest_path) if manifest_enabled else "disabled (incognito)"
+        print(f"done converted={converted} skipped={skipped} failed={failed} manifest={manifest_label}")
     if args.bilibili_up_opus and failed and converted:
         print(f"批量任务部分完成：成功 {converted}，失败 {failed}。", file=sys.stderr)
         return 0
