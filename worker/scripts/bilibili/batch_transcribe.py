@@ -287,8 +287,9 @@ def scan_videos():
             print("💡 提示：收藏夹可能为私有。解决方法：")
             print("  1) 在 B站网页端将该收藏夹设为「公开」")
             print("  2) 或在 env.local 中配置 BILI_COOKIE_FILE：")
-            print("     yt-dlp --cookies-from-browser chromium --cookies ./bili_cookies.txt \\")
-            print("       --skip-download --print title \"https://www.bilibili.com/video/BVxxx/\"")
+            print("     conda run --no-capture-output -n course-whisper python3 \\")
+            print("       worker/scripts/export_bilibili_cookies.py --browser chrome \\")
+            print("       --profile \"Profile 1\" --output ./bili_cookies.txt")
             print("     然后在 env.local 中添加: BILI_COOKIE_FILE=\"./bili_cookies.txt\"")
         return []
 

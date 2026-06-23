@@ -9,8 +9,8 @@ B站收藏夹快速扫描脚本 v1.2 - 只扫描，不转录
 支持公开和私有收藏夹：
   - 公开收藏夹：无需额外配置，FAV_MEDIA_ID 即可
   - 私有收藏夹：在 env.local 中设置 BILI_COOKIE_FILE 指向 Netscape 格式 Cookie 文件
-    Cookie 文件可通过浏览器扩展导出，或用 yt-dlp --cookies-from-browser 生成：
-      yt-dlp --cookies-from-browser chromium --cookies ./bili_cookies.txt --skip-download --print title "https://www.bilibili.com/video/BVxxx/"
+    推荐使用项目专用脚本从指定浏览器 Profile 导出并校验：
+      python3 worker/scripts/export_bilibili_cookies.py --browser chrome --profile "Profile 1"
 """
 
 import os
@@ -126,8 +126,9 @@ def fetch_all_medias():
                 print("  1) 在B站将收藏夹设为「公开」")
                 print("  2) 在 env.local 中设置 BILI_COOKIE_FILE 指向 Cookie 文件")
                 print("     Cookie 文件生成方法：")
-                print("     yt-dlp --cookies-from-browser chromium --cookies ./bili_cookies.txt \\")
-                print("       --skip-download --print title \"https://www.bilibili.com/video/BVxxx/\"")
+                print("     conda run --no-capture-output -n course-whisper python3 \\")
+                print("       worker/scripts/export_bilibili_cookies.py --browser chrome \\")
+                print("       --profile \"Profile 1\" --output ./bili_cookies.txt")
             else:
                 print(f"ERROR: B站API返回错误 (code={data.get('code')}) - {msg}")
             sys.exit(1)

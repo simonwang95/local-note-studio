@@ -63,25 +63,42 @@ BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
 
 B站 Cookie 文件用于让脚本读取你自己账号可访问的字幕、公开视频信息、私有收藏夹或受限内容。它不是必须项：只处理公开视频时可以先留空；处理收藏夹、会员可见内容或字幕抓取不稳定时，再补充。
 
-推荐方式是使用已经安装好的 `yt-dlp` 从 Chrome 读取登录态并导出 Netscape `cookies.txt` 格式文件：
+推荐使用项目内的专用导出脚本。它会从 Chrome 读取登录态，但只保留 B站域 Cookie，并在覆盖原文件前调用 B站登录态接口校验，不会访问具体视频：
 
 1. 在 Chrome 或其他浏览器里登录 B站。
-2. 在项目根目录运行：
+2. 在有权限的 Chrome 窗口打开 `chrome://version`，查看“个人资料路径”。路径末尾通常是 `Default`、`Profile 1`、`Profile 2` 等。
+
+3. 在项目根目录运行，并把 `Profile 1` 换成上一步看到的目录名：
 
 ```bash
-yt-dlp --cookies-from-browser chrome \
-  --cookies ./bili_cookies.txt \
-  --skip-download \
-  --print title \
-  "https://www.bilibili.com/video/BV1DaGy6GEQK/"
+conda run --no-capture-output -n course-whisper \
+  python3 worker/scripts/export_bilibili_cookies.py \
+  --browser chrome \
+  --profile "Profile 1" \
+  --output ./bili_cookies.txt
 ```
 
 这条命令会：
 
-- 从 Chrome 读取当前登录态。
-- 把 cookie 导出到项目根目录的 `bili_cookies.txt`。
-- 用一个 B站视频链接测试 cookie 是否可用。
-- 只打印标题，不下载视频。
+- 从指定的 Chrome 个人资料读取登录态。
+- 只保留 `.bilibili.com` 和 `.bilibili.cn` Cookie，不导出其他网站 Cookie。
+- 调用 B站登录态接口校验账号；通过后才覆盖原文件。
+- 把 Cookie 保存到项目根目录的 `bili_cookies.txt`，不下载或请求任何视频。
+
+如果 `chrome://version` 显示的是完整路径，也可以直接传入：
+
+```bash
+conda run --no-capture-output -n course-whisper \
+  python3 worker/scripts/export_bilibili_cookies.py \
+  --profile "/Users/xxx/Library/Application Support/Google/Chrome/Profile 1"
+```
+
+不确定 Profile 时可以先不写 `--profile`，但多账号 Chrome 可能自动选中另一个最近使用的资料：
+
+```bash
+conda run --no-capture-output -n course-whisper \
+  python3 worker/scripts/export_bilibili_cookies.py
+```
 
 也可以把 cookie 保存到本机私有目录，例如：
 
@@ -89,7 +106,7 @@ yt-dlp --cookies-from-browser chrome \
 /Users/xxx/.local/share/local-note-studio/bili_cookies.txt
 ```
 
-3. 在 `worker/env.local` 中填写绝对路径：
+4. 在 `worker/env.local` 中填写绝对路径：
 
 ```bash
 BILIBILI_COOKIES_FILE="/Users/xxx/.local/share/local-note-studio/bili_cookies.txt"
@@ -103,7 +120,18 @@ BILIBILI_COOKIES_FILE="./bili_cookies.txt"
 BILI_COOKIE_FILE="./bili_cookies.txt"
 ```
 
-4. 在应用界面的“B站 Cookie 文件”输入框中也可以填写同一个路径。
+5. 在应用界面的“B站 Cookie 文件”输入框中也可以填写同一个路径，然后点击“检查依赖”。只有显示 `已登录 mid=...` 才表示这份文件可用于收藏夹、充电视频和充电动态。
+
+#### 遇到 HTTP 412 怎么办
+
+旧命令把“导出 Cookie”和“读取视频元数据”绑在一起，例如：
+
+```bash
+yt-dlp --cookies-from-browser chrome --cookies ./bili_cookies.txt \
+  --skip-download --print title "https://www.bilibili.com/video/BV.../"
+```
+
+其中 `HTTP Error 412: Precondition Failed` 表示 B站拦截了 yt-dlp 的视频元数据请求，不等于账号没有充电权限。该命令还可能把浏览器中其他站点的 Cookie 一并写入文件，因此不再推荐。请改用上面的 `export_bilibili_cookies.py`；导出成功后，再回到应用里单独运行目标任务。
 
 备选方式：安装可信的 `cookies.txt` 导出工具或扩展，选择只导出 `bilibili.com` / `.bilibili.com` 相关 cookie，并保存为 Netscape `cookies.txt` 格式。
 
