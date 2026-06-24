@@ -29,6 +29,7 @@ worker = load_module("local_note_studio_worker_test", WORKER_PATH)
 runner = load_module("run_bilibili_transcript_test", ROOT / "worker" / "scripts" / "run_bilibili_transcript.py")
 converter = load_module("convert_sources_to_md_test", ROOT / "worker" / "scripts" / "convert_sources_to_md.py")
 quickread = load_module("quick_read_pdf_test", ROOT / "worker" / "scripts" / "quick_read_pdf.py")
+organizer = load_module("qwen_organize_notes_test", ROOT / "worker" / "scripts" / "qwen_organize_notes.py")
 keyframes = sys.modules["video_keyframes"]
 
 
@@ -110,8 +111,28 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(env["QWEN_ORGANIZE_TIMEOUT_SECONDS"], "600")
         self.assertEqual(env["QWEN_ORGANIZE_MAX_RETRIES"], "3")
         self.assertEqual(env["COOLDOWN_DELAY"], "12")
+        self.assertEqual(env["QWEN_ORGANIZE_COOLDOWN_DELAY"], "12")
+        self.assertEqual(env["QWEN_PDF_POLISH_COOLDOWN_DELAY"], "12")
+        self.assertEqual(env["QWEN_QUICKREAD_COOLDOWN_DELAY"], "12")
+        self.assertEqual(env["SUMMARY_CHUNK_COOLDOWN_DELAY"], "12")
+        with mock.patch.dict("os.environ", env):
+            self.assertEqual(organizer.config()["QWEN_ORGANIZE_COOLDOWN_DELAY"], "12")
         self.assertEqual(env["QWEN_ORGANIZE_MAX_CHARS"], "24000")
         self.assertEqual(env["OCR_RESUME"], "false")
+
+    def test_explicit_zero_disables_all_model_cooldowns(self):
+        req = worker.TaskRequest.from_mapping({"task": "bilibili-up-opus", "cooldown_delay": "0"})
+        env = worker.build_env(req)
+        self.assertEqual(req.cooldown_delay, 0)
+        for key in (
+            "COOLDOWN_DELAY",
+            "QWEN_ORGANIZE_COOLDOWN_DELAY",
+            "QWEN_PDF_POLISH_COOLDOWN_DELAY",
+            "QWEN_QUICKREAD_COOLDOWN_DELAY",
+            "SUMMARY_CHUNK_COOLDOWN_DELAY",
+        ):
+            self.assertEqual(env[key], "0")
+        self.assertEqual(worker.TaskRequest.from_mapping({"task": "bilibili-up-opus"}).cooldown_delay, -1)
 
     def test_incognito_request_disables_all_manifest_state_flags(self):
         req = worker.TaskRequest.from_mapping({"task": "source-file", "incognito_mode": True})

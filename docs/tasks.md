@@ -58,7 +58,7 @@ python3 worker/local_note_studio_worker.py \
 
 ## Bilibili UP Opus Batch
 
-Input an UP-space opus page or UID. `--favorite-limit 0` means all discoverable opus posts. Logs use `[抓取 i/n]` and `[整理 i/n]`; already complete notes are skipped before any Qwen cooldown wait.
+Input an UP-space opus page or UID. `--favorite-limit 0` means all discoverable opus posts. Logs use `[抓取 i/n]` and `[整理 i/n]`; already complete notes are skipped before any Qwen cooldown wait. The UI cooldown override is applied to `QWEN_ORGANIZE_COOLDOWN_DELAY`: blank uses the environment default, `0` disables it, and a positive value waits only between adjacent actual Qwen calls.
 
 ```bash
 python3 worker/local_note_studio_worker.py \
@@ -66,7 +66,8 @@ python3 worker/local_note_studio_worker.py \
   --source "https://space.bilibili.com/123456/upload/opus" \
   --output-dir "/path/to/notes/Net/BiliBili" \
   --cookies "./bili_cookies.txt" \
-  --favorite-limit 0
+  --favorite-limit 0 \
+  --cooldown-delay 30
 ```
 
 ## WeChat Article Or Web Page

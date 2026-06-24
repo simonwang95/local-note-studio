@@ -39,7 +39,11 @@ If a user explicitly selects **Existing Conda / Python (Advanced)**, the selecte
 
 Managed-runtime requests never pass a saved Conda environment to the worker.
 
-Cookie refresh follows a least-privilege path: select the concrete Chrome `Default` or `Profile N` directory, leave the Cookie file field empty to store the filtered Bilibili cookies under the app's Application Support directory, then choose “Authorize and refresh Cookie”. macOS may request access to other app data and Chrome Safe Storage; Local Note Studio does not need Documents, Desktop, Downloads, Apple Music/media-library, network-volume, or removable-volume access for Cookie refresh. Broad profile directories are rejected before any recursive search, and operational tasks with no note-output directory bypass the Markdown output scanner entirely.
+The selected ASR model directory is saved locally, masked by default, and can be revealed or explicitly saved from Configuration. Replaying an old task applies only task parameters; it no longer replaces the current runtime, API, model, ASR, or Cookie configuration with historical values.
+
+The optional model-cooldown override applies to the task's generic and specialized Qwen cooldown variables. Leave it empty to use the stable environment defaults, or set `0` to disable waiting. UP-opus batches wait only between two actual Qwen organization calls—not before the first call, after the last call, or for entries skipped because a complete note already exists.
+
+Cookie refresh follows a least-privilege path: in the signed-in Chrome window open `chrome://version/`, copy “Profile Path”, and select that concrete `Default` or `Profile N` directory. Leave the Cookie file field empty to store filtered Bilibili cookies under the app's Application Support directory, then choose “Authorize and refresh Cookie”. macOS may request access to other app data and Chrome Safe Storage; Local Note Studio does not need Documents, Desktop, Downloads, Apple Music/media-library, network-volume, or removable-volume access for Cookie refresh. Broad profile directories are rejected before any recursive search, and operational tasks with no note-output directory bypass the Markdown output scanner entirely.
 
 ## Source development
 

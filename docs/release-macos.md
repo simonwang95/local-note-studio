@@ -30,11 +30,11 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 
 ## Current internal test build (2026-06-24)
 
-- Version: `0.1.3`
+- Version: `0.1.4`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.3_aarch64.dmg`
-- Size: `3,432,145` bytes (about 3.3 MiB)
-- SHA-256: `f47edf4b4f002173a8e2db4601a7f91e1dbbc8346ae00c5ef2d0859dfa7c52e7`
+- Artifact: `Local Note Studio_0.1.4_aarch64.dmg`
+- Size: `3,433,654` bytes (about 3.3 MiB)
+- SHA-256: `f1f815da162ea7a3c4c32ddf3ea3fecf2bd0a378204dc4da4161f79fdca1f53f`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.

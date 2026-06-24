@@ -116,7 +116,7 @@ def main() -> int:
             if not login_ok:
                 print(f"登录态校验失败: {detail}", file=sys.stderr)
                 print(
-                    "原 Cookie 文件未被覆盖。请在 chrome://version 查看当前有权限窗口的“个人资料路径”，"
+                    "原 Cookie 文件未被覆盖。请在当前登录 B站的 Chrome 窗口打开 chrome://version/，查看“个人资料路径”，"
                     "然后用 --profile 指定其末级目录名或完整路径。",
                     file=sys.stderr,
                 )

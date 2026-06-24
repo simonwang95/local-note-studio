@@ -5,6 +5,7 @@ import { createAppTabs } from "./app-shell";
 import { ManifestViewStateStore } from "./manifest-state";
 import {
   createHistoryEntry,
+  historyReplayRequest,
   loadTaskHistory,
   migrateRuntimePreference,
   filterTaskHistory,
@@ -272,9 +273,13 @@ app.innerHTML = `
           </label>
           <label>
             ASR 模型目录（可选）
-            <div class="input-row">
-              <input id="asrModel" value="${escapeHtml(savedSettings.asrModel)}" placeholder="选择已有 Whisper 模型" />
+            <div class="input-row profile-row">
+              <input id="asrModel" type="password" value="${escapeHtml(savedSettings.asrModel)}" placeholder="选择已有 Whisper 模型" autocomplete="off" />
+              <button id="toggleAsrModel" type="button" class="secondary icon-button" title="显示 ASR 模型目录" aria-label="显示 ASR 模型目录">
+                ${eyeIcon()}
+              </button>
               <button id="chooseAsrModel" type="button" class="secondary compact-button">选择</button>
+              <button id="saveAsrModel" type="button" class="secondary compact-button">保存配置</button>
             </div>
           </label>
           <label>
@@ -304,7 +309,7 @@ app.innerHTML = `
               <button id="chooseChromeProfile" type="button" class="secondary compact-button">选择</button>
               <button id="refreshCookies" type="button" class="secondary compact-button">授权并刷新 Cookie</button>
             </div>
-            <p class="field-note">请选择末级 Default 或 Profile 1 目录。macOS 只需授权读取该 Chrome Profile（可能另有钥匙串确认）；不需要文稿、下载或外接磁盘权限。</p>
+            <p class="field-note">在当前登录 B站的 Chrome 窗口打开 <code>chrome://version/</code>，复制“个人资料路径”，再选择末级 Default 或 Profile 1 目录。macOS 只需授权读取该 Profile（可能另有钥匙串确认）。</p>
           </label>
         </div>
       </section>
@@ -453,9 +458,10 @@ app.innerHTML = `
           <div class="form-grid compact advanced-grid">
             <label>超时（秒）<input id="timeoutSeconds" type="number" min="0" value="${escapeHtml(savedSettings.timeoutSeconds)}" placeholder="使用稳定默认值" /></label>
             <label>重试次数<input id="retryCount" type="number" min="0" value="${escapeHtml(savedSettings.retryCount)}" placeholder="使用稳定默认值" /></label>
-            <label>模型冷却（秒）<input id="cooldownDelay" type="number" min="0" value="${escapeHtml(savedSettings.cooldownDelay)}" placeholder="使用稳定默认值" /></label>
+            <label>模型冷却（秒）<input id="cooldownDelay" type="number" min="0" value="${escapeHtml(savedSettings.cooldownDelay)}" placeholder="留空用默认值；0 为不等待" /></label>
             <label>分块字符数<input id="chunkChars" type="number" min="0" value="${escapeHtml(savedSettings.chunkChars)}" placeholder="使用稳定默认值" /></label>
           </div>
+          <p class="field-note">该值会覆盖当前任务的 Qwen 整理、PDF、速读和摘要分块冷却。UP 主图文批量仅在两次实际 Qwen 整理之间等待；首篇、末篇和已跳过条目不额外等待。</p>
         </details>
       </section>
 
@@ -585,7 +591,14 @@ document.querySelector<HTMLButtonElement>("#chooseSourceFile")?.addEventListener
 document.querySelector<HTMLButtonElement>("#chooseSourceDir")?.addEventListener("click", () => chooseDirectory("source"));
 document.querySelector<HTMLButtonElement>("#chooseChromeProfile")?.addEventListener("click", () => chooseDirectory("chromeProfile"));
 document.querySelector<HTMLButtonElement>("#chooseAsrModel")?.addEventListener("click", () => chooseDirectory("asrModel"));
+document.querySelector<HTMLButtonElement>("#saveAsrModel")?.addEventListener("click", () => {
+  saveSettings();
+  setState("ASR 模型配置已保存");
+});
 document.querySelector<HTMLButtonElement>("#toggleApiKey")?.addEventListener("click", () => toggleSecretField("apiKey", "toggleApiKey", "API Key"));
+document.querySelector<HTMLButtonElement>("#toggleAsrModel")?.addEventListener("click", () =>
+  toggleSecretField("asrModel", "toggleAsrModel", "ASR 模型目录"),
+);
 document.querySelector<HTMLButtonElement>("#toggleCookies")?.addEventListener("click", () => toggleSecretField("cookies", "toggleCookies", "Cookie 文件路径"));
 document.querySelector<HTMLButtonElement>("#toggleChromeProfile")?.addEventListener("click", () =>
   toggleSecretField("chromeProfile", "toggleChromeProfile", "Chrome 个人资料路径"),
@@ -707,7 +720,7 @@ async function refreshBilibiliCookies(): Promise<void> {
   const profile = inputValue("chromeProfile");
   if (!profile) {
     setState("缺少 Chrome Profile");
-    setOutput("请填写或选择 Chrome 个人资料路径。可在 chrome://version 查看“个人资料路径”。");
+    setOutput("请填写或选择 Chrome 个人资料路径。请在当前登录 B站的 Chrome 窗口打开 chrome://version/，复制“个人资料路径”。");
     return;
   }
   if (!localStorage.getItem(cookiePermissionNoticeKey)) {
@@ -1648,20 +1661,14 @@ function deleteHistoryEntry(entry: TaskHistoryEntry): void {
 
 function applyHistoryRequest(request: Record<string, unknown>): void {
   appTabs.activate("task");
+  const replayRequest = historyReplayRequest(request);
   const mappings: Record<string, string> = {
     task: "taskType",
     source: "source",
     output_dir: "outputDir",
     output_filename: "outputFilename",
-    conda_env: "condaEnv",
-    conda_bin: "condaBin",
-    python_bin: "pythonBin",
-    api_base: "apiBase",
-    model: "model",
-    asr_model: "asrModel",
     subtitle_strategy: "subtitleStrategy",
     favorite_limit: "favoriteLimit",
-    runtime_backend: "runtimeBackend",
     web_capture_mode: "webCaptureMode",
     browser_executable: "browserExecutable",
     timeout_seconds: "timeoutSeconds",
@@ -1670,7 +1677,7 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
     chunk_chars: "chunkChars",
   };
   for (const [key, id] of Object.entries(mappings)) {
-    if (request[key] !== undefined) setInputValue(id, String(request[key]));
+    if (replayRequest[key] !== undefined) setInputValue(id, String(replayRequest[key]));
   }
   const booleans: Record<string, string> = {
     extract_keyframes: "extractKeyframes",
@@ -1685,7 +1692,7 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
   };
   for (const [key, id] of Object.entries(booleans)) {
     const input = document.querySelector<HTMLInputElement>(`#${id}`);
-    if (input && request[key] !== undefined) input.checked = Boolean(request[key]);
+    if (input && replayRequest[key] !== undefined) input.checked = Boolean(replayRequest[key]);
   }
   hydrateRuntimeControls();
   hydrateTaskControls();

@@ -47,6 +47,25 @@ export function runtimeSelectionPayload(backend: "managed" | "conda", condaEnv: 
   };
 }
 
+const persistentConfigurationKeys = [
+  "runtime_backend",
+  "conda_env",
+  "conda_bin",
+  "python_bin",
+  "api_base",
+  "api_key",
+  "model",
+  "asr_model",
+  "cookies",
+  "browser_profile",
+];
+
+export function historyReplayRequest(request: Record<string, unknown>): Record<string, unknown> {
+  const replay = { ...request };
+  for (const key of persistentConfigurationKeys) delete replay[key];
+  return replay;
+}
+
 const historyKey = "local-note-studio.task-history.v1";
 const maxEntries = 100;
 const maxLogChars = 200_000;

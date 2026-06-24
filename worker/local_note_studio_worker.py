@@ -90,7 +90,7 @@ class TaskRequest:
     browser_executable: str = ""
     timeout_seconds: int = 0
     retry_count: int = 0
-    cooldown_delay: int = 0
+    cooldown_delay: int = -1
     chunk_chars: int = 0
     ocr_resume: bool = True
     manifest_path: str = ""
@@ -135,7 +135,7 @@ class TaskRequest:
             browser_executable=str(data.get("browser_executable") or ""),
             timeout_seconds=parse_int(data.get("timeout_seconds"), 0),
             retry_count=parse_int(data.get("retry_count"), 0),
-            cooldown_delay=parse_int(data.get("cooldown_delay"), 0),
+            cooldown_delay=parse_optional_nonnegative_int(data.get("cooldown_delay")),
             chunk_chars=parse_int(data.get("chunk_chars"), 0),
             ocr_resume=parse_bool(data.get("ocr_resume", True)),
             manifest_path=str(data.get("manifest_path") or ""),
@@ -166,6 +166,12 @@ def parse_int(value: object, default: int = 0) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def parse_optional_nonnegative_int(value: object) -> int:
+    if value is None or not str(value).strip():
+        return -1
+    return max(0, parse_int(value, 0))
 
 
 def parse_int_tuple(value: object) -> tuple[int, ...]:
@@ -231,8 +237,13 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     if req.retry_count > 0:
         env["QWEN_QUICKREAD_MAX_RETRIES"] = str(req.retry_count)
         env["QWEN_ORGANIZE_MAX_RETRIES"] = str(req.retry_count)
-    if req.cooldown_delay > 0:
-        env["COOLDOWN_DELAY"] = str(req.cooldown_delay)
+    if req.cooldown_delay >= 0:
+        delay = str(req.cooldown_delay)
+        env["COOLDOWN_DELAY"] = delay
+        env["QWEN_ORGANIZE_COOLDOWN_DELAY"] = delay
+        env["QWEN_PDF_POLISH_COOLDOWN_DELAY"] = delay
+        env["QWEN_QUICKREAD_COOLDOWN_DELAY"] = delay
+        env["SUMMARY_CHUNK_COOLDOWN_DELAY"] = delay
     if req.chunk_chars > 0:
         env["QWEN_ORGANIZE_MAX_CHARS"] = str(req.chunk_chars)
         env["QWEN_QUICKREAD_TRANSLATION_CHARS"] = str(req.chunk_chars)
@@ -1597,7 +1608,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--browser-executable", default="", help="Chrome/Chromium executable for browser-session webpage capture.")
     parser.add_argument("--timeout-seconds", type=int, default=0, help="Per-task network/model timeout override.")
     parser.add_argument("--retry-count", type=int, default=0, help="Per-task retry-count override.")
-    parser.add_argument("--cooldown-delay", type=int, default=0, help="Delay between adjacent model calls.")
+    parser.add_argument("--cooldown-delay", type=int, default=None, help="Delay between adjacent model calls; 0 disables it.")
     parser.add_argument("--chunk-chars", type=int, default=0, help="Per-task model chunk-size override.")
     parser.add_argument("--no-ocr-resume", action="store_true", help="Disable OCR checkpoint resume.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
@@ -1639,7 +1650,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         browser_executable=args.browser_executable,
         timeout_seconds=args.timeout_seconds,
         retry_count=args.retry_count,
-        cooldown_delay=args.cooldown_delay,
+        cooldown_delay=args.cooldown_delay if args.cooldown_delay is not None else -1,
         chunk_chars=args.chunk_chars,
         ocr_resume=not args.no_ocr_resume,
         dry_run=args.dry_run,
@@ -1650,6 +1661,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     req = request_from_args(args)
     env = build_env(req)
+    if req.cooldown_delay >= 0:
+        print(
+            f"[参数] 模型冷却已覆盖为 {req.cooldown_delay} 秒；只在相邻的实际模型调用之间等待。",
+            flush=True,
+        )
     if req.incognito_mode and req.task not in {
         "env-check",
         "bilibili-cookie-status",

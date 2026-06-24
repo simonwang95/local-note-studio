@@ -70,6 +70,16 @@ assert.deepEqual(history.runtimeSelectionPayload("conda", "course-whisper", "/tm
   conda_env: "course-whisper",
   conda_bin: "/tmp/conda",
 });
+assert.deepEqual(
+  history.historyReplayRequest({
+    task: "bilibili-up-opus",
+    source: "123",
+    asr_model: "/models/old",
+    model: "old-model",
+    cooldown_delay: "12",
+  }),
+  { task: "bilibili-up-opus", source: "123", cooldown_delay: "12" },
+);
 assert.equal(shell.resolveAppTab("validation"), "validation");
 assert.equal(shell.resolveAppTab("unknown"), "config");
 assert.equal(shell.adjacentAppTab("validation", 1), "config");
