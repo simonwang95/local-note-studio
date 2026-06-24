@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import pathlib
 import shutil
@@ -79,6 +80,23 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 expected_output.touch()
                 env = worker.build_env(req)
                 self.assertEqual(env["BILIBILI_COOKIES_FILE"], str(expected_output))
+
+    def test_empty_output_snapshot_never_scans_the_current_directory(self):
+        with mock.patch.object(pathlib.Path, "rglob", side_effect=AssertionError("unexpected directory scan")):
+            self.assertEqual(worker.output_snapshot(""), {})
+            self.assertEqual(worker.output_snapshot("   "), {})
+
+    def test_cookie_refresh_bypasses_output_snapshot_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = pathlib.Path(temp_dir) / "Default"
+            (profile / "Network").mkdir(parents=True)
+            (profile / "Network" / "Cookies").touch()
+            request = json.dumps({"task": "refresh-bilibili-cookies", "browser_profile": str(profile)})
+            with mock.patch.object(worker, "run_command", return_value="refreshed\n"):
+                with mock.patch.object(worker, "output_snapshot", side_effect=AssertionError("unexpected output scan")):
+                    with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                        self.assertEqual(worker.main(["--request-json", request]), 0)
+                        self.assertEqual(stdout.getvalue(), "refreshed\n")
 
     def test_p1_request_mapping_and_task_overrides(self):
         req = worker.TaskRequest.from_mapping({

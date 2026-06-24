@@ -751,6 +751,13 @@ fn resolve_worker_path(resource_dir: PathBuf) -> Result<PathBuf, String> {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut candidates = vec![
+        resource_dir
+            .join("_up_")
+            .join("worker")
+            .join("local_note_studio_worker.py"),
+        resource_dir
+            .join("worker")
+            .join("local_note_studio_worker.py"),
         current_dir
             .join("worker")
             .join("local_note_studio_worker.py"),
@@ -762,13 +769,6 @@ fn resolve_worker_path(resource_dir: PathBuf) -> Result<PathBuf, String> {
             .parent()
             .map(|path| path.join("worker").join("local_note_studio_worker.py"))
             .unwrap_or_else(|| PathBuf::from("worker").join("local_note_studio_worker.py")),
-        resource_dir
-            .join("worker")
-            .join("local_note_studio_worker.py"),
-        resource_dir
-            .join("_up_")
-            .join("worker")
-            .join("local_note_studio_worker.py"),
     ];
     candidates.dedup();
     candidates

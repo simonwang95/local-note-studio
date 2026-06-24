@@ -90,6 +90,8 @@ For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For l
 
 Cookie refresh uses two internal tasks: `refresh-bilibili-cookies` validates that the selected directory directly contains `Cookies` or `Network/Cookies` before calling the dedicated exporter, and `bilibili-cookie-status` validates the resulting Netscape file without running content processing. Broad roots are rejected before yt-dlp's recursive lookup. An empty output setting resolves to the app-owned Application Support auth directory, and only Bilibili-domain cookies are persisted.
 
+Output discovery is restricted to processing tasks with a non-empty output directory. Operational tasks such as Cookie refresh return before output snapshotting; `output_snapshot("")` is a hard no-op so an empty path can never resolve to the process working directory. Packaged builds resolve their bundled worker before any development checkout path.
+
 ## Task Mapping
 
 | Task | Worker script |

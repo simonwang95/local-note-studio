@@ -30,11 +30,11 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 
 ## Current internal test build (2026-06-24)
 
-- Version: `0.1.2`
+- Version: `0.1.3`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.2_aarch64.dmg`
-- Size: `3,435,165` bytes (about 3.3 MiB)
-- SHA-256: `65766596a3091594363b8476768cab1c093ff18df266ad111faf622431c122f9`
+- Artifact: `Local Note Studio_0.1.3_aarch64.dmg`
+- Size: `3,432,145` bytes (about 3.3 MiB)
+- SHA-256: `f47edf4b4f002173a8e2db4601a7f91e1dbbc8346ae00c5ef2d0859dfa7c52e7`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.
@@ -58,7 +58,7 @@ This record identifies the current internal artifact only. Rebuilds may produce 
 
 - File and folder access is requested only when the user selects a source or output path.
 - Chrome Profile access is only used after the user explicitly selects browser-session capture or Bilibili Cookie refresh. Cookie refresh accepts only a concrete leaf Profile and defaults its filtered output to the app's Application Support directory.
-- Expected Cookie-refresh prompts are other-app-data access and, depending on Chrome state, Safe Storage/Keychain confirmation. Documents, Downloads, network volumes, and removable volumes are not required; broad directories are rejected before extraction.
+- Expected Cookie-refresh prompts are other-app-data access and, depending on Chrome state, Safe Storage/Keychain confirmation. Desktop, Documents, Downloads, Apple Music/media-library, network volumes, and removable volumes are not required; broad directories are rejected before extraction and an empty note-output path cannot start output scanning.
 - Network access is used for user-requested sources, configured LLM/OCR APIs, and checksum-verified runtime/tool downloads.
 
 ## Clean-Mac acceptance matrix

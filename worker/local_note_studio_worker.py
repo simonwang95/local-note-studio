@@ -1162,6 +1162,8 @@ def archive_legacy_bilibili_drafts(output_dir: pathlib.Path) -> None:
 
 
 def output_snapshot(output_dir: str) -> dict[pathlib.Path, tuple[int, int]]:
+    if not output_dir.strip():
+        return {}
     root = pathlib.Path(output_dir).expanduser()
     if not root.exists():
         return {}
@@ -1675,6 +1677,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if req.task == "manifest-update":
         sys.stdout.write(update_manifest_record(req, env))
+        return 0
+    if req.task == "refresh-bilibili-cookies":
+        sys.stdout.write(run_command(command_for(req), env, req.dry_run))
         return 0
     before = output_snapshot(req.output_dir)
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
