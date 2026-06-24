@@ -1,8 +1,12 @@
 # Environment Setup
 
-## Current Development Environment
+## Runtime Selection
 
-Current development builds use a user-managed conda environment. This remains the supported advanced mode while the app-managed runtime is implemented.
+Packaged builds default to the app-managed runtime. It is initialized from the desktop UI and is the recommended mode for testers because it does not require a separately installed Conda or Homebrew environment.
+
+An existing Conda/Python environment remains available as an advanced backend for development and compatible user-managed setups. Once a user explicitly selects this backend, the backend, environment name, Python command, and optional Conda executable path persist across launches. Legacy settings without an explicit runtime preference migrate to the managed backend once.
+
+Finder-launched apps do not inherit an interactive shell's complete `PATH`. Local Note Studio therefore searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. For a non-standard install, configure an absolute executable path such as `/Users/xxx/miniforge3/bin/conda` in the app.
 
 The current known-good environment is:
 
@@ -92,7 +96,7 @@ QR login remains an optional later enhancement; Chrome Profile refresh is the cu
 
 ## App-Managed Runtime
 
-The managed runtime is implemented for the daily-use package and is initialized from the desktop UI. It is designed to make the main workflows usable without requiring conda or Homebrew; independent clean-Mac acceptance remains a release gate.
+The managed runtime is implemented for the daily-use package and is initialized from the desktop UI. It is designed to make the main workflows usable without requiring conda or Homebrew; independent clean-Mac acceptance remains a release gate. Managed task requests deliberately clear saved Conda fields so a previous advanced configuration cannot leak into managed execution.
 
 Target layout:
 

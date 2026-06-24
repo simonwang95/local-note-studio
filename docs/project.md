@@ -9,8 +9,8 @@ The first version should make existing command-line workflows easier and safer t
 ## Confirmed First Flow
 
 1. Configure runtime settings:
-   - current development mode: conda environment, default `course-whisper`, or Python fallback
-   - distribution target: app-managed runtime, with existing conda retained as an advanced mode
+   - packaged default: app-managed runtime under Application Support
+   - advanced mode: an explicitly selected existing Conda environment (commonly `course-whisper`) or Python command; the selection persists across launches
    - OpenAI-compatible LLM API base
    - API key
    - model name, default `qwen3.6-35b-a3b-nvfp4`

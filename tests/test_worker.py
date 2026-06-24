@@ -45,6 +45,17 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertTrue(req.retry_failed)
         self.assertFalse(req.keep_original_subtitles)
 
+    def test_explicit_conda_executable_is_used_by_worker_commands(self):
+        req = worker.TaskRequest.from_mapping({
+            "task": "source-file",
+            "conda_env": "course-whisper",
+            "conda_bin": "/Users/tester/miniforge3/bin/conda",
+        })
+        self.assertEqual(req.conda_bin, "/Users/tester/miniforge3/bin/conda")
+        self.assertEqual(worker.conda_cmd(req), req.conda_bin)
+        self.assertEqual(worker.python_eval_cmd(req, "print('ok')")[0], req.conda_bin)
+        self.assertEqual(worker.build_env(req)["CONDA_EXE"], req.conda_bin)
+
     def test_p1_request_mapping_and_task_overrides(self):
         req = worker.TaskRequest.from_mapping({
             "task": "web-url", "web_capture_mode": "browser", "browser_executable": "/Applications/Chrome",

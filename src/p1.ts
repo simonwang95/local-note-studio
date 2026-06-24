@@ -29,6 +29,23 @@ export type ProgressEvent = {
   resumed?: boolean;
 };
 
+export function migrateRuntimePreference(value: unknown): Record<string, unknown> {
+  const settings = value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+  if (!("runtimePreferenceConfirmed" in settings)) {
+    settings.runtimeBackend = "managed";
+    settings.runtimePreferenceConfirmed = true;
+  }
+  return settings;
+}
+
+export function runtimeSelectionPayload(backend: "managed" | "conda", condaEnv: string, condaBin: string) {
+  return {
+    runtime_backend: backend,
+    conda_env: backend === "conda" ? condaEnv : "",
+    conda_bin: backend === "conda" ? condaBin : "",
+  };
+}
+
 const historyKey = "local-note-studio.task-history.v1";
 const maxEntries = 100;
 const maxLogChars = 200_000;

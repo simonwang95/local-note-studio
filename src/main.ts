@@ -6,9 +6,11 @@ import { ManifestViewStateStore } from "./manifest-state";
 import {
   createHistoryEntry,
   loadTaskHistory,
+  migrateRuntimePreference,
   filterTaskHistory,
   progressFromLine,
   removeHistoryEntry,
+  runtimeSelectionPayload,
   saveTaskHistory,
   taskResultFromLog,
   upsertHistoryEntry,
@@ -34,7 +36,9 @@ type SubtitleStrategy = "yt-dlp" | "web" | "asr";
 
 type SavedSettings = {
   runtimeBackend: "managed" | "conda";
+  runtimePreferenceConfirmed: boolean;
   condaEnv: string;
+  condaBin: string;
   pythonBin: string;
   apiBase: string;
   apiKey: string;
@@ -150,8 +154,10 @@ const subtitleStrategyOptions: Record<TaskType, Array<{ value: SubtitleStrategy;
 };
 
 const defaults: SavedSettings = {
-  runtimeBackend: "conda",
+  runtimeBackend: "managed",
+  runtimePreferenceConfirmed: true,
   condaEnv: "course-whisper",
+  condaBin: "",
   pythonBin: "python3",
   apiBase: "http://127.0.0.1:1234/v1",
   apiKey: "lm-studio",
@@ -233,14 +239,19 @@ app.innerHTML = `
               <option value="conda" ${savedSettings.runtimeBackend === "conda" ? "selected" : ""}>现有 Conda / Python（高级）</option>
             </select>
           </label>
-          <label>
+          <label id="condaEnvField">
             Conda 环境
             <input id="condaEnv" value="${escapeHtml(savedSettings.condaEnv)}" placeholder="course-whisper" />
           </label>
-          <label>
+          <label id="condaBinField">
+            Conda 可执行文件（可选）
+            <input id="condaBin" value="${escapeHtml(savedSettings.condaBin)}" placeholder="自动查找；也可填写 .../bin/conda" />
+          </label>
+          <label id="pythonBinField">
             Python 命令
             <input id="pythonBin" value="${escapeHtml(savedSettings.pythonBin)}" placeholder="python3" />
           </label>
+          <p id="runtimeBackendNote" class="field-note full-row"></p>
           <label>
             LLM API Base
             <input id="apiBase" value="${escapeHtml(savedSettings.apiBase)}" />
@@ -523,6 +534,7 @@ const appTabs = createAppTabs(document, localStorage, appTabKey);
 
 try {
   appTabs.bind();
+  hydrateRuntimeControls();
   hydrateTaskControls();
   hydrateTaskOutput();
   bindSettingsPersistence();
@@ -622,13 +634,13 @@ function currentTask(): TaskType {
 function payload(dryRun: boolean, retryFailed = false) {
   const collection = document.querySelector<HTMLSelectElement>("#collectionSelect");
   const task = currentTask();
+  const runtimeBackend = (inputValue("runtimeBackend") || "managed") as "managed" | "conda";
   return {
     task,
-    runtime_backend: inputValue("runtimeBackend"),
+    ...runtimeSelectionPayload(runtimeBackend, inputValue("condaEnv"), inputValue("condaBin")),
     source: inputValue("source"),
     output_dir: inputValue("outputDir"),
     output_filename: inputValue("outputFilename"),
-    conda_env: inputValue("condaEnv"),
     python_bin: inputValue("pythonBin"),
     api_base: inputValue("apiBase"),
     api_key: inputValue("apiKey"),
@@ -670,7 +682,7 @@ async function runEnvironmentCheck(): Promise<void> {
   saveSettings();
   setState("检查依赖中...");
   setOutput("");
-  appendOutput("正在检查所选 conda/Python 环境...\n");
+  appendOutput("正在检查所选运行环境...\n");
   try {
     const request = { ...payload(false), task: "env-check", source: "" };
     const result = await invokeWorker(request);
@@ -1053,6 +1065,19 @@ function hydrateTaskControls(): void {
   }
 }
 
+function hydrateRuntimeControls(): void {
+  const advanced = inputValue("runtimeBackend") === "conda";
+  for (const id of ["condaEnvField", "condaBinField", "pythonBinField"]) {
+    document.querySelector<HTMLElement>(`#${id}`)?.classList.toggle("hidden", !advanced);
+  }
+  const note = document.querySelector<HTMLElement>("#runtimeBackendNote");
+  if (note) {
+    note.textContent = advanced
+      ? "Conda 选择会保存在本机并在下次启动继续使用。安装版会自动查找常见位置；找不到时请填写 conda 可执行文件的绝对路径。"
+      : "推荐用于安装版。首次使用请点击“安装/修复”，运行环境会安装到 Application Support，不依赖 Homebrew 或 Conda。";
+  }
+}
+
 function hydrateSubtitleStrategy(task: TaskType): void {
   const select = document.querySelector<HTMLSelectElement>("#subtitleStrategy");
   if (!select) return;
@@ -1069,6 +1094,7 @@ function bindSettingsPersistence(): void {
   for (const id of [
     "runtimeBackend",
     "condaEnv",
+    "condaBin",
     "pythonBin",
     "apiBase",
     "apiKey",
@@ -1087,6 +1113,10 @@ function bindSettingsPersistence(): void {
   ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
+  document.querySelector<HTMLSelectElement>("#runtimeBackend")?.addEventListener("change", () => {
+    hydrateRuntimeControls();
+    saveSettings();
+  });
   document.querySelector<HTMLSelectElement>("#webCaptureMode")?.addEventListener("change", hydrateTaskControls);
   for (const id of [
     "extractKeyframes",
@@ -1106,7 +1136,10 @@ function bindSettingsPersistence(): void {
 function loadSettings(): SavedSettings {
   try {
     const raw = localStorage.getItem(settingsKey);
-    return { ...defaults, ...(raw ? JSON.parse(raw) : {}) };
+    const stored = raw ? JSON.parse(raw) : {};
+    const parsed = migrateRuntimePreference(stored);
+    if (raw && !("runtimePreferenceConfirmed" in stored)) localStorage.setItem(settingsKey, JSON.stringify(parsed));
+    return { ...defaults, ...parsed };
   } catch {
     return defaults;
   }
@@ -1116,7 +1149,9 @@ function saveSettings(): void {
   const collection = document.querySelector<HTMLSelectElement>("#collectionSelect");
   const settings: SavedSettings = {
     runtimeBackend: (inputValue("runtimeBackend") || defaults.runtimeBackend) as "managed" | "conda",
+    runtimePreferenceConfirmed: true,
     condaEnv: inputValue("condaEnv") || defaults.condaEnv,
+    condaBin: inputValue("condaBin"),
     pythonBin: inputValue("pythonBin") || defaults.pythonBin,
     apiBase: inputValue("apiBase") || defaults.apiBase,
     apiKey: inputValue("apiKey") || defaults.apiKey,
@@ -1611,6 +1646,7 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
     output_dir: "outputDir",
     output_filename: "outputFilename",
     conda_env: "condaEnv",
+    conda_bin: "condaBin",
     python_bin: "pythonBin",
     api_base: "apiBase",
     model: "model",
@@ -1643,6 +1679,7 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
     const input = document.querySelector<HTMLInputElement>(`#${id}`);
     if (input && request[key] !== undefined) input.checked = Boolean(request[key]);
   }
+  hydrateRuntimeControls();
   hydrateTaskControls();
   saveSettings();
 }

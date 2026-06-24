@@ -64,6 +64,7 @@ class TaskRequest:
     output_dir: str = ""
     output_filename: str = ""
     conda_env: str = ""
+    conda_bin: str = ""
     python_bin: str = "python3"
     api_base: str = ""
     api_key: str = ""
@@ -108,6 +109,7 @@ class TaskRequest:
             output_dir=str(data.get("output_dir") or ""),
             output_filename=str(data.get("output_filename") or ""),
             conda_env=str(data.get("conda_env") or ""),
+            conda_bin=str(data.get("conda_bin") or ""),
             python_bin=str(data.get("python_bin") or "python3"),
             api_base=str(data.get("api_base") or ""),
             api_key=str(data.get("api_key") or ""),
@@ -182,6 +184,8 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env["PYTHONUNBUFFERED"] = "1"
     if req.conda_env:
         env["CONDA_ENV"] = req.conda_env
+    if req.conda_bin:
+        env["CONDA_EXE"] = req.conda_bin
     if req.api_base:
         env["DEFAULT_LLM_API_BASE"] = req.api_base
         env["SUMMARY_API_URL"] = req.api_base
@@ -501,21 +505,25 @@ def check_bilibili_target_access(req: TaskRequest) -> str:
     return "\n".join(lines) + "\n"
 
 
+def conda_cmd(req: TaskRequest) -> str:
+    return req.conda_bin.strip() or os.environ.get("CONDA_EXE", "").strip() or "conda"
+
+
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "--no-capture-output", "-n", req.conda_env, "python3", "-u", str(script)]
+        return [conda_cmd(req), "run", "--no-capture-output", "-n", req.conda_env, "python3", "-u", str(script)]
     return [req.python_bin or "python3", "-u", str(script)]
 
 
 def python_eval_cmd(req: TaskRequest, code: str) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "--no-capture-output", "-n", req.conda_env, "python3", "-c", code]
+        return [conda_cmd(req), "run", "--no-capture-output", "-n", req.conda_env, "python3", "-c", code]
     return [req.python_bin or "python3", "-c", code]
 
 
 def tool_cmd(req: TaskRequest, tool: str, *args: str) -> list[str]:
     if req.conda_env:
-        return ["conda", "run", "--no-capture-output", "-n", req.conda_env, tool, *args]
+        return [conda_cmd(req), "run", "--no-capture-output", "-n", req.conda_env, tool, *args]
     return [tool, *args]
 
 
@@ -575,6 +583,7 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
     lines.append("Selected runtime")
     if req.conda_env:
         lines.append(f"- conda environment: {req.conda_env}")
+        lines.append(f"- conda executable: {conda_cmd(req)}")
     else:
         lines.append(f"- Python command: {req.python_bin or 'python3'}")
     lines.append(f"- LLM API base: {req.api_base or env.get('DEFAULT_LLM_API_BASE', '(not set)')}")
@@ -788,9 +797,10 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
     lines.append("")
     lines.append("Common setup hints")
     if req.conda_env:
-        lines.append(f"- conda install -n {req.conda_env} -c conda-forge ffmpeg")
-        lines.append(f"- conda install -n {req.conda_env} -c conda-forge pandoc")
-        lines.append(f"- conda run -n {req.conda_env} python3 -m pip install pypdf lxml requests yt-dlp mlx-whisper")
+        conda = shlex.quote(conda_cmd(req))
+        lines.append(f"- {conda} install -n {req.conda_env} -c conda-forge ffmpeg")
+        lines.append(f"- {conda} install -n {req.conda_env} -c conda-forge pandoc")
+        lines.append(f"- {conda} run -n {req.conda_env} python3 -m pip install pypdf lxml requests yt-dlp mlx-whisper")
     else:
         python = req.python_bin or "python3"
         lines.append(f"- {python} -m pip install pypdf lxml requests yt-dlp mlx-whisper")
@@ -1508,6 +1518,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default="", help="Markdown output directory.")
     parser.add_argument("--output-filename", default="", help="Custom Markdown/EPUB file name for single-output tasks.")
     parser.add_argument("--conda-env", default="", help="Existing conda environment to use.")
+    parser.add_argument("--conda-bin", default="", help="Conda executable path for desktop GUI launches.")
     parser.add_argument("--python-bin", default="python3", help="Python command when conda is not used.")
     parser.add_argument("--api-base", default="", help="OpenAI-compatible API base.")
     parser.add_argument("--api-key", default="", help="OpenAI-compatible API key.")
@@ -1554,6 +1565,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         output_dir=args.output_dir,
         output_filename=args.output_filename,
         conda_env=args.conda_env,
+        conda_bin=args.conda_bin,
         python_bin=args.python_bin,
         api_base=args.api_base,
         api_key=args.api_key,

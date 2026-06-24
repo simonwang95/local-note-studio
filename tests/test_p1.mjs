@@ -53,6 +53,22 @@ const sampleEntries = [
 ];
 assert.deepEqual(history.filterTaskHistory(sampleEntries, "failed").map((item) => item.id), ["failed"]);
 assert.deepEqual(history.removeHistoryEntry(sampleEntries, "done").map((item) => item.id), ["failed"]);
+assert.deepEqual(history.migrateRuntimePreference({ runtimeBackend: "conda", condaEnv: "course-whisper" }), {
+  runtimeBackend: "managed",
+  condaEnv: "course-whisper",
+  runtimePreferenceConfirmed: true,
+});
+assert.equal(history.migrateRuntimePreference({ runtimeBackend: "conda", runtimePreferenceConfirmed: true }).runtimeBackend, "conda");
+assert.deepEqual(history.runtimeSelectionPayload("managed", "course-whisper", "/tmp/conda"), {
+  runtime_backend: "managed",
+  conda_env: "",
+  conda_bin: "",
+});
+assert.deepEqual(history.runtimeSelectionPayload("conda", "course-whisper", "/tmp/conda"), {
+  runtime_backend: "conda",
+  conda_env: "course-whisper",
+  conda_bin: "/tmp/conda",
+});
 assert.equal(shell.resolveAppTab("validation"), "validation");
 assert.equal(shell.resolveAppTab("unknown"), "config");
 assert.equal(shell.adjacentAppTab("validation", 1), "config");

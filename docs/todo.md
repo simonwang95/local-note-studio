@@ -126,7 +126,7 @@
 
 ### T-108 应用托管运行环境
 
-状态：实现完成，待干净 Mac 独立验收（2026-06-23）。应用可下载 SHA-256 固定的双架构独立 Python 3.11，安装锁定 Python/ASR 依赖、yt-dlp、ffmpeg/ffprobe，首次 EPUB 时按需安装 Pandoc；资源按版本原子切换并支持状态、磁盘占用、修复与卸载，Conda 保留为高级后端。尚需按验收标准在无开发工具机器执行完整任务矩阵。
+状态：实现完成，待干净 Mac 独立验收（2026-06-24）。应用可下载 SHA-256 固定的双架构独立 Python 3.11，安装锁定 Python/ASR 依赖、yt-dlp、ffmpeg/ffprobe，首次 EPUB 时按需安装 Pandoc；资源按版本原子切换并支持状态、磁盘占用、修复与卸载。安装版默认托管后端；显式 Conda 选择跨启动保留，Finder 启动会补全常见 Conda 路径并允许填写绝对路径。尚需按验收标准在无开发工具机器执行完整任务矩阵。
 
 - 采用混合模式：`.app` 保持轻量，Python、固定版本依赖和命令行工具由应用安装到 `~/Library/Application Support/Local Note Studio/`。
 - 管理可迁移的 Python 运行时和锁定依赖；管理 `ffmpeg` / `ffprobe`，允许 `yt-dlp` 独立更新，并在 EPUB 功能首次使用时按需安装 `pandoc`。

@@ -6,7 +6,7 @@
 - Frontend: Vite + TypeScript.
 - Worker: Python scripts migrated from `knowledge-base`.
 - LLM: OpenAI-compatible API, including LM Studio, Ollama-compatible proxies, or remote providers.
-- ASR today: user-managed conda environment; distribution target: app-managed runtime with optional managed model assets.
+- Runtime/ASR: packaged builds default to the app-managed runtime with optional managed model assets; an explicitly selected user-managed Conda environment remains an advanced backend.
 
 ## Process Model
 
@@ -49,7 +49,9 @@ The worker accepts either CLI flags or a JSON request. Normal processing tasks u
   "source": "/path/to/paper.pdf",
   "output_dir": "/path/to/notes",
   "output_filename": "optional-custom-name.md",
+  "runtime_backend": "conda",
   "conda_env": "course-whisper",
+  "conda_bin": "/Users/xxx/miniforge3/bin/conda",
   "api_base": "http://127.0.0.1:1234/v1",
   "api_key": "lm-studio",
   "model": "qwen3.6-35b-a3b-nvfp4",

@@ -10,6 +10,8 @@ The package is not completely self-contained:
 
 - The filename architecture must match the tester Mac: `aarch64` is for Apple Silicon; `x86_64` is for Intel. The current development machine only builds `aarch64`.
 - On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `ffmpeg`, and `ffprobe` into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts.
+- Fresh installs and legacy settings without an explicit runtime preference default to the managed runtime. If the user explicitly selects the advanced Conda backend, that choice, environment name, and optional executable path persist across launches.
+- Finder-launched apps do not inherit the interactive shell's `PATH`. The app augments GUI process paths and searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. Non-standard Conda installations should be configured with an absolute `.../bin/conda` path in the UI.
 - An OpenAI-compatible LLM/OCR service is not bundled. The tester must configure an API URL, key, and model reachable from that Mac. Bilibili private/collection tests additionally need that tester's own Cookie or Chrome Profile; never distribute the developer's credentials.
 - Optional ASR models are separate large assets. Pandoc is installed on demand for EPUB tasks.
 - Internal DMGs are currently unsigned and unnotarized. Give the tester the SHA-256 checksum through a separate trusted channel. After copying the app to `/Applications`, try Control-click → Open first. If Gatekeeper still blocks a package whose checksum they have verified, they may run `xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"` for this internal build only. Public distribution must use Developer ID signing and notarization instead.
@@ -22,15 +24,17 @@ Recommended handoff steps:
 4. In “校验”, run “检查依赖” and confirm the managed runtime is complete.
 5. Start with a small public webpage or local document before testing account-bound Bilibili or long ASR workflows.
 
+For an internal upgrade, quit Local Note Studio and replace the existing `/Applications/Local Note Studio.app` with the new copy from the DMG. Trashing or replacing only the `.app` preserves Application Support runtime/state and WebView settings. A complete reset is a separate operation and should not be used for normal upgrades.
+
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
 ## Current internal test build (2026-06-24)
 
-- Version: `0.1.0`
+- Version: `0.1.1`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.0_aarch64.dmg`
-- Size: `3,421,818` bytes (about 3.3 MiB)
-- SHA-256: `aa176f3af437292a30521e42dd703fd107090a7911457c1baab895d52629675d`
+- Artifact: `Local Note Studio_0.1.1_aarch64.dmg`
+- Size: `3,431,921` bytes (about 3.3 MiB)
+- SHA-256: `b1fa87a886e4ef2982ce5710f830951d7e36598afd14bad68d9b1252f04710cc`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.

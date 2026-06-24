@@ -15,6 +15,14 @@
 3. 点击“安装/修复”，联网安装校验过的 Python、依赖和媒体工具。
 4. 到“校验”运行“检查依赖”，再执行一个小任务。
 
+全新安装默认使用托管环境。若用户主动切换到“现有 Conda / Python（高级）”，所选后端、环境名和 Conda 可执行文件路径会保存在这台 Mac，后续启动继续使用，不会自动切回托管环境。
+
+从 Finder 启动的 App 不会继承终端 shell 的完整 `PATH`。应用会自动查找 `~/miniforge3`、`~/miniconda3`、`~/anaconda3`、Homebrew 等常见位置；如果 Conda 安装在自定义目录，请在配置页填写完整路径，例如：
+
+```text
+/Users/xxx/miniforge3/bin/conda
+```
+
 内部测试包暂未签名和公证。应先通过可信渠道核对开发者提供的 SHA-256；然后优先使用右键/Control-click →“打开”。如果 Gatekeeper 仍拦截已核对的内部包，可仅对该测试 App 执行：
 
 ```bash
@@ -22,6 +30,8 @@ xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"
 ```
 
 正式公开分发不能依赖这个操作，必须完成 Developer ID 签名和 Apple 公证。更完整的交付边界见 [`release-macos.md`](release-macos.md)。
+
+升级内部测试包时，先退出 App，再把旧的 `/Applications/Local Note Studio.app` 拖入废纸篓并从新 DMG 拖入，或直接覆盖替换。只替换 `.app` 会保留 Application Support 中的托管环境、索引和恢复状态，也会保留界面配置；普通升级不要删除这些数据目录。
 
 ### 源码开发：桌面应用模式
 
@@ -191,8 +201,10 @@ Waiting for your frontend dev server...
 
 填写或确认：
 
-- `Conda 环境`：默认 `course-whisper`
-- `Python 命令`：不用 conda 时才会用到，默认 `python3`
+- `运行时后端`：安装版默认“应用托管环境”；首次使用先点击“安装/修复”
+- `Conda 环境`：仅高级后端使用，预填 `course-whisper`，可改为自己的环境名
+- `Conda 可执行文件`：通常留空自动查找；自定义安装位置请填写绝对路径
+- `Python 命令`：仅高级后端且不使用 Conda 环境时使用，默认 `python3`
 - `LLM API Base`：默认 `http://127.0.0.1:1234/v1`
 - `API Key`：LM Studio 可用 `lm-studio`
 - `模型`：默认 `qwen3.6-35b-a3b-nvfp4`

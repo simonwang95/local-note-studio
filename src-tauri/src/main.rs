@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -117,7 +117,7 @@ fn run_worker_blocking(
     let worker = resolve_worker_path(resource_dir)?;
     let python = resolve_python(&app, &request)?;
     let mut command = Command::new(python);
-    configure_worker_command(&app, &mut command)?;
+    configure_worker_command(&app, &mut command, &request)?;
     let output = command
         .arg(worker)
         .arg("--request-json")
@@ -157,7 +157,7 @@ fn run_worker_streaming(
     let worker = resolve_worker_path(resource_dir)?;
     let python = resolve_python(&app, &request)?;
     let mut command = Command::new(python);
-    configure_worker_command(&app, &mut command)?;
+    configure_worker_command(&app, &mut command, &request)?;
     let mut child = command
         .arg(worker)
         .arg("--request-json")
@@ -256,8 +256,66 @@ fn app_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|err| err.to_string())
 }
 
-fn configure_worker_command(app: &tauri::AppHandle, command: &mut Command) -> Result<(), String> {
+fn request_string(request: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<Value>(request)
+        .ok()
+        .and_then(|value| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(str::to_owned)
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn request_runtime_backend(request: &str) -> String {
+    request_string(request, "runtime_backend").unwrap_or_else(|| "managed".to_string())
+}
+
+fn expand_home_path(value: &str, home: &Path) -> PathBuf {
+    value
+        .strip_prefix("~/")
+        .map(|suffix| home.join(suffix))
+        .unwrap_or_else(|| PathBuf::from(value))
+}
+
+fn conda_bin_directories(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join("miniforge3/bin"),
+        home.join("miniconda3/bin"),
+        home.join("anaconda3/bin"),
+        home.join("mambaforge/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/anaconda3/bin"),
+        PathBuf::from("/opt/miniconda3/bin"),
+    ]
+}
+
+fn find_conda_executable(home: &Path, configured: Option<&str>) -> Option<PathBuf> {
+    if let Some(value) = configured {
+        return Some(expand_home_path(value, home));
+    }
+    conda_bin_directories(home)
+        .into_iter()
+        .map(|directory| directory.join("conda"))
+        .find(|candidate| candidate.exists())
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+fn configure_worker_command(
+    app: &tauri::AppHandle,
+    command: &mut Command,
+    request: &str,
+) -> Result<(), String> {
     let root = app_data_root(app)?;
+    let home = app.path().home_dir().map_err(|err| err.to_string())?;
     let state_dir = root.join("state");
     let index_dir = state_dir.join("indexes");
     fs::create_dir_all(&index_dir).map_err(|err| err.to_string())?;
@@ -266,23 +324,38 @@ fn configure_worker_command(app: &tauri::AppHandle, command: &mut Command) -> Re
         .env("INDEX_DIR", &index_dir)
         .env("BILIBILI_STATE_DIR", index_dir.join("bilibili-state"))
         .env("OCR_CHECKPOINT_DIR", state_dir.join("ocr-checkpoints"));
-    let managed_bin = root.join("runtime").join("current").join("bin");
+    let configured_conda = request_string(request, "conda_bin");
+    let conda = find_conda_executable(&home, configured_conda.as_deref());
+    if let Some(path) = &conda {
+        command.env("CONDA_EXE", path);
+    }
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = conda.as_ref().and_then(|path| path.parent()) {
+        push_unique_path(&mut paths, parent.to_path_buf());
+    }
+    let managed_bin = root.join("runtime/current/bin");
     if managed_bin.exists() {
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![managed_bin];
-        paths.extend(std::env::split_paths(&inherited));
-        if let Ok(joined) = std::env::join_paths(paths) {
-            command.env("PATH", joined);
-        }
+        push_unique_path(&mut paths, managed_bin);
+    }
+    for path in conda_bin_directories(&home) {
+        push_unique_path(&mut paths, path);
+    }
+    for path in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        push_unique_path(&mut paths, PathBuf::from(path));
+    }
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    for path in std::env::split_paths(&inherited) {
+        push_unique_path(&mut paths, path);
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env("PATH", joined);
     }
     Ok(())
 }
 
 fn resolve_python(app: &tauri::AppHandle, request: &str) -> Result<PathBuf, String> {
-    let backend = serde_json::from_str::<Value>(request)
-        .ok()
-        .and_then(|value| value.get("runtime_backend").and_then(Value::as_str).map(str::to_owned))
-        .unwrap_or_else(|| "conda".to_string());
+    let backend = request_runtime_backend(request);
     if backend == "managed" {
         let root = app_data_root(app)?;
         let python = root.join("runtime/current/bin/python3");
@@ -298,9 +371,23 @@ fn resolve_python(app: &tauri::AppHandle, request: &str) -> Result<PathBuf, Stri
         }
         return Ok(python);
     }
-    Ok(PathBuf::from(
-        std::env::var("LOCAL_NOTE_STUDIO_PYTHON").unwrap_or_else(|_| "python3".to_string()),
-    ))
+    let home = app.path().home_dir().map_err(|err| err.to_string())?;
+    let requested_python = std::env::var("LOCAL_NOTE_STUDIO_PYTHON")
+        .ok()
+        .or_else(|| request_string(request, "python_bin"))
+        .unwrap_or_else(|| "python3".to_string());
+    if requested_python == "python3" {
+        let configured_conda = request_string(request, "conda_bin");
+        if let Some(conda) = find_conda_executable(&home, configured_conda.as_deref()) {
+            if let Some(parent) = conda.parent() {
+                let candidate = parent.join("python3");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    Ok(expand_home_path(&requested_python, &home))
 }
 
 fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<String, String> {
@@ -314,7 +401,10 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
         if runtime_root.exists() {
             fs::remove_dir_all(&runtime_root).map_err(|err| err.to_string())?;
         }
-        return Ok(format!("托管环境已移除：{}\n用户笔记、任务历史和模型目录未删除。\n", runtime_root.display()));
+        return Ok(format!(
+            "托管环境已移除：{}\n用户笔记、任务历史和模型目录未删除。\n",
+            runtime_root.display()
+        ));
     }
     if action != "install" {
         return Err(format!("Unsupported runtime action: {action}"));
@@ -330,7 +420,8 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
         .ok_or_else(|| "Cannot resolve worker directory".to_string())?
         .join("requirements-managed.lock");
     let version_dir = runtime_root.join("versions").join(MANAGED_RUNTIME_VERSION);
-    fs::create_dir_all(version_dir.parent().unwrap_or(&runtime_root)).map_err(|err| err.to_string())?;
+    fs::create_dir_all(version_dir.parent().unwrap_or(&runtime_root))
+        .map_err(|err| err.to_string())?;
 
     if !version_dir.join("bin/python3").exists() {
         install_standalone_python(&runtime_root, &version_dir)?;
@@ -357,7 +448,9 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     install_managed_media_tools(&runtime_root, &version_dir.join("bin"))?;
 
     if current.exists() {
-        fs::remove_file(&current).or_else(|_| fs::remove_dir_all(&current)).map_err(|err| err.to_string())?;
+        fs::remove_file(&current)
+            .or_else(|_| fs::remove_dir_all(&current))
+            .map_err(|err| err.to_string())?;
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(&version_dir, &current).map_err(|err| err.to_string())?;
@@ -372,10 +465,19 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     Ok(runtime_status_text(&root))
 }
 
-fn install_standalone_python(runtime_root: &std::path::Path, version_dir: &std::path::Path) -> Result<(), String> {
+fn install_standalone_python(
+    runtime_root: &std::path::Path,
+    version_dir: &std::path::Path,
+) -> Result<(), String> {
     let (arch, checksum) = match std::env::consts::ARCH {
-        "aarch64" => ("aarch64", "8c56f1f59142e0f9f8861ad897bdfd97fd84403afa7b3d8b0f33b208ec471355"),
-        "x86_64" => ("x86_64", "8cd3878c656ba1698314cbcb65f78df4c37b7c8eabff958558115c6db11adb3d"),
+        "aarch64" => (
+            "aarch64",
+            "8c56f1f59142e0f9f8861ad897bdfd97fd84403afa7b3d8b0f33b208ec471355",
+        ),
+        "x86_64" => (
+            "x86_64",
+            "8cd3878c656ba1698314cbcb65f78df4c37b7c8eabff958558115c6db11adb3d",
+        ),
         other => return Err(format!("暂不支持的 Mac 架构：{other}")),
     };
     let file_name = format!(
@@ -401,17 +503,26 @@ fn install_standalone_python(runtime_root: &std::path::Path, version_dir: &std::
         .output()
         .map_err(|err| format!("无法启动系统 curl：{err}"))?;
     if !download.status.success() {
-        return Err(format!("Python 运行时下载失败：{}", String::from_utf8_lossy(&download.stderr)));
+        return Err(format!(
+            "Python 运行时下载失败：{}",
+            String::from_utf8_lossy(&download.stderr)
+        ));
     }
     let digest = Command::new("shasum")
         .args(["-a", "256"])
         .arg(&archive)
         .output()
         .map_err(|err| err.to_string())?;
-    let actual = String::from_utf8_lossy(&digest.stdout).split_whitespace().next().unwrap_or("").to_string();
+    let actual = String::from_utf8_lossy(&digest.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
     if !digest.status.success() || actual != checksum {
         let _ = fs::remove_file(&archive);
-        return Err(format!("Python 运行时 SHA-256 校验失败：期望 {checksum}，实际 {actual}"));
+        return Err(format!(
+            "Python 运行时 SHA-256 校验失败：期望 {checksum}，实际 {actual}"
+        ));
     }
     let extract = Command::new("tar")
         .args(["-xzf"])
@@ -421,7 +532,10 @@ fn install_standalone_python(runtime_root: &std::path::Path, version_dir: &std::
         .output()
         .map_err(|err| err.to_string())?;
     if !extract.status.success() {
-        return Err(format!("Python 运行时解压失败：{}", String::from_utf8_lossy(&extract.stderr)));
+        return Err(format!(
+            "Python 运行时解压失败：{}",
+            String::from_utf8_lossy(&extract.stderr)
+        ));
     }
     let extracted = staging.join("python");
     if !extracted.join("bin/python3").exists() {
@@ -435,7 +549,10 @@ fn install_standalone_python(runtime_root: &std::path::Path, version_dir: &std::
     Ok(())
 }
 
-fn install_managed_media_tools(runtime_root: &std::path::Path, bin_dir: &std::path::Path) -> Result<(), String> {
+fn install_managed_media_tools(
+    runtime_root: &std::path::Path,
+    bin_dir: &std::path::Path,
+) -> Result<(), String> {
     let tools = [
         (
             "ffmpeg",
@@ -454,7 +571,10 @@ fn install_managed_media_tools(runtime_root: &std::path::Path, bin_dir: &std::pa
     Ok(())
 }
 
-fn install_managed_pandoc(runtime_root: &std::path::Path, bin_dir: &std::path::Path) -> Result<(), String> {
+fn install_managed_pandoc(
+    runtime_root: &std::path::Path,
+    bin_dir: &std::path::Path,
+) -> Result<(), String> {
     let (url, checksum) = match std::env::consts::ARCH {
         "aarch64" => (
             "https://github.com/jgm/pandoc/releases/download/3.10/pandoc-3.10-arm64-macOS.zip",
@@ -496,17 +616,26 @@ fn install_zip_tool(
         .output()
         .map_err(|err| format!("无法启动系统 curl：{err}"))?;
     if !download.status.success() {
-        return Err(format!("{name} 下载失败：{}", String::from_utf8_lossy(&download.stderr)));
+        return Err(format!(
+            "{name} 下载失败：{}",
+            String::from_utf8_lossy(&download.stderr)
+        ));
     }
     let digest = Command::new("shasum")
         .args(["-a", "256"])
         .arg(&archive)
         .output()
         .map_err(|err| err.to_string())?;
-    let actual = String::from_utf8_lossy(&digest.stdout).split_whitespace().next().unwrap_or("").to_string();
+    let actual = String::from_utf8_lossy(&digest.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
     if !digest.status.success() || actual != checksum {
         let _ = fs::remove_file(&archive);
-        return Err(format!("{name} SHA-256 校验失败：期望 {checksum}，实际 {actual}"));
+        return Err(format!(
+            "{name} SHA-256 校验失败：期望 {checksum}，实际 {actual}"
+        ));
     }
     let extract = Command::new("ditto")
         .args(["-x", "-k"])
@@ -515,14 +644,19 @@ fn install_zip_tool(
         .output()
         .map_err(|err| err.to_string())?;
     if !extract.status.success() {
-        return Err(format!("{name} 解压失败：{}", String::from_utf8_lossy(&extract.stderr)));
+        return Err(format!(
+            "{name} 解压失败：{}",
+            String::from_utf8_lossy(&extract.stderr)
+        ));
     }
-    let extracted = find_named_file(&staging, name).ok_or_else(|| format!("{name} 压缩包中缺少可执行文件"))?;
+    let extracted =
+        find_named_file(&staging, name).ok_or_else(|| format!("{name} 压缩包中缺少可执行文件"))?;
     fs::copy(&extracted, &target).map_err(|err| err.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).map_err(|err| err.to_string())?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
+            .map_err(|err| err.to_string())?;
     }
     let _ = fs::remove_dir_all(&staging);
     Ok(())
@@ -551,14 +685,27 @@ fn runtime_status_text(root: &std::path::Path) -> String {
     let mut lines = vec![
         format!("托管环境目录：{}", root.join("runtime").display()),
         format!("版本：{MANAGED_RUNTIME_VERSION}"),
-        format!("状态：{}", if python.exists() { "已安装" } else { "未安装" }),
-        format!("磁盘占用：{}", human_bytes(directory_size(&root.join("runtime")))),
+        format!(
+            "状态：{}",
+            if python.exists() {
+                "已安装"
+            } else {
+                "未安装"
+            }
+        ),
+        format!(
+            "磁盘占用：{}",
+            human_bytes(directory_size(&root.join("runtime")))
+        ),
         "".to_string(),
         "组件：".to_string(),
     ];
     for tool in tools {
         let ready = bin.join(tool).exists() || (tool != "python3" && command_available(tool));
-        lines.push(format!("- {} {tool}", if ready { "[OK]" } else { "[MISSING]" }));
+        lines.push(format!(
+            "- {} {tool}",
+            if ready { "[OK]" } else { "[MISSING]" }
+        ));
     }
     lines.push("".to_string());
     lines.push(format!("模型目录：{}", root.join("models").display()));
@@ -667,7 +814,32 @@ mod tests {
         assert!(stop_worker(&state).expect("cancel child"));
         assert!(state.cancel_requested.load(Ordering::SeqCst));
         let mut guard = state.child.lock().expect("lock child");
-        let status = guard.as_mut().expect("child present").wait().expect("wait child");
+        let status = guard
+            .as_mut()
+            .expect("child present")
+            .wait()
+            .expect("wait child");
         assert!(!status.success());
+    }
+
+    #[test]
+    fn packaged_requests_default_to_managed_runtime() {
+        assert_eq!(request_runtime_backend("{}"), "managed");
+        assert_eq!(
+            request_runtime_backend(r#"{"runtime_backend":"conda"}"#),
+            "conda"
+        );
+    }
+
+    #[test]
+    fn gui_conda_search_includes_user_and_system_locations() {
+        let home = Path::new("/Users/tester");
+        let directories = conda_bin_directories(home);
+        assert!(directories.contains(&home.join("miniforge3/bin")));
+        assert!(directories.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert_eq!(
+            find_conda_executable(home, Some("~/custom-conda/bin/conda")),
+            Some(home.join("custom-conda/bin/conda"))
+        );
     }
 }
