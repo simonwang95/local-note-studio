@@ -624,7 +624,11 @@ def load_batch_failures(cfg: dict[str, str], collection: dict[str, str]) -> list
     saved = payload.get("collection") or {}
     if saved.get("type") != collection.get("type") or str(saved.get("id")) != str(collection.get("id")):
         raise RuntimeError("失败列表属于另一个收藏夹/系列，请先切回原目标或重新运行当前批次。")
-    return [item for item in payload.get("failures") or [] if isinstance(item, dict)]
+    return [
+        item
+        for item in payload.get("failures") or []
+        if isinstance(item, dict) and str(item.get("manual_status") or "failed") in {"failed", "rebuild"}
+    ]
 
 
 def collection_llm_cooldown(cfg: dict[str, str]) -> float:

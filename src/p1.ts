@@ -99,6 +99,14 @@ export function upsertHistoryEntry(entries: TaskHistoryEntry[], entry: TaskHisto
   return [entry, ...entries.filter((item) => item.id !== entry.id)].slice(0, maxEntries);
 }
 
+export function removeHistoryEntry(entries: TaskHistoryEntry[], id: string): TaskHistoryEntry[] {
+  return entries.filter((entry) => entry.id !== id);
+}
+
+export function filterTaskHistory(entries: TaskHistoryEntry[], status: TaskHistoryStatus | "all"): TaskHistoryEntry[] {
+  return status === "all" ? entries : entries.filter((entry) => entry.status === status);
+}
+
 export function structuredLine<T>(text: string, prefix: string): T | null {
   const lines = text.split("\n").filter((line) => line.startsWith(prefix));
   const line = lines.at(-1);

@@ -2,9 +2,28 @@
 
 这份文档面向 Local Note Studio 的日常使用。目标是先把 Mac 桌面应用跑起来，再用它检查环境、预览命令、执行笔记整理任务。
 
-## 1. 先分清两个启动方式
+## 1. 先分清三种启动方式
 
-### 推荐：桌面应用模式
+### 推荐给其他 Mac 测试：DMG 安装包
+
+同架构的测试 Mac 只需要对应的 DMG，不需要项目源码、Node.js、Rust、Xcode、Homebrew 或 conda。`aarch64` 安装包只适用于 Apple Silicon，`x86_64` 适用于 Intel；当前开发机构建的是 `aarch64`。
+
+安装包包含 App 和 Python worker，但不会捆绑个人配置、Cookie、本地索引、LLM 服务或大型 ASR 模型。第一次启动后请：
+
+1. 把 App 从 DMG 拖入“应用程序”。
+2. 在“配置”选择“应用托管环境”，填写该测试 Mac 能访问的 LLM API、模型和输出根目录。
+3. 点击“安装/修复”，联网安装校验过的 Python、依赖和媒体工具。
+4. 到“校验”运行“检查依赖”，再执行一个小任务。
+
+内部测试包暂未签名和公证。应先通过可信渠道核对开发者提供的 SHA-256；然后优先使用右键/Control-click →“打开”。如果 Gatekeeper 仍拦截已核对的内部包，可仅对该测试 App 执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"
+```
+
+正式公开分发不能依赖这个操作，必须完成 Developer ID 签名和 Apple 公证。更完整的交付边界见 [`release-macos.md`](release-macos.md)。
+
+### 源码开发：桌面应用模式
 
 真正运行任务时，请使用：
 
@@ -29,7 +48,9 @@ npm run dev
 
 如果你在 Chrome 里看到 `localhost:1420` 或 `localhost:5173`，那通常只是网页预览，不代表 Tauri worker 可用。请以 Tauri 桌面窗口为准。
 
-## 2. 第一次启动前准备
+## 2. 源码开发模式第一次启动前准备
+
+使用 DMG 的测试者跳过本节；下面的 `npm install` 和 `worker/env.local` 只用于源码开发。
 
 安装前端依赖：
 

@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-06-24
+
+- Added safe in-app maintenance for Manifest and incremental records: all records can be filtered, JSON records can be manually classified or returned to automatic detection, and obsolete records can be deleted without deleting source/output files.
+- Clarified task-history scope as all local history (up to 100 entries, including the active task), with counts, status filtering, single-entry deletion, and confirmed clear-all behavior.
+- Built and verified an optimized 3.3 MiB arm64 release DMG, inspected its bundled worker resources, and documented its SHA-256 plus same-architecture clean-Mac handoff steps. Developer ID signing, notarization, Intel/universal packaging, and independent clean-Mac acceptance remain release gates.
+- Completed T-112 with Configuration, Tasks, and Validation tabs, keyboard navigation, a persistent output/log inspector, and a responsive bottom dock at narrow app widths.
+- Added per-record checkboxes, select-visible controls, atomic batch status/delete operations, and persisted Manifest card expansion/filter state across refreshes.
+
 ## 2026-06-23
 
 Confirmed the MVP direction:
@@ -54,12 +62,12 @@ Implemented since the initial checkpoint:
 - Explicit static-HTTP versus selected-Chrome-Profile browser capture for authenticated or JavaScript-rendered webpages.
 - Per-task timeout, retry, cooldown, and chunk-size overrides for long batches.
 - Versioned Application Support runtime management with checksum-pinned standalone Python, locked packages, yt-dlp, ffmpeg/ffprobe, on-demand Pandoc, disk usage, repair/uninstall, and advanced Conda fallback.
-- macOS `.app`/DMG bundle configuration, generated icon set, worker resource whitelist, release checks, and a signing/notarization/clean-Mac acceptance checklist. A debug `.app` bundle was built and inspected successfully; Developer ID notarization and independent clean-Mac acceptance remain release gates.
+- macOS `.app`/DMG bundle configuration, generated icon set, worker resource whitelist, release checks, and a signing/notarization/clean-Mac acceptance checklist. Debug `.app` and arm64 DMG bundles were built successfully; Developer ID notarization and independent clean-Mac acceptance remain release gates.
 - Startup dependency checks now tolerate legacy task-history records and use the public Tauri runtime detector; the check runs automatically on app launch and remains manually retryable.
 - Optional incognito tasks generate normal outputs and local task history without reading or writing source/video/quickread/keyframe manifests or Bilibili incremental/failure state.
 
 ## Current Todo Backlog
 
-The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). P0 and P1 development work is implemented. T-108/T-109 still require the documented independent clean-Mac, Developer ID signing, and notarization release gates before distribution.
+The canonical, prioritized backlog is maintained in [`docs/todo.md`](todo.md). P0 and P1 workflows, including the T-112 desktop Tab layout, are implemented. T-108/T-109 still require the documented independent clean-Mac, Developer ID signing, and notarization release gates before distribution.
 
 Packaging decision: T-108 app-managed runtime must be completed before T-109 release packaging. A clean Mac without conda or Homebrew should run the main workflows after in-app initialization; LLM/OCR remains API-configured and ASR model assets are managed separately.

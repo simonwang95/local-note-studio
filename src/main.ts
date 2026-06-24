@@ -1,10 +1,14 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
+import { createAppTabs } from "./app-shell";
+import { ManifestViewStateStore } from "./manifest-state";
 import {
   createHistoryEntry,
   loadTaskHistory,
+  filterTaskHistory,
   progressFromLine,
+  removeHistoryEntry,
   saveTaskHistory,
   taskResultFromLog,
   upsertHistoryEntry,
@@ -72,6 +76,9 @@ let isWorkerRunning = false;
 let workerLogListenerReady: Promise<void> | null = null;
 let taskHistory = loadTaskHistory();
 let activeHistoryEntry: TaskHistoryEntry | null = null;
+let historyFilter: TaskHistoryStatus | "all" = "all";
+const appTabKey = "local-note-studio.active-tab.v1";
+const manifestViewState = new ManifestViewStateStore();
 
 const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
@@ -186,25 +193,37 @@ const savedSettings = loadSettings();
 app.innerHTML = `
   <section class="shell">
     <aside class="sidebar">
-      <div>
+      <div class="brand">
         <h1>Local Note Studio</h1>
         <p>把视频、网页、文档和论文整理成 Obsidian 兼容 Markdown。</p>
       </div>
 
+      <nav class="tab-nav" role="tablist" aria-label="主工作区">
+        <button id="tabConfig" type="button" role="tab" aria-controls="panelConfig" data-app-tab="config">
+          <span>配置</span><small>运行环境与路径</small>
+        </button>
+        <button id="tabTask" type="button" role="tab" aria-controls="panelTask" data-app-tab="task">
+          <span>任务</span><small>执行、进度与历史</small>
+        </button>
+        <button id="tabValidation" type="button" role="tab" aria-controls="panelValidation" data-app-tab="validation">
+          <span>校验</span><small>依赖与处理记录</small>
+        </button>
+      </nav>
+
       <div class="status-card">
-        <strong>实用提示</strong>
-        <span>本次输出目录就是最终写入目录；B站收藏夹默认只测试 1 条；长任务可以随时取消。</span>
+        <strong>本机工作区</strong>
+        <span>配置、任务与校验相互独立；右侧始终保留本次输出和实时日志。</span>
       </div>
     </aside>
 
     <main class="workspace">
+      <div class="tab-stage">
+      <section id="panelConfig" class="tab-view" role="tabpanel" aria-labelledby="tabConfig" data-tab-panel="config">
       <section class="panel">
         <div class="panel-header">
           <div>
-            <span class="step">1</span>
-            <h2>运行环境</h2>
+            <span class="step">1</span><h2>运行环境配置</h2>
           </div>
-          <button id="checkEnv" type="button">检查依赖</button>
         </div>
         <div class="form-grid compact">
           <label>
@@ -295,11 +314,13 @@ app.innerHTML = `
         </label>
         <p class="field-note">建议填写 Obsidian Vault 或长期笔记目录的绝对路径。切换任务时会帮你带出常用目录；真正写入位置以“本次输出目录”为准。</p>
       </section>
+      </section>
 
+      <section id="panelTask" class="tab-view" role="tabpanel" aria-labelledby="tabTask" data-tab-panel="task" hidden>
       <section class="panel task-panel">
         <div class="panel-header">
           <div>
-            <span class="step">3</span>
+            <span class="step">1</span>
             <h2>任务执行</h2>
           </div>
           <div class="actions">
@@ -431,39 +452,65 @@ app.innerHTML = `
         <progress id="taskProgress" max="100" value="0"></progress>
       </section>
 
-      <section id="resultPanel" class="panel">
-        <div class="panel-header">
-          <div><span class="step">4</span><h2 id="resultTitle">本次输出</h2></div>
-          <button id="copyOutputDir" type="button" class="secondary">复制输出目录</button>
-        </div>
-        <div id="resultList" class="result-list"><p class="empty-state">任务完成后会在这里列出所有新增或更新的文件。</p></div>
-      </section>
-
       <section class="panel">
         <div class="panel-header">
-          <div><span class="step">5</span><h2>处理记录与文件状态</h2></div>
-          <button id="refreshManifests" type="button" class="secondary">重新检查</button>
+          <div><span class="step">2</span><h2>任务历史与恢复 <small id="historyCount" class="heading-count"></small></h2></div>
+          <button id="clearHistory" type="button" class="secondary">清空全部历史</button>
         </div>
-        <p class="manifest-help">这是程序用于避免重复处理的本地记录。通常只需关注“处理失败”和“输出缺失”；“本次跳过”表示文件已经存在，因此没有重复生成。</p>
-        <div id="manifestSummary" class="summary-chips"></div>
-        <div id="manifestList" class="manifest-list"><p class="empty-state">点击“重新检查”，查看视频、文档、论文和 B站批次的处理记录。</p></div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
-          <div><span class="step">6</span><h2>任务历史与恢复</h2></div>
-          <button id="clearHistory" type="button" class="secondary">清空历史</button>
+        <div class="history-toolbar">
+          <p class="manifest-help">这里显示本机保存的全部任务历史（最多 100 条），包含当前运行任务。清空全部只删除历史记录，不会删除任何输出文件。</p>
+          <label class="history-filter">显示
+            <select id="historyFilter">
+              <option value="all">全部状态</option>
+              <option value="running">运行中</option>
+              <option value="completed">已完成</option>
+              <option value="failed">失败</option>
+              <option value="cancelled">已取消</option>
+              <option value="interrupted">已中断</option>
+            </select>
+          </label>
         </div>
         <div id="historyList" class="history-list"></div>
       </section>
-
-      <section class="log-panel">
-        <div class="log-header">
-          <h2>日志</h2>
-          <span id="runState">准备就绪</span>
-        </div>
-        <pre id="output">先检查依赖，然后预览或运行任务。</pre>
       </section>
+
+      <section id="panelValidation" class="tab-view" role="tabpanel" aria-labelledby="tabValidation" data-tab-panel="validation" hidden>
+        <section class="panel validation-intro">
+          <div class="panel-header">
+            <div><span class="step">1</span><h2>运行环境校验</h2></div>
+            <button id="checkEnv" type="button">检查依赖</button>
+          </div>
+          <p class="manifest-help">检查当前所选运行时、Python 包、ffmpeg、yt-dlp、OCR 与可选工具。检查结果会持续显示在右侧日志中。</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div><span class="step">2</span><h2>处理记录与文件状态</h2></div>
+            <button id="refreshManifests" type="button" class="secondary">重新检查</button>
+          </div>
+          <p class="manifest-help">这是程序用于避免重复处理的本地记录。可多选后批量标记状态、恢复“自动判断”或删除记录。删除只移除处理记录，不会删除源文件或已经生成的笔记。</p>
+          <div id="manifestSummary" class="summary-chips"></div>
+          <div id="manifestList" class="manifest-list"><p class="empty-state">点击“重新检查”，查看视频、文档、论文和 B站批次的处理记录。</p></div>
+        </section>
+      </section>
+      </div>
+
+      <aside class="output-inspector" aria-label="输出与日志">
+        <section id="resultPanel" class="panel inspector-panel result-panel">
+          <div class="panel-header compact-header">
+            <div><h2 id="resultTitle">本次输出</h2></div>
+            <button id="copyOutputDir" type="button" class="secondary">复制目录</button>
+          </div>
+          <div id="resultList" class="result-list"><p class="empty-state">任务完成后会在这里列出新增或更新的文件。</p></div>
+        </section>
+
+        <section class="log-panel inspector-panel">
+          <div class="log-header compact-header">
+            <h2>日志</h2><span id="runState">准备就绪</span>
+          </div>
+          <pre id="output">先检查依赖，然后预览或运行任务。</pre>
+        </section>
+      </aside>
     </main>
   </section>
 `;
@@ -472,8 +519,10 @@ const taskType = document.querySelector<HTMLSelectElement>("#taskType");
 const outputRoot = document.querySelector<HTMLInputElement>("#outputRoot");
 const outputDir = document.querySelector<HTMLInputElement>("#outputDir");
 const taskHint = document.querySelector<HTMLParagraphElement>("#taskHint");
+const appTabs = createAppTabs(document, localStorage, appTabKey);
 
 try {
+  appTabs.bind();
   hydrateTaskControls();
   hydrateTaskOutput();
   bindSettingsPersistence();
@@ -510,6 +559,10 @@ document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("clic
 document.querySelector<HTMLButtonElement>("#copyOutputDir")?.addEventListener("click", () => copyPath(inputValue("outputDir")));
 document.querySelector<HTMLButtonElement>("#refreshManifests")?.addEventListener("click", () => refreshManifestStatus());
 document.querySelector<HTMLButtonElement>("#clearHistory")?.addEventListener("click", clearHistory);
+document.querySelector<HTMLSelectElement>("#historyFilter")?.addEventListener("change", (event) => {
+  historyFilter = (event.currentTarget as HTMLSelectElement).value as TaskHistoryStatus | "all";
+  renderHistory();
+});
 document.querySelector<HTMLButtonElement>("#runtimeStatus")?.addEventListener("click", () => manageRuntime("status"));
 document.querySelector<HTMLButtonElement>("#runtimeInstall")?.addEventListener("click", () => manageRuntime("install"));
 document.querySelector<HTMLButtonElement>("#runtimeRemove")?.addEventListener("click", () => manageRuntime("remove"));
@@ -1128,6 +1181,7 @@ function setWorkerRunning(running: boolean): void {
     "runDry",
     "runTask",
     "refreshManifests",
+    "clearHistory",
     "runtimeInstall",
     "runtimeRemove",
   ]) {
@@ -1136,6 +1190,14 @@ function setWorkerRunning(running: boolean): void {
   }
   const cancelButton = document.querySelector<HTMLButtonElement>("#cancelTask");
   if (cancelButton) cancelButton.disabled = !running;
+  document
+    .querySelectorAll<HTMLButtonElement | HTMLSelectElement | HTMLInputElement>(
+      "button[data-manifest-action], select[data-manifest-status], select[data-manifest-batch-status], input[data-manifest-record-select], input[data-manifest-select-all], button[data-history-action='rerun'], button[data-history-action='delete']",
+    )
+    .forEach((control) => {
+      control.disabled = running;
+    });
+  document.querySelectorAll<HTMLElement>(".manifest-card").forEach(updateManifestSelectionState);
 }
 
 function renderProgress(progress: ProgressEvent): void {
@@ -1185,7 +1247,6 @@ function renderOutputs(paths: string[], title = "本次输出", focus = false): 
     panel?.classList.remove("result-highlight");
     window.requestAnimationFrame(() => {
       panel?.classList.add("result-highlight");
-      panel?.scrollIntoView({ behavior: "smooth", block: "start" });
       window.setTimeout(() => panel?.classList.remove("result-highlight"), 1400);
     });
   }
@@ -1207,15 +1268,24 @@ type ManifestStatus = {
     path: string;
     name: string;
     counts: Record<"processed" | "skipped" | "failed" | "rebuild", number>;
-    items: Array<{ source: string; output: string; status: string; error: string; reason?: string }>;
+    items: Array<{
+      source: string;
+      output: string;
+      status: string;
+      error: string;
+      reason?: string;
+      record_index: number;
+      record_kind: "manifest-json" | "processed-text" | "bilibili-failures";
+      manual_status?: string;
+    }>;
     error?: string;
   }>;
   totals: Record<"processed" | "skipped" | "failed" | "rebuild", number>;
 };
 
-async function refreshManifestStatus(): Promise<void> {
-  if (isWorkerRunning) return;
-  setWorkerRunning(true);
+async function refreshManifestStatus(manageBusy = true): Promise<void> {
+  if (manageBusy && isWorkerRunning) return;
+  if (manageBusy) setWorkerRunning(true);
   setState("读取 Manifest...");
   try {
     const result = await invokeWorkerQuiet({ ...payload(false), task: "manifest-status", source: inputValue("outputRoot") });
@@ -1227,7 +1297,7 @@ async function refreshManifestStatus(): Promise<void> {
     setState("Manifest 读取失败");
     appendOutput(`\nManifest 读取失败：${errorMessage(error)}\n`);
   } finally {
-    setWorkerRunning(false);
+    if (manageBusy) setWorkerRunning(false);
   }
 }
 
@@ -1245,6 +1315,7 @@ function renderManifestStatus(data: ManifestStatus): void {
   }
   const list = document.querySelector<HTMLElement>("#manifestList");
   if (!list) return;
+  captureManifestViewState(list);
   list.innerHTML = data.manifests.length
     ? [...data.manifests]
         .sort((left, right) => right.counts.failed + right.counts.rebuild - (left.counts.failed + left.counts.rebuild))
@@ -1252,9 +1323,12 @@ function renderManifestStatus(data: ManifestStatus): void {
           const label = manifestLabel(manifest.name);
           const total = Object.values(manifest.counts).reduce((sum, count) => sum + count, 0);
           const attention = manifest.counts.failed + manifest.counts.rebuild;
-          const notableItems = manifest.items.filter((item) => item.status !== "processed").slice(0, 100);
           const health = attention > 0 ? `${attention} 条需要处理` : "状态正常";
-          return `<details class="manifest-card ${attention > 0 ? "has-issues" : ""}">
+          const view = manifestViewState.get(manifest.path);
+          const filter = view?.filter || (attention > 0 ? "attention" : "all");
+          const kind = manifest.items[0]?.record_kind || "manifest-json";
+          const supportsStatus = kind !== "processed-text";
+          return `<details class="manifest-card ${attention > 0 ? "has-issues" : ""}" data-manifest-path="${escapeHtml(manifest.path)}" ${view?.open ? "open" : ""}>
             <summary>
               <span class="manifest-title"><strong>${escapeHtml(label.title)}</strong><small>${escapeHtml(label.description)}</small></span>
               <span class="manifest-health ${attention > 0 ? "warning" : "ok"}">${total} 条记录 · ${health}</span>
@@ -1262,17 +1336,191 @@ function renderManifestStatus(data: ManifestStatus): void {
             <div class="manifest-detail">
               <p class="manifest-counts">正常 ${manifest.counts.processed} · 本次跳过 ${manifest.counts.skipped} · 失败 ${manifest.counts.failed} · 输出缺失 ${manifest.counts.rebuild}</p>
               ${manifest.error ? `<p class="error-text">读取记录失败：${escapeHtml(manifest.error)}</p>` : ""}
-              ${notableItems.length
-                ? `<div class="manifest-items">${notableItems
-                    .map((item) => `<div><span class="status ${escapeHtml(item.status)}">${manifestStatusLabel(item.status)}</span><code>${escapeHtml(item.source || item.output || "未命名条目")}</code>${item.reason || item.error ? `<small>${escapeHtml(item.reason || item.error)}</small>` : ""}</div>`)
-                    .join("")}</div>`
-                : '<p class="empty-state">没有需要处理的条目。</p>'}
+              ${manifest.items.length
+                ? `<label class="manifest-filter">显示
+                    <select data-manifest-filter>
+                      <option value="attention" ${filter === "attention" ? "selected" : ""}>需要处理</option>
+                      <option value="all" ${filter === "all" ? "selected" : ""}>全部记录</option>
+                      <option value="processed" ${filter === "processed" ? "selected" : ""}>正常</option>
+                      <option value="skipped" ${filter === "skipped" ? "selected" : ""}>已跳过</option>
+                      <option value="failed" ${filter === "failed" ? "selected" : ""}>失败</option>
+                      <option value="rebuild" ${filter === "rebuild" ? "selected" : ""}>输出缺失</option>
+                    </select>
+                  </label>
+                  <div class="manifest-batch-toolbar">
+                    <label class="manifest-select-all"><input type="checkbox" data-manifest-select-all />选择当前显示</label>
+                    <span data-manifest-selected-count>已选择 0 条</span>
+                    ${supportsStatus
+                      ? `<select data-manifest-batch-status aria-label="批量状态">
+                          <option value="auto">恢复自动判断</option>
+                          <option value="processed">标记为正常</option>
+                          <option value="skipped">标记为已跳过</option>
+                          <option value="failed">标记为失败</option>
+                          <option value="rebuild">标记为输出缺失</option>
+                        </select>
+                        <button type="button" class="secondary" data-manifest-batch-action="set-status" data-path="${escapeHtml(manifest.path)}" data-kind="${escapeHtml(kind)}" disabled>批量应用</button>`
+                      : ""}
+                    <button type="button" class="secondary danger-outline" data-manifest-batch-action="delete" data-path="${escapeHtml(manifest.path)}" data-kind="${escapeHtml(kind)}" disabled>批量删除</button>
+                  </div>
+                  <div class="manifest-items">${manifest.items.map((item) => manifestItemHtml(manifest.path, item)).join("")}</div>`
+                : '<p class="empty-state">没有可编辑的记录。</p>'}
               <small class="manifest-path">记录文件：${escapeHtml(manifest.path)}</small>
             </div>
           </details>`;
         })
         .join("")
     : '<p class="empty-state">尚未找到 Manifest。运行一次支持增量状态的任务后再刷新。</p>';
+
+  list.querySelectorAll<HTMLDetailsElement>("details[data-manifest-path]").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      const path = details.dataset.manifestPath || "";
+      const filter = details.querySelector<HTMLSelectElement>("select[data-manifest-filter]")?.value || "all";
+      manifestViewState.remember(path, details.open, filter);
+    });
+  });
+  list.querySelectorAll<HTMLSelectElement>("select[data-manifest-filter]").forEach((select) => {
+    const card = select.closest<HTMLElement>(".manifest-card");
+    const applyFilter = () => {
+      const filter = select.value;
+      card?.querySelectorAll<HTMLElement>(".manifest-record").forEach((record) => {
+        const status = record.dataset.status || "";
+        record.classList.toggle("hidden", filter !== "all" && (filter === "attention" ? !["failed", "rebuild"].includes(status) : status !== filter));
+      });
+      if (card) {
+        const path = card.dataset.manifestPath || "";
+        manifestViewState.remember(path, (card as HTMLDetailsElement).open, filter);
+        updateManifestSelectionState(card);
+      }
+    };
+    select.addEventListener("change", applyFilter);
+    applyFilter();
+  });
+  list.querySelectorAll<HTMLButtonElement>("button[data-manifest-action]").forEach((button) => {
+    button.addEventListener("click", () => void handleManifestAction(button));
+  });
+  list.querySelectorAll<HTMLInputElement>("input[data-manifest-record-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const card = checkbox.closest<HTMLElement>(".manifest-card");
+      if (card) updateManifestSelectionState(card);
+    });
+  });
+  list.querySelectorAll<HTMLInputElement>("input[data-manifest-select-all]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const card = checkbox.closest<HTMLElement>(".manifest-card");
+      if (!card) return;
+      card.querySelectorAll<HTMLInputElement>(".manifest-record:not(.hidden) input[data-manifest-record-select]").forEach((item) => {
+        item.checked = checkbox.checked;
+      });
+      updateManifestSelectionState(card);
+    });
+  });
+  list.querySelectorAll<HTMLButtonElement>("button[data-manifest-batch-action]").forEach((button) => {
+    button.addEventListener("click", () => void handleManifestBatchAction(button));
+  });
+}
+
+function captureManifestViewState(list: HTMLElement): void {
+  list.querySelectorAll<HTMLDetailsElement>("details[data-manifest-path]").forEach((details) => {
+    const path = details.dataset.manifestPath || "";
+    const filter = details.querySelector<HTMLSelectElement>("select[data-manifest-filter]")?.value || "all";
+    manifestViewState.remember(path, details.open, filter);
+  });
+}
+
+function updateManifestSelectionState(card: HTMLElement): void {
+  const visible = [...card.querySelectorAll<HTMLInputElement>(".manifest-record:not(.hidden) input[data-manifest-record-select]")];
+  const selected = [...card.querySelectorAll<HTMLInputElement>("input[data-manifest-record-select]:checked")];
+  const selectAll = card.querySelector<HTMLInputElement>("input[data-manifest-select-all]");
+  if (selectAll) {
+    const visibleSelected = visible.filter((item) => item.checked).length;
+    selectAll.checked = visible.length > 0 && visibleSelected === visible.length;
+    selectAll.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+    selectAll.disabled = isWorkerRunning || visible.length === 0;
+  }
+  const count = card.querySelector<HTMLElement>("[data-manifest-selected-count]");
+  if (count) count.textContent = `已选择 ${selected.length} 条`;
+  card.querySelectorAll<HTMLButtonElement>("button[data-manifest-batch-action]").forEach((button) => {
+    button.disabled = isWorkerRunning || selected.length === 0;
+  });
+}
+
+function manifestItemHtml(path: string, item: ManifestStatus["manifests"][number]["items"][number]): string {
+  const label = item.source || item.output || "未命名条目";
+  const detail = item.reason || item.error;
+  const statusControls = item.record_kind === "processed-text"
+    ? '<small class="manifest-auto-note">该列表只记录“已处理”；如需重新处理，请删除记录。</small>'
+    : `<select data-manifest-status aria-label="手动状态">
+        <option value="auto" ${!item.manual_status ? "selected" : ""}>自动判断</option>
+        <option value="processed" ${item.manual_status === "processed" ? "selected" : ""}>正常</option>
+        <option value="skipped" ${item.manual_status === "skipped" ? "selected" : ""}>已跳过</option>
+        <option value="failed" ${item.manual_status === "failed" ? "selected" : ""}>失败</option>
+        <option value="rebuild" ${item.manual_status === "rebuild" ? "selected" : ""}>输出缺失</option>
+      </select>
+      <button type="button" class="secondary" data-manifest-action="set-status">保存状态</button>`;
+  return `<article class="manifest-record" data-status="${escapeHtml(item.status)}" data-path="${escapeHtml(path)}" data-kind="${escapeHtml(item.record_kind)}" data-index="${item.record_index}">
+    <div class="manifest-record-main">
+      <input type="checkbox" data-manifest-record-select aria-label="选择 ${escapeHtml(label)}" />
+      <span class="status ${escapeHtml(item.status)}">${manifestStatusLabel(item.status)}</span>
+      <code>${escapeHtml(label)}</code>
+      ${item.output && item.output !== label ? `<small class="manifest-output">输出：${escapeHtml(item.output)}</small>` : ""}
+      ${detail ? `<small class="manifest-reason">${escapeHtml(detail)}</small>` : ""}
+    </div>
+    <div class="row-actions manifest-actions">
+      ${statusControls}
+      <button type="button" class="secondary danger-outline" data-manifest-action="delete">删除记录</button>
+    </div>
+  </article>`;
+}
+
+async function handleManifestAction(button: HTMLButtonElement): Promise<void> {
+  if (isWorkerRunning) return;
+  const action = button.dataset.manifestAction;
+  const record = button.closest<HTMLElement>(".manifest-record");
+  if (!record) return;
+  const label = record?.querySelector("code")?.textContent || "这条记录";
+  if (action === "delete" && !window.confirm(`确定删除“${label}”的处理记录吗？\n\n只删除记录，不会删除源文件或输出文件。`)) return;
+  const status = record?.querySelector<HTMLSelectElement>("select[data-manifest-status]")?.value || "auto";
+  await mutateManifestRecords(record.dataset.path || "", record.dataset.kind || "", [Number(record.dataset.index)], action || "", status);
+}
+
+async function handleManifestBatchAction(button: HTMLButtonElement): Promise<void> {
+  if (isWorkerRunning) return;
+  const card = button.closest<HTMLElement>(".manifest-card");
+  if (!card) return;
+  const selected = [...card.querySelectorAll<HTMLInputElement>("input[data-manifest-record-select]:checked")];
+  const indexes = selected.map((checkbox) => Number(checkbox.closest<HTMLElement>(".manifest-record")?.dataset.index)).filter(Number.isInteger);
+  if (!indexes.length) return;
+  const action = button.dataset.manifestBatchAction || "";
+  if (action === "delete" && !window.confirm(`确定删除选中的 ${indexes.length} 条处理记录吗？\n\n只删除记录，不会删除源文件或输出文件。`)) return;
+  const status = card.querySelector<HTMLSelectElement>("select[data-manifest-batch-status]")?.value || "auto";
+  await mutateManifestRecords(button.dataset.path || "", button.dataset.kind || "", indexes, action, status);
+}
+
+async function mutateManifestRecords(path: string, kind: string, indexes: number[], action: string, status: string): Promise<void> {
+  const card = [...document.querySelectorAll<HTMLDetailsElement>("details[data-manifest-path]")].find((details) => details.dataset.manifestPath === path);
+  const filter = card?.querySelector<HTMLSelectElement>("select[data-manifest-filter]")?.value || "all";
+  manifestViewState.keepOpen(path, filter);
+  setWorkerRunning(true);
+  setState(action === "delete" ? `删除 ${indexes.length} 条处理记录...` : `更新 ${indexes.length} 条记录状态...`);
+  try {
+    await invokeWorkerQuiet({
+      ...payload(false),
+      task: "manifest-update",
+      source: inputValue("outputRoot"),
+      manifest_path: path,
+      manifest_kind: kind,
+      manifest_indexes: indexes,
+      manifest_action: action,
+      manifest_status: status,
+    });
+    await refreshManifestStatus(false);
+    setState(action === "delete" ? `已删除 ${indexes.length} 条处理记录` : status === "auto" ? `已恢复 ${indexes.length} 条记录的自动判断` : `已更新 ${indexes.length} 条记录状态`);
+  } catch (error) {
+    setState("处理记录修改失败");
+    appendOutput(`\n处理记录修改失败：${errorMessage(error)}\n`);
+  } finally {
+    setWorkerRunning(false);
+  }
 }
 
 function manifestLabel(name: string): { title: string; description: string } {
@@ -1306,8 +1554,11 @@ const historyStatusLabels: Record<TaskHistoryStatus, string> = {
 function renderHistory(): void {
   const target = document.querySelector<HTMLElement>("#historyList");
   if (!target) return;
-  target.innerHTML = taskHistory.length
-    ? taskHistory
+  const visibleHistory = filterTaskHistory(taskHistory, historyFilter);
+  const count = document.querySelector<HTMLElement>("#historyCount");
+  if (count) count.textContent = `${visibleHistory.length}/${taskHistory.length} 条`;
+  target.innerHTML = visibleHistory.length
+    ? visibleHistory
         .map((entry) => {
           const source = String(entry.request.source || "");
           return `<article class="history-item">
@@ -1316,11 +1567,12 @@ function renderHistory(): void {
               <button type="button" class="secondary" data-history-action="log" data-id="${entry.id}">查看日志</button>
               ${entry.outputs.length ? `<button type="button" class="secondary" data-history-action="outputs" data-id="${entry.id}">查看 ${entry.outputs.length} 个输出</button>` : ""}
               <button type="button" class="secondary" data-history-action="rerun" data-id="${entry.id}">${entry.status === "failed" ? "重试" : "重新运行"}</button>
+              <button type="button" class="secondary danger-outline" data-history-action="delete" data-id="${entry.id}">删除记录</button>
             </div>
           </article>`;
         })
         .join("")
-    : '<p class="empty-state">还没有任务历史。运行中的任务若遇到应用退出，会在下次启动时标记为“已中断”并可重新运行。</p>';
+    : `<p class="empty-state">${taskHistory.length ? "当前筛选条件下没有任务。" : "还没有任务历史。运行中的任务若遇到应用退出，会在下次启动时标记为“已中断”并可重新运行。"}</p>`;
   target.querySelectorAll<HTMLButtonElement>("button[data-history-action]").forEach((button) => {
     button.addEventListener("click", () => {
       const entry = taskHistory.find((item) => item.id === button.dataset.id);
@@ -1331,6 +1583,8 @@ function renderHistory(): void {
       } else if (button.dataset.historyAction === "outputs") {
         renderOutputs(entry.outputs, `历史输出 · ${taskLabels[entry.task as TaskType] || entry.task}`, true);
         setState(`已显示历史输出（${entry.outputs.length} 个文件）`);
+      } else if (button.dataset.historyAction === "delete") {
+        deleteHistoryEntry(entry);
       } else {
         applyHistoryRequest(entry.request);
         void runTask(false, entry.status === "failed" || Boolean(entry.request.retry_failed), entry.id);
@@ -1339,7 +1593,18 @@ function renderHistory(): void {
   });
 }
 
+function deleteHistoryEntry(entry: TaskHistoryEntry): void {
+  if (isWorkerRunning) return;
+  const taskName = taskLabels[entry.task as TaskType] || entry.task;
+  if (!window.confirm(`确定删除“${taskName}”这条任务历史吗？\n\n只删除历史记录，不会删除输出文件。`)) return;
+  taskHistory = removeHistoryEntry(taskHistory, entry.id);
+  saveTaskHistory(taskHistory);
+  renderHistory();
+  setState("任务历史已删除");
+}
+
 function applyHistoryRequest(request: Record<string, unknown>): void {
+  appTabs.activate("task");
   const mappings: Record<string, string> = {
     task: "taskType",
     source: "source",
@@ -1383,10 +1648,19 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
 }
 
 function clearHistory(): void {
-  if (isWorkerRunning) return;
+  if (isWorkerRunning) {
+    setState("任务运行中，不能清空历史");
+    return;
+  }
+  if (!taskHistory.length) {
+    setState("没有可清空的任务历史");
+    return;
+  }
+  if (!window.confirm(`确定清空本机保存的全部 ${taskHistory.length} 条任务历史吗？\n\n不会删除任何输出文件。`)) return;
   taskHistory = [];
   saveTaskHistory(taskHistory);
   renderHistory();
+  setState("全部任务历史已清空");
 }
 
 async function manageRuntime(action: "status" | "install" | "remove"): Promise<void> {

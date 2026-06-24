@@ -163,6 +163,101 @@ class IntegrityTests(unittest.TestCase):
         )
         data = json.loads(text.removeprefix("MANIFEST_STATUS_JSON:"))
         self.assertEqual(data["totals"], {"processed": 1, "skipped": 0, "failed": 1, "rebuild": 1})
+        self.assertEqual(data["manifests"][0]["items"][1]["record_index"], 1)
+        self.assertEqual(data["manifests"][0]["items"][1]["record_kind"], "manifest-json")
+
+    def test_manifest_record_status_can_be_overridden_restored_and_deleted(self):
+        manifest_path = self.root / "source-manifest.json"
+        manifest_path.write_text(
+            json.dumps({"items": [{"source": "bad", "error": "boom", "status": "failed"}, {"source": "old"}]}),
+            encoding="utf-8",
+        )
+        base = dict(task="manifest-update", source=str(self.root), manifest_path=str(manifest_path), manifest_kind="manifest-json", manifest_index=0)
+        worker.update_manifest_record(
+            worker.TaskRequest(**base, manifest_action="set-status", manifest_status="processed"),
+            {"INDEX_DIR": str(self.root)},
+        )
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["items"][0]["manual_status"], "processed")
+        self.assertEqual(worker._manifest_item_status(payload["items"][0]), "processed")
+
+        worker.update_manifest_record(
+            worker.TaskRequest(**base, manifest_action="set-status", manifest_status="auto"),
+            {"INDEX_DIR": str(self.root)},
+        )
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertNotIn("manual_status", payload["items"][0])
+        self.assertEqual(worker._manifest_item_status(payload["items"][0]), "failed")
+
+        worker.update_manifest_record(
+            worker.TaskRequest(**base, manifest_action="delete"),
+            {"INDEX_DIR": str(self.root)},
+        )
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["items"], [{"source": "old"}])
+
+    def test_manifest_records_support_atomic_batch_status_and_delete(self):
+        manifest_path = self.root / "video-manifest.json"
+        manifest_path.write_text(
+            json.dumps({"items": [{"source": "one"}, {"source": "two"}, {"source": "three"}]}),
+            encoding="utf-8",
+        )
+        base = dict(
+            task="manifest-update",
+            source=str(self.root),
+            manifest_path=str(manifest_path),
+            manifest_kind="manifest-json",
+            manifest_indexes=(0, 2),
+        )
+        result = worker.update_manifest_record(
+            worker.TaskRequest(**base, manifest_action="set-status", manifest_status="failed"),
+            {"INDEX_DIR": str(self.root)},
+        )
+        self.assertEqual(json.loads(result.removeprefix("MANIFEST_UPDATE_JSON:"))["count"], 2)
+        items = json.loads(manifest_path.read_text(encoding="utf-8"))["items"]
+        self.assertEqual([item.get("manual_status") for item in items], ["failed", None, "failed"])
+
+        worker.update_manifest_record(
+            worker.TaskRequest(**base, manifest_action="delete"),
+            {"INDEX_DIR": str(self.root)},
+        )
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["items"], [{"source": "two"}])
+
+    def test_request_mapping_accepts_manifest_batch_indexes(self):
+        request = worker.TaskRequest.from_mapping({"task": "manifest-update", "manifest_indexes": ["3", 1, "bad", -1, 3]})
+        self.assertEqual(request.manifest_indexes, (3, 1, 3))
+
+    def test_processed_state_record_can_be_deleted_but_not_relabelled(self):
+        state_path = self.root / "processed_videos.txt"
+        state_path.write_text("BV1\nBV2\n", encoding="utf-8")
+        base = dict(
+            task="manifest-update",
+            source=str(self.root),
+            manifest_path=str(state_path),
+            manifest_kind="processed-text",
+            manifest_index=0,
+        )
+        worker.update_manifest_record(worker.TaskRequest(**base, manifest_action="delete"), {"INDEX_DIR": str(self.root)})
+        self.assertEqual(state_path.read_text(encoding="utf-8"), "BV2\n")
+        with self.assertRaisesRegex(ValueError, "只支持删除"):
+            worker.update_manifest_record(
+                worker.TaskRequest(**base, manifest_action="set-status", manifest_status="failed"),
+                {"INDEX_DIR": str(self.root)},
+            )
+
+    def test_manifest_update_rejects_file_outside_allowed_roots(self):
+        outside = pathlib.Path(tempfile.mkdtemp()) / "source-manifest.json"
+        self.addCleanup(lambda: shutil.rmtree(outside.parent, ignore_errors=True))
+        outside.write_text(json.dumps({"items": [{}]}), encoding="utf-8")
+        req = worker.TaskRequest(
+            task="manifest-update",
+            source=str(self.root),
+            manifest_path=str(outside),
+            manifest_kind="manifest-json",
+            manifest_index=0,
+            manifest_action="delete",
+        )
+        with self.assertRaisesRegex(ValueError, "拒绝修改"):
+            worker.update_manifest_record(req, {"INDEX_DIR": str(self.root)})
 
     def test_manifest_prefers_organized_note_over_deleted_staging_draft(self):
         organized = self.root / "organized.md"

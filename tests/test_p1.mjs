@@ -21,6 +21,20 @@ const compiled = ts.transpileModule(source, {
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`;
 const history = await import(moduleUrl);
 
+const shellSourceUrl = new URL("../src/app-shell.ts", import.meta.url);
+const shellSource = fs.readFileSync(shellSourceUrl, "utf8");
+const compiledShell = ts.transpileModule(shellSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const shell = await import(`data:text/javascript;base64,${Buffer.from(compiledShell).toString("base64")}`);
+
+const manifestStateUrl = new URL("../src/manifest-state.ts", import.meta.url);
+const manifestStateSource = fs.readFileSync(manifestStateUrl, "utf8");
+const compiledManifestState = ts.transpileModule(manifestStateSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const manifestState = await import(`data:text/javascript;base64,${Buffer.from(compiledManifestState).toString("base64")}`);
+
 localStorage.setItem(
   "local-note-studio.task-history.v1",
   JSON.stringify([{ id: "legacy", task: "source-file", status: "running", startedAt: "2026-01-01T00:00:00Z" }]),
@@ -32,5 +46,21 @@ assert.deepEqual(entries[0].request, {});
 assert.deepEqual(entries[0].outputs, []);
 assert.equal(entries[0].log, "");
 assert.match(entries[0].error, /应用退出或进程中断/);
+
+const sampleEntries = [
+  { ...entries[0], id: "done", status: "completed" },
+  { ...entries[0], id: "failed", status: "failed" },
+];
+assert.deepEqual(history.filterTaskHistory(sampleEntries, "failed").map((item) => item.id), ["failed"]);
+assert.deepEqual(history.removeHistoryEntry(sampleEntries, "done").map((item) => item.id), ["failed"]);
+assert.equal(shell.resolveAppTab("validation"), "validation");
+assert.equal(shell.resolveAppTab("unknown"), "config");
+assert.equal(shell.adjacentAppTab("validation", 1), "config");
+assert.equal(shell.adjacentAppTab("config", -1), "validation");
+const manifestViews = new manifestState.ManifestViewStateStore();
+manifestViews.remember("/tmp/source-manifest.json", true, "failed");
+assert.deepEqual(manifestViews.get("/tmp/source-manifest.json"), { open: true, filter: "failed" });
+manifestViews.keepOpen("/tmp/source-manifest.json", "attention");
+assert.deepEqual(manifestViews.get("/tmp/source-manifest.json"), { open: true, filter: "attention" });
 
 console.log(`frontend history compatibility: ok (${pathToFileURL(sourceUrl.pathname).pathname})`);

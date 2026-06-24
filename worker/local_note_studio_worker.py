@@ -92,6 +92,12 @@ class TaskRequest:
     cooldown_delay: int = 0
     chunk_chars: int = 0
     ocr_resume: bool = True
+    manifest_path: str = ""
+    manifest_kind: str = ""
+    manifest_action: str = ""
+    manifest_status: str = ""
+    manifest_index: int = -1
+    manifest_indexes: tuple[int, ...] = ()
     dry_run: bool = False
 
     @classmethod
@@ -130,6 +136,12 @@ class TaskRequest:
             cooldown_delay=parse_int(data.get("cooldown_delay"), 0),
             chunk_chars=parse_int(data.get("chunk_chars"), 0),
             ocr_resume=parse_bool(data.get("ocr_resume", True)),
+            manifest_path=str(data.get("manifest_path") or ""),
+            manifest_kind=str(data.get("manifest_kind") or ""),
+            manifest_action=str(data.get("manifest_action") or ""),
+            manifest_status=str(data.get("manifest_status") or ""),
+            manifest_index=parse_int(data.get("manifest_index"), -1),
+            manifest_indexes=parse_int_tuple(data.get("manifest_indexes")),
             dry_run=bool(data.get("dry_run")),
         )
 
@@ -152,6 +164,12 @@ def parse_int(value: object, default: int = 0) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def parse_int_tuple(value: object) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(parsed for item in value if (parsed := parse_int(item, -1)) >= 0)
 
 
 def parse_bool(value: object) -> bool:
@@ -1120,6 +1138,11 @@ def _manifest_path_exists(raw: object) -> bool:
 
 
 def _manifest_item_detail(item: dict[str, Any]) -> tuple[str, str, str]:
+    manual_status = str(item.get("manual_status") or "").strip().lower()
+    if manual_status in {"processed", "skipped", "failed", "rebuild"}:
+        labels = {"processed": "正常", "skipped": "已跳过", "failed": "失败", "rebuild": "输出缺失"}
+        output = str(item.get("organized_output_path") or item.get("note_path") or item.get("output") or item.get("output_path") or "")
+        return manual_status, output, f"手动标记为“{labels[manual_status]}”"
     raw = str(item.get("status") or "").strip().lower()
     organized_status = str(item.get("organized_status") or "").strip().lower()
     error = str(item.get("organize_error") or item.get("error") or item.get("keyframe_error") or "").strip()
@@ -1147,7 +1170,7 @@ def _manifest_item_status(item: dict[str, Any]) -> str:
     return _manifest_item_detail(item)[0]
 
 
-def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
+def _manifest_roots(req: TaskRequest, env: dict[str, str]) -> list[pathlib.Path]:
     roots: list[pathlib.Path] = []
     index_value = env.get("INDEX_DIR", "indexes")
     index_path = pathlib.Path(index_value).expanduser()
@@ -1156,6 +1179,99 @@ def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
         roots.append(pathlib.Path(req.output_dir).expanduser())
     if req.source:
         roots.append(pathlib.Path(req.source).expanduser())
+    return roots
+
+
+def _path_is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _checked_manifest_path(req: TaskRequest, env: dict[str, str]) -> pathlib.Path:
+    if not req.manifest_path:
+        raise ValueError("缺少记录文件路径")
+    path = pathlib.Path(req.manifest_path).expanduser().resolve()
+    allowed = [root.resolve() for root in _manifest_roots(req, env) if root.exists()]
+    if not any(path == root or _path_is_within(path, root) for root in allowed):
+        raise ValueError("拒绝修改所选索引与输出目录之外的记录文件")
+    if not path.is_file():
+        raise ValueError("记录文件不存在")
+    return path
+
+
+def _atomic_write_text(path: pathlib.Path, text: str) -> None:
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        os.fchmod(descriptor, path.stat().st_mode & 0o777)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            pathlib.Path(temp_name).unlink()
+        except OSError:
+            pass
+        raise
+
+
+def update_manifest_record(req: TaskRequest, env: dict[str, str]) -> str:
+    path = _checked_manifest_path(req, env)
+    expected_names = {
+        "manifest-json": path.name.endswith("manifest.json"),
+        "processed-text": path.name == "processed_videos.txt",
+        "bilibili-failures": path.name == ".local-note-studio-batch-failures.json",
+    }
+    if not expected_names.get(req.manifest_kind, False):
+        raise ValueError("记录类型与文件不匹配")
+    if req.manifest_action not in {"set-status", "delete"}:
+        raise ValueError("不支持的记录操作")
+    indexes = tuple(dict.fromkeys(req.manifest_indexes or ((req.manifest_index,) if req.manifest_index >= 0 else ())))
+    if not indexes or any(index < 0 for index in indexes):
+        raise ValueError("记录序号无效")
+
+    if req.manifest_kind == "processed-text":
+        if req.manifest_action != "delete":
+            raise ValueError("B站已处理列表只支持删除记录")
+        records = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if any(index >= len(records) for index in indexes):
+            raise IndexError("记录已变化，请重新检查后再操作")
+        for index in sorted(indexes, reverse=True):
+            records.pop(index)
+        _atomic_write_text(path, "".join(f"{record}\n" for record in records))
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        key = "failures" if req.manifest_kind == "bilibili-failures" else "items"
+        records = payload.get(key) if isinstance(payload, dict) else None
+        if not isinstance(records, list):
+            raise ValueError("记录文件结构不受支持")
+        if any(index >= len(records) or not isinstance(records[index], dict) for index in indexes):
+            raise IndexError("记录已变化，请重新检查后再操作")
+        if req.manifest_action == "delete":
+            for index in sorted(indexes, reverse=True):
+                records.pop(index)
+        else:
+            status = req.manifest_status.strip().lower()
+            if status == "auto":
+                for index in indexes:
+                    records[index].pop("manual_status", None)
+            elif status in {"processed", "skipped", "failed", "rebuild"}:
+                for index in indexes:
+                    records[index]["manual_status"] = status
+            else:
+                raise ValueError("不支持的手动状态")
+        _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+    result = {"path": str(path), "action": req.manifest_action, "indexes": list(indexes), "count": len(indexes)}
+    return "MANIFEST_UPDATE_JSON:" + json.dumps(result, ensure_ascii=False) + "\n"
+
+
+def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
+    roots = _manifest_roots(req, env)
 
     paths: list[pathlib.Path] = []
     seen: set[pathlib.Path] = set()
@@ -1179,8 +1295,8 @@ def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
             payload = json.loads(path.read_text(encoding="utf-8"))
             items = payload.get("items", []) if isinstance(payload, dict) else []
             counts = {"processed": 0, "skipped": 0, "failed": 0, "rebuild": 0}
-            normalized_items: list[dict[str, str]] = []
-            for raw_item in items if isinstance(items, list) else []:
+            normalized_items: list[dict[str, Any]] = []
+            for record_index, raw_item in enumerate(items if isinstance(items, list) else []):
                 if not isinstance(raw_item, dict):
                     continue
                 status, output, reason = _manifest_item_detail(raw_item)
@@ -1193,6 +1309,9 @@ def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
                         "status": status,
                         "error": str(raw_item.get("organize_error") or raw_item.get("error") or raw_item.get("keyframe_error") or ""),
                         "reason": reason,
+                        "record_index": record_index,
+                        "record_kind": "manifest-json",
+                        "manual_status": str(raw_item.get("manual_status") or ""),
                     }
                 )
             manifests.append({"path": str(path), "name": path.name, "counts": counts, "items": normalized_items})
@@ -1226,7 +1345,10 @@ def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
                 "path": str(path),
                 "name": "B站增量状态",
                 "counts": {"processed": len(ids), "skipped": 0, "failed": 0, "rebuild": 0},
-                "items": [{"source": avid, "output": "", "status": "processed", "error": ""} for avid in ids],
+                "items": [
+                    {"source": avid, "output": "", "status": "processed", "error": "", "record_index": index, "record_kind": "processed-text", "manual_status": ""}
+                    for index, avid in enumerate(ids)
+                ],
             }
         )
     for path in sorted(set(failure_files)):
@@ -1235,21 +1357,30 @@ def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
             failures = [item for item in payload.get("failures", []) if isinstance(item, dict)]
         except (OSError, UnicodeError, json.JSONDecodeError):
             failures = []
-        totals["failed"] += len(failures)
+        counts = {"processed": 0, "skipped": 0, "failed": 0, "rebuild": 0}
+        normalized_failures: list[dict[str, Any]] = []
+        for record_index, item in enumerate(failures):
+            status, output, reason = _manifest_item_detail(item)
+            counts[status] += 1
+            totals[status] += 1
+            normalized_failures.append(
+                {
+                    "source": str(item.get("bvid") or item.get("url") or ""),
+                    "output": output or str(item.get("path") or ""),
+                    "status": status,
+                    "error": str(item.get("error") or item.get("stage") or ""),
+                    "reason": reason,
+                    "record_index": record_index,
+                    "record_kind": "bilibili-failures",
+                    "manual_status": str(item.get("manual_status") or ""),
+                }
+            )
         manifests.append(
             {
                 "path": str(path),
                 "name": "B站批量失败状态",
-                "counts": {"processed": 0, "skipped": 0, "failed": len(failures), "rebuild": 0},
-                "items": [
-                    {
-                        "source": str(item.get("bvid") or item.get("url") or ""),
-                        "output": str(item.get("path") or ""),
-                        "status": "failed",
-                        "error": str(item.get("error") or item.get("stage") or ""),
-                    }
-                    for item in failures
-                ],
+                "counts": counts,
+                "items": normalized_failures,
             }
         )
     result = {"manifests": manifests, "totals": totals}
@@ -1465,6 +1596,7 @@ def main(argv: list[str] | None = None) -> int:
         "bilibili-collections",
         "bilibili-access-check",
         "manifest-status",
+        "manifest-update",
         "refresh-bilibili-cookies",
     }:
         print("[隐身模式] 本次任务不会读取或写入 Manifest、关键帧 Manifest 或 B站增量状态。", flush=True)
@@ -1482,6 +1614,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if req.task == "manifest-status":
         sys.stdout.write(manifest_status(req, env))
+        return 0
+    if req.task == "manifest-update":
+        sys.stdout.write(update_manifest_record(req, env))
         return 0
     before = output_snapshot(req.output_dir)
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
