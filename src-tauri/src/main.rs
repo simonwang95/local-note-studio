@@ -320,6 +320,7 @@ fn configure_worker_command(
     let index_dir = state_dir.join("indexes");
     fs::create_dir_all(&index_dir).map_err(|err| err.to_string())?;
     command
+        .env("LOCAL_NOTE_STUDIO_APP_DATA_DIR", &root)
         .env("LOCAL_NOTE_STUDIO_STATE_DIR", &state_dir)
         .env("INDEX_DIR", &index_dir)
         .env("BILIBILI_STATE_DIR", index_dir.join("bilibili-state"))

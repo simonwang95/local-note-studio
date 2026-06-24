@@ -56,6 +56,30 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(worker.python_eval_cmd(req, "print('ok')")[0], req.conda_bin)
         self.assertEqual(worker.build_env(req)["CONDA_EXE"], req.conda_bin)
 
+    def test_cookie_refresh_rejects_broad_profile_and_uses_app_data_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_data = pathlib.Path(temp_dir) / "app-data"
+            chrome_root = pathlib.Path(temp_dir) / "Chrome"
+            profile = chrome_root / "Default"
+            (profile / "Network").mkdir(parents=True)
+            (profile / "Network" / "Cookies").touch()
+
+            self.assertEqual(worker.validate_chromium_profile_path(str(profile)), profile.resolve())
+            with self.assertRaisesRegex(ValueError, "不是具体的 Chrome Profile"):
+                worker.validate_chromium_profile_path(str(chrome_root))
+
+            with mock.patch.dict("os.environ", {"LOCAL_NOTE_STUDIO_APP_DATA_DIR": str(app_data)}):
+                req = worker.TaskRequest(task="refresh-bilibili-cookies", browser_profile=str(profile))
+                command = worker.command_for(req)
+                expected_output = app_data / "auth" / "bili_cookies.txt"
+                self.assertEqual(command[command.index("--output") + 1], str(expected_output))
+                self.assertEqual(worker.cookie_output_path("./bili_cookies.txt"), expected_output)
+
+                expected_output.parent.mkdir(parents=True)
+                expected_output.touch()
+                env = worker.build_env(req)
+                self.assertEqual(env["BILIBILI_COOKIES_FILE"], str(expected_output))
+
     def test_p1_request_mapping_and_task_overrides(self):
         req = worker.TaskRequest.from_mapping({
             "task": "web-url", "web_capture_mode": "browser", "browser_executable": "/Applications/Chrome",

@@ -39,6 +39,8 @@ If a user explicitly selects **Existing Conda / Python (Advanced)**, the selecte
 
 Managed-runtime requests never pass a saved Conda environment to the worker.
 
+Cookie refresh follows a least-privilege path: select the concrete Chrome `Default` or `Profile N` directory, leave the Cookie file field empty to store the filtered Bilibili cookies under the app's Application Support directory, then choose “Authorize and refresh Cookie”. macOS may request access to other app data and Chrome Safe Storage; Local Note Studio does not need Documents, Downloads, network-volume, or removable-volume access for Cookie refresh. Broad profile directories are rejected before any recursive search.
+
 ## Source development
 
 Requirements: macOS 12+, Node.js, Rust/Tauri prerequisites, and either the managed runtime or a compatible Python/Conda environment.

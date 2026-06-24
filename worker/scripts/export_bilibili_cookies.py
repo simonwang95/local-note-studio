@@ -17,7 +17,7 @@ WORKER_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(WORKER_DIR) not in sys.path:
     sys.path.insert(0, str(WORKER_DIR))
 
-from local_note_studio_worker import bilibili_cookie_login_detail  # noqa: E402
+from local_note_studio_worker import bilibili_cookie_login_detail, validate_chromium_profile_path  # noqa: E402
 
 
 BILIBILI_DOMAINS = ("bilibili.com", "bilibili.cn")
@@ -80,14 +80,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.profile:
+        print("错误: 必须指定具体的 Chrome Profile 目录。", file=sys.stderr)
+        return 1
+    try:
+        profile = validate_chromium_profile_path(args.profile)
+    except ValueError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 1
     output = pathlib.Path(args.output).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    profile_label = args.profile or "自动选择"
+    profile_label = profile.name
     print(f"正在从 {args.browser} 导出 Cookie（Profile: {profile_label}）...")
     source = extract_cookies_from_browser(
         args.browser,
-        profile=args.profile,
+        profile=str(profile),
         logger=ExportLogger(),
     )
     jar = filtered_jar(source)

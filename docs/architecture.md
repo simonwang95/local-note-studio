@@ -88,7 +88,7 @@ This request should not run user content processing. It checks the selected runt
 
 For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For local video tasks, the desktop UI only exposes local subtitle-first and ASR-first choices. The worker maps these to `BILIBILI_PREFER_WEB_SUBTITLE` and `FORCE_ASR` before calling the migrated scripts. `favorite_limit` defaults to `1` for safe favorite-list testing; `0` means full favorite or UP-opus processing. Video options are mapped to environment variables consumed by the migrated scripts, including key-frame extraction, dialogue detection, original-subtitle retention, overwrite behavior, and A-share terminology validation.
 
-Cookie refresh uses two internal tasks: `refresh-bilibili-cookies` calls the dedicated exporter with the selected Chrome Profile, and `bilibili-cookie-status` validates the resulting Netscape file without running content processing. Only Bilibili-domain cookies are persisted.
+Cookie refresh uses two internal tasks: `refresh-bilibili-cookies` validates that the selected directory directly contains `Cookies` or `Network/Cookies` before calling the dedicated exporter, and `bilibili-cookie-status` validates the resulting Netscape file without running content processing. Broad roots are rejected before yt-dlp's recursive lookup. An empty output setting resolves to the app-owned Application Support auth directory, and only Bilibili-domain cookies are persisted.
 
 ## Task Mapping
 

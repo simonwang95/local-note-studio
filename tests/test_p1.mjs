@@ -59,6 +59,7 @@ assert.deepEqual(history.migrateRuntimePreference({ runtimeBackend: "conda", con
   runtimePreferenceConfirmed: true,
 });
 assert.equal(history.migrateRuntimePreference({ runtimeBackend: "conda", runtimePreferenceConfirmed: true }).runtimeBackend, "conda");
+assert.equal(history.migrateRuntimePreference({ cookies: "./bili_cookies.txt", runtimePreferenceConfirmed: true }).cookies, "");
 assert.deepEqual(history.runtimeSelectionPayload("managed", "course-whisper", "/tmp/conda"), {
   runtime_backend: "managed",
   conda_env: "",

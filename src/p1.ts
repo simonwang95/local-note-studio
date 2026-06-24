@@ -35,6 +35,7 @@ export function migrateRuntimePreference(value: unknown): Record<string, unknown
     settings.runtimeBackend = "managed";
     settings.runtimePreferenceConfirmed = true;
   }
+  if (settings.cookies === "./bili_cookies.txt") settings.cookies = "";
   return settings;
 }
 

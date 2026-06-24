@@ -200,6 +200,11 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     if req.cookies:
         env["BILIBILI_COOKIES_FILE"] = req.cookies
         env["BILI_COOKIE_FILE"] = req.cookies
+    else:
+        default_cookie = default_bilibili_cookie_path()
+        if default_cookie.exists():
+            env["BILIBILI_COOKIES_FILE"] = str(default_cookie)
+            env["BILI_COOKIE_FILE"] = str(default_cookie)
     if req.output_dir:
         env["BILIBILI_OUTPUT_DIR"] = req.output_dir
     if req.collection_id:
@@ -267,6 +272,47 @@ def resolve_local_path(raw: str, base: pathlib.Path = ROOT) -> pathlib.Path:
     return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
 
 
+def default_bilibili_cookie_path() -> pathlib.Path:
+    configured_root = os.environ.get("LOCAL_NOTE_STUDIO_APP_DATA_DIR", "").strip()
+    if configured_root:
+        root = pathlib.Path(configured_root).expanduser()
+    else:
+        state_dir = os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR", "").strip()
+        root = pathlib.Path(state_dir).expanduser().parent if state_dir else pathlib.Path.home() / "Library/Application Support/Local Note Studio"
+    return root / "auth" / "bili_cookies.txt"
+
+
+def cookie_output_path(raw: str) -> pathlib.Path:
+    value = raw.strip()
+    if not value or value == "./bili_cookies.txt":
+        return default_bilibili_cookie_path()
+    path = pathlib.Path(os.path.expanduser(os.path.expandvars(value)))
+    if not path.is_absolute():
+        raise ValueError("Cookie 文件请使用绝对路径，或留空以保存到应用数据目录")
+    return path
+
+
+def validate_chromium_profile_path(raw: str) -> pathlib.Path:
+    value = raw.strip()
+    if not value:
+        raise ValueError("请先选择具体的 Chrome Profile，例如 Default 或 Profile 1")
+    profile = pathlib.Path(os.path.expanduser(os.path.expandvars(value))).resolve()
+    if not profile.is_dir():
+        raise ValueError(f"Chrome Profile 目录不存在: {profile}")
+    cookie_candidates = (profile / "Cookies", profile / "Network/Cookies")
+    cookie_db = next((candidate for candidate in cookie_candidates if candidate.is_file() and not candidate.is_symlink()), None)
+    if cookie_db is None:
+        raise ValueError(
+            "所选目录不是具体的 Chrome Profile。请选择末级 Default 或 Profile 1 目录；"
+            "为避免扫描文稿、下载和外接磁盘，应用不会递归搜索宽泛目录。"
+        )
+    try:
+        cookie_db.resolve().relative_to(profile)
+    except ValueError as exc:
+        raise ValueError("Chrome Cookie 数据库必须位于所选 Profile 内") from exc
+    return profile
+
+
 def mirror_bilibili_auth_cookies(jar: http.cookiejar.CookieJar) -> None:
     auth_names = {"SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid"}
     existing = {(cookie.name, cookie.domain) for cookie in jar}
@@ -329,11 +375,10 @@ def bilibili_cookie_login_detail(path: pathlib.Path) -> tuple[bool, str]:
 
 def check_bilibili_cookie(req: TaskRequest) -> str:
     raw = req.cookies.strip()
-    if not raw:
-        return "[WARN] Bilibili cookie file - 未配置\n"
-    path = resolve_local_path(raw)
+    path = resolve_local_path(raw) if raw else default_bilibili_cookie_path()
     if not path.exists():
-        return f"[WARN] Bilibili cookie file - 文件不存在: {path}\n"
+        detail = "默认文件尚未创建" if not raw else f"文件不存在: {path}"
+        return f"[WARN] Bilibili cookie file - {detail}\n"
     login_ok, login_detail = bilibili_cookie_login_detail(path)
     status = "OK" if login_ok else "WARN"
     return f"[{status}] Bilibili cookie file - {inspect_cookie_file(path)}；{login_detail}\n"
@@ -817,13 +862,14 @@ def command_for(req: TaskRequest) -> list[str]:
     if req.task == "refresh-bilibili-cookies":
         if not req.browser_profile.strip():
             raise ValueError("请先配置 Chrome 个人资料路径")
-        cookie_path = resolve_local_path(req.cookies or "bili_cookies.txt")
+        profile_path = validate_chromium_profile_path(req.browser_profile)
+        cookie_path = cookie_output_path(req.cookies)
         return [
             *python_cmd(req, SCRIPTS_DIR / "export_bilibili_cookies.py"),
             "--browser",
             "chrome",
             "--profile",
-            req.browser_profile,
+            str(profile_path),
             "--output",
             str(cookie_path),
         ]

@@ -82,7 +82,9 @@ The app supports a Netscape cookie file:
 BILIBILI_COOKIES_FILE="/path/to/bili_cookies.txt"
 ```
 
-The desktop UI can refresh this file from a selected Chrome Profile. Open `chrome://version`, copy or select the displayed profile path, choose the Cookie output path, and click “刷新 Cookie”. The exporter writes only Bilibili-domain cookies and immediately checks whether the account is logged in. Cookie and Chrome Profile paths are masked in the UI by default; dependency and refresh results are shown in the log.
+The desktop UI can refresh this file from a selected Chrome Profile. Open `chrome://version` and select the exact leaf profile directory (`Default` or `Profile N`), then click “授权并刷新 Cookie”. Leaving the Cookie output empty stores it under the app's Application Support directory. The exporter rejects broad directories before yt-dlp can recurse, writes only Bilibili-domain cookies, and immediately checks whether the account is logged in. Cookie and Chrome Profile paths are masked in the UI by default; dependency and refresh results are shown in the log.
+
+On macOS, Chrome refresh may require “other app data” access and a Chrome Safe Storage/Keychain confirmation. It does not require Documents, Downloads, removable-volume, or network-volume permission. Custom Cookie output paths can separately require access to the user-selected destination.
 
 The same operation is available from the command line:
 

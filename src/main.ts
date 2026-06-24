@@ -76,6 +76,7 @@ type WorkerLogPayload = {
 class TauriRuntimeUnavailableError extends Error {}
 
 const settingsKey = "local-note-studio.settings.v1";
+const cookiePermissionNoticeKey = "local-note-studio.cookie-permission-notice.v1";
 let isWorkerRunning = false;
 let workerLogListenerReady: Promise<void> | null = null;
 let taskHistory = loadTaskHistory();
@@ -287,7 +288,7 @@ app.innerHTML = `
           <label>
             B站 Cookie 文件
             <div class="input-row secret-row">
-              <input id="cookies" type="password" value="${escapeHtml(savedSettings.cookies)}" placeholder="/path/to/bili_cookies.txt" autocomplete="off" />
+              <input id="cookies" type="password" value="${escapeHtml(savedSettings.cookies)}" placeholder="留空则安全保存到应用数据目录" autocomplete="off" />
               <button id="toggleCookies" type="button" class="secondary icon-button" title="显示 Cookie 文件路径" aria-label="显示 Cookie 文件路径">
                 ${eyeIcon()}
               </button>
@@ -301,9 +302,9 @@ app.innerHTML = `
                 ${eyeIcon()}
               </button>
               <button id="chooseChromeProfile" type="button" class="secondary compact-button">选择</button>
-              <button id="refreshCookies" type="button" class="secondary compact-button">刷新 Cookie</button>
+              <button id="refreshCookies" type="button" class="secondary compact-button">授权并刷新 Cookie</button>
             </div>
-            <p class="field-note">填写当前登录 B站账号对应的 Chrome Profile，可在 chrome://version 查看“个人资料路径”。</p>
+            <p class="field-note">请选择末级 Default 或 Profile 1 目录。macOS 只需授权读取该 Chrome Profile（可能另有钥匙串确认）；不需要文稿、下载或外接磁盘权限。</p>
           </label>
         </div>
       </section>
@@ -709,8 +710,15 @@ async function refreshBilibiliCookies(): Promise<void> {
     setOutput("请填写或选择 Chrome 个人资料路径。可在 chrome://version 查看“个人资料路径”。");
     return;
   }
-  if (!inputValue("cookies")) {
-    setInputValue("cookies", "./bili_cookies.txt");
+  if (!localStorage.getItem(cookiePermissionNoticeKey)) {
+    const accepted = window.confirm(
+      "刷新 B站 Cookie 只会读取所选的具体 Chrome Profile，并默认写入 Local Note Studio 自己的应用数据目录。\n\nmacOS 随后可能询问“访问其他 App 的数据”，以及显示 Chrome 钥匙串确认；不需要授权文稿、下载或可移动宗卷。\n\n继续授权并刷新吗？",
+    );
+    if (!accepted) {
+      setState("已取消 Cookie 授权");
+      return;
+    }
+    localStorage.setItem(cookiePermissionNoticeKey, "acknowledged");
   }
   saveSettings();
   setWorkerRunning(true);
@@ -1138,7 +1146,7 @@ function loadSettings(): SavedSettings {
     const raw = localStorage.getItem(settingsKey);
     const stored = raw ? JSON.parse(raw) : {};
     const parsed = migrateRuntimePreference(stored);
-    if (raw && !("runtimePreferenceConfirmed" in stored)) localStorage.setItem(settingsKey, JSON.stringify(parsed));
+    if (raw && JSON.stringify(parsed) !== JSON.stringify(stored)) localStorage.setItem(settingsKey, JSON.stringify(parsed));
     return { ...defaults, ...parsed };
   } catch {
     return defaults;

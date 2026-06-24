@@ -4,10 +4,11 @@
 
 - Added safe in-app maintenance for Manifest and incremental records: all records can be filtered, JSON records can be manually classified or returned to automatic detection, and obsolete records can be deleted without deleting source/output files.
 - Clarified task-history scope as all local history (up to 100 entries, including the active task), with counts, status filtering, single-entry deletion, and confirmed clear-all behavior.
-- Built and verified the optimized 0.1.1 3.3 MiB arm64 release DMG, inspected its bundled worker resources, and documented its SHA-256 plus same-architecture clean-Mac handoff steps. Developer ID signing, notarization, Intel/universal packaging, and independent clean-Mac acceptance remain release gates.
+- Built and verified the optimized 0.1.2 3.3 MiB arm64 release DMG, inspected its bundled worker resources, and documented its SHA-256 plus same-architecture clean-Mac handoff steps. Developer ID signing, notarization, Intel/universal packaging, and independent clean-Mac acceptance remain release gates.
 - Completed T-112 with Configuration, Tasks, and Validation tabs, keyboard navigation, a persistent output/log inspector, and a responsive bottom dock at narrow app widths.
 - Added per-record checkboxes, select-visible controls, atomic batch status/delete operations, and persisted Manifest card expansion/filter state across refreshes.
 - Fixed packaged-app runtime selection: new/legacy-unconfirmed installs use the managed backend, explicit Conda choices persist, managed requests no longer leak the saved Conda environment, and Finder launches discover common Conda locations or accept an absolute executable path.
+- Reduced Cookie refresh to least privilege: exact Chrome leaf profiles are validated before extraction, broad directory traversal is blocked, the default filtered Cookie file lives in Application Support, legacy relative output is migrated, and the UI explains the only expected macOS prompts before access.
 
 ## 2026-06-23
 
