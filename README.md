@@ -54,7 +54,7 @@ npm install
 npm run tauri:dev
 ```
 
-`npm run dev` starts only the Vite preview at `http://127.0.0.1:1420`; it cannot invoke the worker. Machine-specific paths and credentials belong in ignored local settings or `worker/env.local`, never in committed files.
+`npm run dev` starts only the Vite preview at `http://127.0.0.1:1420`; it cannot invoke the worker. It is now launched through a small cleanup wrapper so the Vite child exits when its parent process disappears. If an older orphaned development server is already running, stop it with `npm run dev:stop` or Activity Monitor before starting a new desktop session. Machine-specific paths and credentials belong in ignored local settings or `worker/env.local`, never in committed files.
 
 Run all frontend, Python, and Rust regression checks with:
 

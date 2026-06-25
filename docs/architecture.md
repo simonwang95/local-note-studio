@@ -20,6 +20,8 @@ Tauri UI
 
 The desktop app should not embed business logic for transcription, conversion, or prompting. It sends a structured task request to the worker and streams or displays logs.
 
+Worker executions are started in their own process group on Unix-like systems. Cancelling a task or exiting the app terminates that group so helper tools launched by the Python worker, such as `ffmpeg` or `yt-dlp`, do not remain as orphaned background processes.
+
 ## Distribution Runtime Boundary
 
 The daily-use package should use a hybrid runtime instead of putting every dependency inside the signed `.app`:
@@ -113,7 +115,7 @@ Output discovery is restricted to processing tasks with a non-empty output direc
 ## Later Hardening
 
 - Store task history in SQLite.
-- Add retry and partial-recovery controls; cancellation and streaming logs are already implemented.
+- Add retry and partial-recovery controls; cancellation, process-group cleanup, and streaming logs are already implemented.
 - Add output-integrity checks and surface manifest/index state.
 - Optionally add Bilibili QR login while keeping Chrome Profile refresh available.
 - Complete the app-managed runtime lifecycle before release packaging, signing, and notarization.

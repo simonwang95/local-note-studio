@@ -98,10 +98,36 @@ fn stop_worker(state: &WorkerState) -> Result<bool, String> {
     let mut child_guard = state.child.lock().map_err(|err| err.to_string())?;
     match child_guard.as_mut() {
         Some(child) => {
-            child.kill().map_err(|err| err.to_string())?;
+            terminate_child(child)?;
             Ok(true)
         }
         None => Ok(false),
+    }
+}
+
+fn terminate_child(child: &mut Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", child.id());
+        let _ = Command::new("kill")
+            .args(["-TERM", &process_group])
+            .status();
+        for _ in 0..20 {
+            if child.try_wait().map_err(|err| err.to_string())?.is_some() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    child.kill().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn configure_child_lifecycle(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
 }
 
@@ -118,6 +144,7 @@ fn run_worker_blocking(
     let python = resolve_python(&app, &request)?;
     let mut command = Command::new(python);
     configure_worker_command(&app, &mut command, &request)?;
+    configure_child_lifecycle(&mut command);
     let output = command
         .arg(worker)
         .arg("--request-json")
@@ -158,6 +185,7 @@ fn run_worker_streaming(
     let python = resolve_python(&app, &request)?;
     let mut command = Command::new(python);
     configure_worker_command(&app, &mut command, &request)?;
+    configure_child_lifecycle(&mut command);
     let mut child = command
         .arg(worker)
         .arg("--request-json")
@@ -778,11 +806,13 @@ fn resolve_worker_path(resource_dir: PathBuf) -> Result<PathBuf, String> {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .manage(Arc::new(WorkerState {
-            child: Mutex::new(None),
-            cancel_requested: AtomicBool::new(false),
-        }))
+    let worker_state = Arc::new(WorkerState {
+        child: Mutex::new(None),
+        cancel_requested: AtomicBool::new(false),
+    });
+    let exit_state = worker_state.clone();
+    let app = tauri::Builder::default()
+        .manage(worker_state)
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             run_worker,
@@ -792,8 +822,13 @@ fn main() {
             reveal_path,
             manage_runtime
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Local Note Studio");
+        .build(tauri::generate_context!())
+        .expect("failed to build Local Note Studio");
+    app.run(move |_app_handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            let _ = stop_worker(&exit_state);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -802,11 +837,10 @@ mod tests {
 
     #[test]
     fn cancellation_kills_the_active_child_and_sets_the_flag() {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .spawn()
-            .expect("spawn cancellation fixture");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30");
+        configure_child_lifecycle(&mut command);
+        let child = command.spawn().expect("spawn cancellation fixture");
         let state = WorkerState {
             child: Mutex::new(Some(child)),
             cancel_requested: AtomicBool::new(false),

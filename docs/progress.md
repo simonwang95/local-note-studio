@@ -1,5 +1,9 @@
 # Progress
 
+## 2026-06-26
+
+- Fixed development-process leftovers and worker shutdown behavior: `npm run dev` now starts Vite through a cleanup wrapper, `npm run dev:stop` can stop old project-local Vite servers, and the Rust bridge runs worker tasks in a process group that is terminated on cancel or app exit. Documented that Activity Monitor's huge Node virtual-memory number is usually reserved address space; high CPU from an orphaned `node .../.bin/vite` is the actionable symptom. Built and verified the 0.1.5 arm64 DMG with SHA-256 `8590939e74b5f81ef6be1478eeade921b915d4519f8d75b4b4d11581efa0f3d2`.
+
 ## 2026-06-24
 
 - Added safe in-app maintenance for Manifest and incremental records: all records can be filtered, JSON records can be manually classified or returned to automatic detection, and obsolete records can be deleted without deleting source/output files.
