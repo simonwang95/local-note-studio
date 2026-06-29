@@ -83,6 +83,28 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 env = worker.build_env(req)
                 self.assertEqual(env["BILIBILI_COOKIES_FILE"], str(expected_output))
 
+    def test_managed_environment_check_points_to_install_repair_for_managed_components(self):
+        req = worker.TaskRequest(task="env-check", runtime_backend="managed", api_base="http://127.0.0.1:1234/v1", api_key="x", model="qwen")
+
+        def fake_probe(command, env, timeout=15):
+            joined = " ".join(command)
+            if "pandoc" in joined or "mlx_whisper" in joined:
+                return False, "missing"
+            if "ffmpeg" in joined or "ffprobe" in joined or "yt-dlp" in joined:
+                return True, "version"
+            if "sys.version_info" in joined or "pypdf" in joined or "lxml" in joined or "requests" in joined:
+                return True, "import ok"
+            return True, "ok"
+
+        with mock.patch.object(worker, "probe", side_effect=fake_probe):
+            result = worker.check_environment(req, {})
+
+        self.assertIn("[MISSING] Managed command `pandoc`", result)
+        self.assertIn("[MISSING] Managed Python package `mlx_whisper`", result)
+        self.assertIn("点击“安装/修复”补齐托管环境组件", result)
+        self.assertNotIn("brew install pandoc", result)
+        self.assertNotIn("python3 -m pip install", result)
+
     def test_empty_output_snapshot_never_scans_the_current_directory(self):
         with mock.patch.object(pathlib.Path, "rglob", side_effect=AssertionError("unexpected directory scan")):
             self.assertEqual(worker.output_snapshot(""), {})

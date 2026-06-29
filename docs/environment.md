@@ -123,7 +123,7 @@ Runtime policy:
 5. Install `pandoc` during “安装/修复” so EPUB export works without a separate Homebrew or Conda step.
 6. Provide the ASR engine (`mlx-whisper` on Apple Silicon) in the runtime, but download or select large model weights separately and show disk usage.
 7. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
-8. Support install progress, integrity checks, upgrade, rollback/repair, and removal.
+8. Support install progress, integrity checks, upgrade, rollback/repair, and removal. A missing managed component marks the runtime as “需要修复” and should direct users back to Install/Repair rather than Homebrew or pip.
 9. Preserve existing conda selection as an advanced backend.
 
 Planned ownership matrix:

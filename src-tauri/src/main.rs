@@ -864,17 +864,39 @@ fn runtime_status_text(root: &std::path::Path) -> String {
         ("requests", "requests"),
         ("whisper (mlx-whisper)", "mlx_whisper"),
     ];
+    let mut component_lines: Vec<String> = Vec::new();
+    let mut missing_components: Vec<String> = Vec::new();
+    for tool in tools {
+        let ready = bin.join(tool).exists();
+        if !ready {
+            missing_components.push(tool.to_string());
+        }
+        component_lines.push(format!(
+            "- {} {tool}",
+            if ready { "[OK]" } else { "[MISSING]" }
+        ));
+    }
+    for (label, module) in packages {
+        let ready = python_package_available(&python, module);
+        if !ready {
+            missing_components.push(label.to_string());
+        }
+        component_lines.push(format!(
+            "- {} {label}",
+            if ready { "[OK]" } else { "[MISSING]" }
+        ));
+    }
+    let status = if !python.exists() {
+        "未安装"
+    } else if missing_components.is_empty() {
+        "已安装"
+    } else {
+        "需要修复"
+    };
     let mut lines = vec![
         format!("托管环境目录：{}", root.join("runtime").display()),
         format!("版本：{MANAGED_RUNTIME_VERSION}"),
-        format!(
-            "状态：{}",
-            if python.exists() {
-                "已安装"
-            } else {
-                "未安装"
-            }
-        ),
+        format!("状态：{status}"),
         format!(
             "磁盘占用：{}",
             human_bytes(directory_size(&root.join("runtime")))
@@ -882,18 +904,12 @@ fn runtime_status_text(root: &std::path::Path) -> String {
         "".to_string(),
         "组件：".to_string(),
     ];
-    for tool in tools {
-        let ready = bin.join(tool).exists() || (tool != "python3" && command_available(tool));
+    lines.extend(component_lines);
+    if !missing_components.is_empty() {
+        lines.push("".to_string());
         lines.push(format!(
-            "- {} {tool}",
-            if ready { "[OK]" } else { "[MISSING]" }
-        ));
-    }
-    for (label, module) in packages {
-        let ready = python_package_available(&python, module);
-        lines.push(format!(
-            "- {} {label}",
-            if ready { "[OK]" } else { "[MISSING]" }
+            "缺少组件：{}。请点击“安装/修复”补齐托管环境。",
+            missing_components.join("、")
         ));
     }
     lines.push("".to_string());
@@ -925,14 +941,6 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     }
-}
-
-fn command_available(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", "command -v \"$1\" >/dev/null 2>&1", "sh", name])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 fn python_package_available(python: &Path, module: &str) -> bool {
@@ -1035,6 +1043,22 @@ mod tests {
             request_runtime_backend(r#"{"runtime_backend":"conda"}"#),
             "conda"
         );
+    }
+
+    #[test]
+    fn managed_runtime_status_reports_repair_when_components_are_missing() {
+        let root =
+            std::env::temp_dir().join(format!("local-note-runtime-status-{}", std::process::id()));
+        let bin = root.join("runtime/current/bin");
+        fs::create_dir_all(&bin).expect("create runtime bin");
+        fs::write(bin.join("python3"), "").expect("create python marker");
+
+        let status = runtime_status_text(&root);
+
+        assert!(status.contains("状态：需要修复"));
+        assert!(status.contains("[MISSING] pandoc"));
+        assert!(status.contains("请点击“安装/修复”补齐托管环境"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

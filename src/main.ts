@@ -109,7 +109,7 @@ const taskHints: Record<TaskType, string> = {
   "ai-chat": "输入 LM Studio 导出的 .conversation.json 文件，转换为 Markdown 对话笔记。",
   "paper-quickread": "输入论文 PDF 路径，生成速读笔记并保留全文翻译。",
   "local-video": "输入本地视频/音频文件路径，或一个媒体目录路径。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
-  "epub-export": "输入一个 Markdown 笔记目录，递归导出为单个 EPUB。需要本机安装 pandoc，图片资源会按 Markdown 相对路径打包。",
+  "epub-export": "输入一个 Markdown 笔记目录，递归导出为单个 EPUB。托管环境会安装 pandoc；高级 Conda/Python 后端需自行提供 pandoc。",
 };
 
 const outputSubdirs: Record<TaskType, string> = {
@@ -1731,7 +1731,13 @@ async function manageRuntime(action: "status" | "install" | "remove"): Promise<v
     } else {
       setOutput(result);
     }
-    setState(action === "remove" ? "托管环境已卸载" : "托管环境就绪");
+    if (action === "remove") {
+      setState("托管环境已卸载");
+    } else if (result.includes("[MISSING]") || result.includes("状态：需要修复")) {
+      setState("托管环境需要修复");
+    } else {
+      setState("托管环境就绪");
+    }
   } catch (error) {
     const message = errorMessage(error);
     if (currentOutput().trim()) {

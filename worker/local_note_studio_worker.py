@@ -49,6 +49,10 @@ OPTIONAL_INFO_COMMANDS = {
     "pandoc": "Install pandoc if you want recursive Markdown-to-EPUB export.",
 }
 
+MANAGED_REQUIRED_COMMANDS = {
+    "pandoc": "Click Install/Repair in the app-managed runtime section to install pandoc.",
+}
+
 OCR_FALLBACK_COMMANDS = {
     "tesseract": "Install tesseract if you want OCR for images and scanned PDFs.",
     "pdftoppm": "Install poppler if you want OCR fallback for scanned PDFs.",
@@ -644,11 +648,15 @@ def info_line(ok: bool, label: str, detail: str = "", hint: str = "") -> str:
 
 
 def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
+    managed_runtime = req.runtime_backend == "managed" and not req.conda_env
     lines: list[str] = []
     lines.append("Local Note Studio environment check")
     lines.append("")
     lines.append("Selected runtime")
-    if req.conda_env:
+    if managed_runtime:
+        lines.append("- app-managed environment")
+        lines.append(f"- Python command: {selected_python(req)}")
+    elif req.conda_env:
         lines.append(f"- conda environment: {req.conda_env}")
         lines.append(f"- conda executable: {conda_cmd(req)}")
     else:
@@ -688,6 +696,12 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         required_ok = required_ok and ok
         lines.append(status_line(ok, f"Command `{command}`", first_line(output), hint))
 
+    if managed_runtime:
+        for command, hint in MANAGED_REQUIRED_COMMANDS.items():
+            ok, output = probe(tool_cmd(req, command, "--version"), env)
+            required_ok = required_ok and ok
+            lines.append(status_line(ok, f"Managed command `{command}`", first_line(output), hint))
+
     for package, hint in OPTIONAL_PYTHON_PACKAGES.items():
         ok, output = probe(
             python_eval_cmd(
@@ -699,11 +713,24 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
             ),
             env,
         )
-        if not ok:
-            warning_count += 1
-        lines.append(status_line(ok, f"Optional Python package `{package}`", first_line(output), hint, required=False))
+        if managed_runtime and package == "mlx_whisper":
+            required_ok = required_ok and ok
+            lines.append(
+                status_line(
+                    ok,
+                    f"Managed Python package `{package}`",
+                    first_line(output),
+                    "Click Install/Repair in the app-managed runtime section to install mlx-whisper.",
+                )
+            )
+        else:
+            if not ok:
+                warning_count += 1
+            lines.append(status_line(ok, f"Optional Python package `{package}`", first_line(output), hint, required=False))
 
     for command, hint in OPTIONAL_INFO_COMMANDS.items():
+        if managed_runtime and command in MANAGED_REQUIRED_COMMANDS:
+            continue
         ok, output = probe(tool_cmd(req, command, "--version"), env)
         lines.append(info_line(ok, f"Optional command `{command}`", first_line(output), hint))
 
@@ -863,7 +890,10 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         lines.append("Result: required dependencies are missing. Fix the [MISSING] items before running tasks.")
     lines.append("")
     lines.append("Common setup hints")
-    if req.conda_env:
+    if managed_runtime:
+        lines.append("- 点击“安装/修复”补齐托管环境组件；从旧版本升级后缺少 pandoc 时也用这个按钮修复。")
+        lines.append("- 如果安装/修复仍失败，检查网络、代理或下载源后重试。")
+    elif req.conda_env:
         conda = shlex.quote(conda_cmd(req))
         lines.append(f"- {conda} install -n {req.conda_env} -c conda-forge ffmpeg")
         lines.append(f"- {conda} install -n {req.conda_env} -c conda-forge pandoc")
