@@ -22,6 +22,13 @@ LOCAL_NOTE_STUDIO_PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
   open -a "Local Note Studio"
 ```
 
+如果失败发生在更早的 “Python 运行时下载” 阶段，并看到 `curl: (16) Error in the HTTP2 framing layer`，通常是 GitHub Release 下载链路的 HTTP/2 被网络设备或代理截断。0.1.7 起，应用会优先用 HTTP/1.1 下载运行时和工具，并关闭无意义的百分比刷屏；如果测试网络必须使用镜像，可以指定同一个 Python 运行时压缩包的镜像 URL：
+
+```bash
+LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL="https://你的镜像/cpython-3.11.15+20260610-aarch64-apple-darwin-install_only_stripped.tar.gz" \
+  open -a "Local Note Studio"
+```
+
 全新安装默认使用托管环境。若用户主动切换到“现有 Conda / Python（高级）”，所选后端、环境名和 Conda 可执行文件路径会保存在这台 Mac，后续启动继续使用，不会自动切回托管环境。
 
 从 Finder 启动的 App 不会继承终端 shell 的完整 `PATH`。应用会自动查找 `~/miniforge3`、`~/miniconda3`、`~/anaconda3`、Homebrew 等常见位置；如果 Conda 安装在自定义目录，请在配置页填写完整路径，例如：

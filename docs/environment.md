@@ -117,7 +117,7 @@ Target layout:
 Runtime policy:
 
 1. Keep the signed `.app` small; it contains the UI, Rust bridge, worker sources, and runtime manager.
-2. Install a relocatable Python runtime and locked dependencies under Application Support without touching system Python.
+2. Install a relocatable Python runtime and locked dependencies under Application Support without touching system Python. Runtime and tool downloads use quiet curl output, prefer HTTP/1.1 first, and then retry the default protocol to avoid test-network HTTP/2 framing failures. Advanced testers can override the Python runtime archive URL with `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`; the SHA-256 check still applies.
 3. Install locked Python dependencies with `pip --prefer-binary` and conservative retry/timeout settings. If the default PyPI route fails because of TLS, proxy, DNS, or timeout problems, the installer retries the same locked requirements through fallback PyPI mirrors. Advanced testers can override the first package index by launching with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`.
 4. Manage `ffmpeg` / `ffprobe`; allow `yt-dlp` to update independently because B站 extraction changes frequently.
 5. Install `pandoc` only when EPUB export is first requested.

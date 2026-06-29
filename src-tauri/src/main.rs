@@ -582,6 +582,69 @@ fn pip_failure_looks_network_related(text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CurlDownloadAttempt {
+    label: &'static str,
+    args: &'static [&'static str],
+}
+
+fn curl_download_attempts() -> Vec<CurlDownloadAttempt> {
+    vec![
+        CurlDownloadAttempt {
+            label: "HTTP/1.1",
+            args: &["--http1.1"],
+        },
+        CurlDownloadAttempt {
+            label: "默认协议",
+            args: &[],
+        },
+    ]
+}
+
+fn download_with_curl(label: &str, url: &str, target: &Path) -> Result<(), String> {
+    let mut attempt_logs = Vec::new();
+    for attempt in curl_download_attempts() {
+        let _ = fs::remove_file(target);
+        let mut command = Command::new("curl");
+        command
+            .args(attempt.args)
+            .args([
+                "-L",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--retry",
+                "5",
+                "--retry-delay",
+                "2",
+                "--connect-timeout",
+                "30",
+                "--max-time",
+                "900",
+                "-o",
+            ])
+            .arg(target)
+            .arg(url);
+        let output = command
+            .output()
+            .map_err(|err| format!("无法启动系统 curl：{err}"))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() {
+            return Ok(());
+        }
+        attempt_logs.push(format!("--- curl {} ---\n{}", attempt.label, text.trim()));
+    }
+    let _ = fs::remove_file(target);
+    Err(format!(
+        "{label}下载失败：\n{}\n\n排查建议：当前失败通常是网络、代理、GitHub/CDN 可达性或 HTTP/2 链路问题。应用已优先使用 HTTP/1.1 并自动重试；如果仍失败，请换网络/代理后重试。Python 运行时也可用 LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL 指定同文件镜像。",
+        attempt_logs.join("\n\n")
+    ))
+}
+
 fn install_standalone_python(
     runtime_root: &std::path::Path,
     version_dir: &std::path::Path,
@@ -601,9 +664,14 @@ fn install_standalone_python(
         "cpython-3.11.15+{PYTHON_STANDALONE_TAG}-{arch}-apple-darwin-install_only_stripped.tar.gz"
     );
     let encoded_name = file_name.replace('+', "%2B");
-    let url = format!(
+    let default_url = format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/{PYTHON_STANDALONE_TAG}/{encoded_name}"
     );
+    let url = std::env::var("LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_url);
     let downloads = runtime_root.join("downloads");
     let archive = downloads.join(&file_name);
     let staging = runtime_root.join(format!(".installing-{MANAGED_RUNTIME_VERSION}"));
@@ -613,18 +681,7 @@ fn install_standalone_python(
     }
     fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
 
-    let download = Command::new("curl")
-        .args(["-L", "--fail", "--show-error", "--retry", "3", "-o"])
-        .arg(&archive)
-        .arg(&url)
-        .output()
-        .map_err(|err| format!("无法启动系统 curl：{err}"))?;
-    if !download.status.success() {
-        return Err(format!(
-            "Python 运行时下载失败：{}",
-            String::from_utf8_lossy(&download.stderr)
-        ));
-    }
+    download_with_curl("Python 运行时", &url, &archive)?;
     let digest = Command::new("shasum")
         .args(["-a", "256"])
         .arg(&archive)
@@ -726,18 +783,7 @@ fn install_zip_tool(
         fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
     }
     fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
-    let download = Command::new("curl")
-        .args(["-L", "--fail", "--show-error", "--retry", "3", "-o"])
-        .arg(&archive)
-        .arg(url)
-        .output()
-        .map_err(|err| format!("无法启动系统 curl：{err}"))?;
-    if !download.status.success() {
-        return Err(format!(
-            "{name} 下载失败：{}",
-            String::from_utf8_lossy(&download.stderr)
-        ));
-    }
+    download_with_curl(name, url, &archive)?;
     let digest = Command::new("shasum")
         .args(["-a", "256"])
         .arg(&archive)
@@ -997,5 +1043,14 @@ mod tests {
         assert!(!pip_failure_looks_network_related(
             "ERROR: Could not find a version that satisfies the requirement definitely-not-real==0"
         ));
+    }
+
+    #[test]
+    fn curl_download_prefers_http1_before_default_protocol() {
+        let attempts = curl_download_attempts();
+        assert!(attempts.len() >= 2);
+        assert_eq!(attempts[0].label, "HTTP/1.1");
+        assert!(attempts[0].args.contains(&"--http1.1"));
+        assert_eq!(attempts[1].label, "默认协议");
     }
 }

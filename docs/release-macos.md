@@ -9,7 +9,7 @@ For a Mac with the same CPU architecture, the DMG is the only Local Note Studio 
 The package is not completely self-contained:
 
 - The filename architecture must match the tester Mac: `aarch64` is for Apple Silicon; `x86_64` is for Intel. The current development machine only builds `aarch64`.
-- On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `ffmpeg`, and `ffprobe` into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts. Locked Python dependencies are first installed from the default pip/PyPI configuration; TLS/proxy/timeout failures automatically retry through fallback PyPI mirrors. If a test network requires a specific mirror, launch the app with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`.
+- On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `ffmpeg`, and `ffprobe` into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts. Runtime/tool downloads prefer HTTP/1.1 before retrying the default protocol to avoid fragile HTTP/2 paths. Locked Python dependencies are first installed from the default pip/PyPI configuration; TLS/proxy/timeout failures automatically retry through fallback PyPI mirrors. If a test network requires a specific mirror, launch the app with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`; if the Python runtime archive itself is mirrored, use `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`.
 - Fresh installs and legacy settings without an explicit runtime preference default to the managed runtime. If the user explicitly selects the advanced Conda backend, that choice, environment name, and optional executable path persist across launches.
 - Finder-launched apps do not inherit the interactive shell's `PATH`. The app augments GUI process paths and searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. Non-standard Conda installations should be configured with an absolute `.../bin/conda` path in the UI.
 - An OpenAI-compatible LLM/OCR service is not bundled. The tester must configure an API URL, key, and model reachable from that Mac. Bilibili private/collection tests additionally need that tester's own Cookie or Chrome Profile; never distribute the developer's credentials.
@@ -30,11 +30,11 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 
 ## Current internal test build (2026-06-29)
 
-- Version: `0.1.6`
+- Version: `0.1.7`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.6_aarch64.dmg`
-- Size: `3,440,061` bytes (about 3.3 MiB)
-- SHA-256: `8881763f64b2bd84076a37060bf435d64a71f9f42657ee45a12f07f6e4feedec`
+- Artifact: `Local Note Studio_0.1.7_aarch64.dmg`
+- Size: `3,441,019` bytes (about 3.3 MiB)
+- SHA-256: `2ce4e11b9f91bb402e16abbdeea6551018219b0b40bd016820e725246d8a2a69`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.

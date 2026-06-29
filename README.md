@@ -21,7 +21,7 @@ For another Mac with the same CPU architecture, the DMG is the only Local Note S
 2. Open Configuration, keep **App-managed runtime**, enter the tester's LLM API/model and output root, then click **Install/Repair**.
 3. Open Validation and run **Check dependencies** before the first task.
 
-The DMG contains the app and worker, but not an LLM service, personal cookies, indexes, output data, or large ASR models. First-time managed-runtime setup requires network access. If the default PyPI route fails with TLS, proxy, or timeout errors, the installer automatically retries locked Python dependencies through fallback PyPI mirrors; advanced testers can also launch with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL` set to a reachable mirror.
+The DMG contains the app and worker, but not an LLM service, personal cookies, indexes, output data, or large ASR models. First-time managed-runtime setup requires network access. Runtime/tool downloads prefer HTTP/1.1 to avoid fragile HTTP/2 paths on some test networks. If the default PyPI route fails with TLS, proxy, or timeout errors, the installer automatically retries locked Python dependencies through fallback PyPI mirrors; advanced testers can also launch with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL` or `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL` set to reachable mirrors.
 
 Internal test packages are currently ad-hoc signed rather than Developer ID signed/notarized. Verify the published SHA-256 first, then use Control-click → Open. See [macOS release and tester handoff](docs/release-macos.md) and the [Chinese user guide](docs/user-guide-zh.md) for exact steps.
 
