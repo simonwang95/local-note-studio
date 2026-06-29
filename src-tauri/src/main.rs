@@ -481,7 +481,12 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     emit_log(app, "正在安装/修复 ffmpeg 与 ffprobe...\n");
     install_managed_media_tools(&runtime_root, &version_dir.join("bin"))?;
     emit_log(app, "正在安装/修复 pandoc（EPUB 导出组件）...\n");
-    install_managed_pandoc(&runtime_root, &version_dir.join("bin"))?;
+    if let Err(err) = install_managed_pandoc(&runtime_root, &version_dir.join("bin")) {
+        emit_log(
+            app,
+            &format!("pandoc 安装失败，已继续初始化；EPUB 导出暂不可用，可稍后重试“安装/修复”。\n{err}\n"),
+        );
+    }
     fs::create_dir_all(root.join("models")).map_err(|err| err.to_string())?;
     emit_log(app, "正在下载/修复默认 Whisper ASR 模型...\n");
     install_managed_asr_model(&version_dir.join("bin/python3"), &root)?;
@@ -618,7 +623,12 @@ fn curl_download_attempts() -> Vec<CurlDownloadAttempt> {
     ]
 }
 
-fn download_with_curl(label: &str, url: &str, target: &Path) -> Result<(), String> {
+fn download_with_curl(
+    label: &str,
+    url: &str,
+    target: &Path,
+    override_env: Option<&str>,
+) -> Result<(), String> {
     let mut attempt_logs = Vec::new();
     for attempt in curl_download_attempts() {
         let _ = fs::remove_file(target);
@@ -630,6 +640,7 @@ fn download_with_curl(label: &str, url: &str, target: &Path) -> Result<(), Strin
                 "--fail",
                 "--silent",
                 "--show-error",
+                "--retry-all-errors",
                 "--retry",
                 "5",
                 "--retry-delay",
@@ -656,9 +667,12 @@ fn download_with_curl(label: &str, url: &str, target: &Path) -> Result<(), Strin
         attempt_logs.push(format!("--- curl {} ---\n{}", attempt.label, text.trim()));
     }
     let _ = fs::remove_file(target);
+    let override_hint = override_env
+        .map(|key| format!("也可以用 {key} 指定同文件镜像。"))
+        .unwrap_or_default();
     Err(format!(
-        "{label}下载失败：\n{}\n\n排查建议：当前失败通常是网络、代理、GitHub/CDN 可达性或 HTTP/2 链路问题。应用已优先使用 HTTP/1.1 并自动重试；如果仍失败，请换网络/代理后重试。Python 运行时也可用 LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL 指定同文件镜像。",
-        attempt_logs.join("\n\n")
+        "{label}下载失败：\n{}\n\n排查建议：当前失败通常是网络、代理、GitHub/CDN 可达性或 HTTP/2 链路问题。应用已优先使用 HTTP/1.1 并自动重试；如果仍失败，请换网络/代理后重试。{override_hint}",
+        attempt_logs.join("\n\n"),
     ))
 }
 
@@ -698,7 +712,12 @@ fn install_standalone_python(
     }
     fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
 
-    download_with_curl("Python 运行时", &url, &archive)?;
+    download_with_curl(
+        "Python 运行时",
+        &url,
+        &archive,
+        Some("LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL"),
+    )?;
     let digest = Command::new("shasum")
         .args(["-a", "256"])
         .arg(&archive)
@@ -881,7 +900,13 @@ fn install_zip_tool(
         fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
     }
     fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
-    download_with_curl(name, url, &archive)?;
+    let override_key = tool_url_override_key(name);
+    let source_url = std::env::var(&override_key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| url.to_string());
+    download_with_curl(name, &source_url, &archive, Some(&override_key))?;
     let digest = Command::new("shasum")
         .args(["-a", "256"])
         .arg(&archive)
@@ -921,6 +946,13 @@ fn install_zip_tool(
     }
     let _ = fs::remove_dir_all(&staging);
     Ok(())
+}
+
+fn tool_url_override_key(name: &str) -> String {
+    format!(
+        "LOCAL_NOTE_STUDIO_{}_URL",
+        name.to_ascii_uppercase().replace('-', "_")
+    )
 }
 
 fn find_named_file(root: &std::path::Path, name: &str) -> Option<PathBuf> {
@@ -1212,5 +1244,21 @@ mod tests {
         assert_eq!(attempts[0].label, "HTTP/1.1");
         assert!(attempts[0].args.contains(&"--http1.1"));
         assert_eq!(attempts[1].label, "默认协议");
+    }
+
+    #[test]
+    fn managed_tool_downloads_have_specific_url_overrides() {
+        assert_eq!(
+            tool_url_override_key("pandoc"),
+            "LOCAL_NOTE_STUDIO_PANDOC_URL"
+        );
+        assert_eq!(
+            tool_url_override_key("ffmpeg"),
+            "LOCAL_NOTE_STUDIO_FFMPEG_URL"
+        );
+        assert_eq!(
+            tool_url_override_key("ffprobe"),
+            "LOCAL_NOTE_STUDIO_FFPROBE_URL"
+        );
     }
 }

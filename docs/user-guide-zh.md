@@ -31,6 +31,15 @@ LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL="https://你的镜像/cpython-3.11.15+20260
   open -a "Local Note Studio"
 ```
 
+如果失败发生在 `pandoc 下载失败`，它只影响“目录导出 EPUB”。0.1.12 起，应用会继续完成托管环境初始化；B站、文档、OCR、Cookie、ASR、普通视频任务仍可使用，状态页会保留 `[MISSING] pandoc` / “需要修复”提醒。网络恢复后再点一次“安装/修复”即可补齐。特殊网络也可以单独指定工具压缩包镜像：
+
+```bash
+LOCAL_NOTE_STUDIO_PANDOC_URL="https://你的镜像/pandoc.zip" \
+  open -a "Local Note Studio"
+```
+
+`ffmpeg` / `ffprobe` 工具包也支持相同模式，变量名分别是 `LOCAL_NOTE_STUDIO_FFMPEG_URL` 和 `LOCAL_NOTE_STUDIO_FFPROBE_URL`。这些工具镜像仍会执行 SHA-256 校验，因此镜像内容必须与应用期望的原始压缩包完全一致。
+
 全新安装默认使用托管环境。若用户主动切换到“现有 Conda / Python（高级）”，所选后端、环境名和 Conda 可执行文件路径会保存在这台 Mac，后续启动继续使用，不会自动切回托管环境。
 
 从 Finder 启动的 App 不会继承终端 shell 的完整 `PATH`。应用会自动查找 `~/miniforge3`、`~/miniconda3`、`~/anaconda3`、Homebrew 等常见位置；如果 Conda 安装在自定义目录，请在配置页填写完整路径，例如：
@@ -591,7 +600,7 @@ https://space.bilibili.com/1420210197/upload/opus
 
 这个任务会递归收集输入目录下的 `.md` 文件，按路径排序后调用 `pandoc` 合并导出为一个 EPUB。它会跳过 `.git`、`.obsidian`、`indexes`、`cache` 等内部目录，并尝试通过 Markdown 相对路径打包图片资源。
 
-托管环境会在“安装/修复”阶段安装 `pandoc`；使用托管环境时无需再通过 Homebrew 或 Conda 单独安装。高级 Conda/Python 后端仍需自行安装：
+托管环境会在“安装/修复”阶段安装 `pandoc`；使用托管环境时无需再通过 Homebrew 或 Conda 单独安装。如果安装期因为 GitHub/CDN 网络问题暂时缺少 pandoc，其他任务仍可继续使用，但 EPUB 导出会提示先回到“配置”执行“安装/修复”。高级 Conda/Python 后端仍需自行安装：
 
 ```bash
 brew install pandoc
