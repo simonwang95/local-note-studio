@@ -157,7 +157,7 @@ python3 worker/local_note_studio_worker.py \
   --output-filename "My Notes.epub"
 ```
 
-Install `pandoc` first:
+The app-managed runtime installs `pandoc` during Install/Repair. Existing Conda/Python backends still need `pandoc` installed separately:
 
 ```bash
 brew install pandoc

@@ -108,8 +108,8 @@ Target layout:
 
 ```text
 ~/Library/Application Support/Local Note Studio/
-├── runtime/<version>/   # relocatable Python, pinned packages, ffmpeg/ffprobe, yt-dlp
-├── tools/               # optional tools such as pandoc
+├── runtime/<version>/   # relocatable Python, pinned packages, yt-dlp, mlx-whisper, ffmpeg/ffprobe, pandoc
+├── tools/               # reserved for optional tool metadata
 ├── models/              # downloaded or user-selected ASR models
 └── state/               # versions, checksums, install logs, rollback metadata
 ```
@@ -120,8 +120,8 @@ Runtime policy:
 2. Install a relocatable Python runtime and locked dependencies under Application Support without touching system Python. Runtime and tool downloads use quiet curl output, prefer HTTP/1.1 first, and then retry the default protocol to avoid test-network HTTP/2 framing failures. Advanced testers can override the Python runtime archive URL with `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`; the SHA-256 check still applies.
 3. Install locked Python dependencies with `pip --prefer-binary` and conservative retry/timeout settings. If the default PyPI route fails because of TLS, proxy, DNS, or timeout problems, the installer retries the same locked requirements through fallback PyPI mirrors. Advanced testers can override the first package index by launching with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`.
 4. Manage `ffmpeg` / `ffprobe`; allow `yt-dlp` to update independently because B站 extraction changes frequently.
-5. Install `pandoc` only when EPUB export is first requested.
-6. Provide the ASR engine in the runtime, but download or select large model weights separately and show disk usage.
+5. Install `pandoc` during “安装/修复” so EPUB export works without a separate Homebrew or Conda step.
+6. Provide the ASR engine (`mlx-whisper` on Apple Silicon) in the runtime, but download or select large model weights separately and show disk usage.
 7. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
 8. Support install progress, integrity checks, upgrade, rollback/repair, and removal.
 9. Preserve existing conda selection as an advanced backend.
@@ -133,8 +133,8 @@ Planned ownership matrix:
 | Python and worker packages | App-managed, versioned runtime |
 | `ffmpeg` / `ffprobe` | App-managed binaries |
 | `yt-dlp` | App-managed with an independent update channel |
-| `pandoc` | App-managed, installed on first EPUB use |
-| ASR engine | App-managed Python dependency |
+| `pandoc` | App-managed during install/repair |
+| ASR engine | App-managed Python dependency (`mlx-whisper` on Apple Silicon) |
 | ASR model weights | App-managed optional download or user-selected path |
 | LLM organization and multimodal OCR | User-configured OpenAI-compatible API |
 | B站 authentication | User account state refreshed from the selected Chrome Profile |

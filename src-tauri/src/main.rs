@@ -443,6 +443,7 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
         return Err(format!("Unsupported runtime action: {action}"));
     }
 
+    emit_log(app, "托管环境安装/修复开始。\n");
     let resource_dir = app
         .path()
         .resource_dir()
@@ -457,8 +458,12 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
         .map_err(|err| err.to_string())?;
 
     if !version_dir.join("bin/python3").exists() {
+        emit_log(app, "正在下载并安装 Python 运行时...\n");
         install_standalone_python(&runtime_root, &version_dir)?;
+    } else {
+        emit_log(app, "Python 运行时已存在，跳过下载。\n");
     }
+    emit_log(app, "正在初始化 pip...\n");
     let ensurepip = Command::new(version_dir.join("bin/python3"))
         .args(["-m", "ensurepip", "--upgrade"])
         .output()
@@ -466,8 +471,15 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     if !ensurepip.status.success() {
         return Err(String::from_utf8_lossy(&ensurepip.stderr).to_string());
     }
+    emit_log(
+        app,
+        "正在安装/修复 Python 依赖（含 yt-dlp 与 mlx-whisper）...\n",
+    );
     install_managed_python_packages(&version_dir.join("bin/python3"), &requirements)?;
+    emit_log(app, "正在安装/修复 ffmpeg 与 ffprobe...\n");
     install_managed_media_tools(&runtime_root, &version_dir.join("bin"))?;
+    emit_log(app, "正在安装/修复 pandoc（EPUB 导出组件）...\n");
+    install_managed_pandoc(&runtime_root, &version_dir.join("bin"))?;
 
     if current.exists() {
         fs::remove_file(&current)
@@ -484,6 +496,7 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
         format!("{{\"version\":\"{MANAGED_RUNTIME_VERSION}\",\"active\":true}}\n"),
     )
     .map_err(|err| err.to_string())?;
+    emit_log(app, "托管环境安装/修复完成。\n");
     Ok(runtime_status_text(&root))
 }
 
@@ -845,6 +858,12 @@ fn runtime_status_text(root: &std::path::Path) -> String {
     let python = root.join("runtime/current/bin/python3");
     let bin = root.join("runtime/current/bin");
     let tools = ["python3", "yt-dlp", "ffmpeg", "ffprobe", "pandoc"];
+    let packages = [
+        ("pypdf", "pypdf"),
+        ("lxml", "lxml"),
+        ("requests", "requests"),
+        ("whisper (mlx-whisper)", "mlx_whisper"),
+    ];
     let mut lines = vec![
         format!("托管环境目录：{}", root.join("runtime").display()),
         format!("版本：{MANAGED_RUNTIME_VERSION}"),
@@ -870,9 +889,16 @@ fn runtime_status_text(root: &std::path::Path) -> String {
             if ready { "[OK]" } else { "[MISSING]" }
         ));
     }
+    for (label, module) in packages {
+        let ready = python_package_available(&python, module);
+        lines.push(format!(
+            "- {} {label}",
+            if ready { "[OK]" } else { "[MISSING]" }
+        ));
+    }
     lines.push("".to_string());
     lines.push(format!("模型目录：{}", root.join("models").display()));
-    lines.push("pandoc 为 EPUB 功能按需组件；ASR 模型与运行时分开管理。".to_string());
+    lines.push("Whisper 运行库随托管环境安装；ASR 模型文件与运行时分开管理。".to_string());
     lines.join("\n") + "\n"
 }
 
@@ -904,6 +930,17 @@ fn human_bytes(bytes: u64) -> String {
 fn command_available(name: &str) -> bool {
     Command::new("sh")
         .args(["-c", "command -v \"$1\" >/dev/null 2>&1", "sh", name])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn python_package_available(python: &Path, module: &str) -> bool {
+    if !python.exists() {
+        return false;
+    }
+    Command::new(python)
+        .args(["-c", &format!("import {module}")])
         .status()
         .map(|status| status.success())
         .unwrap_or(false)

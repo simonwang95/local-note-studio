@@ -12,7 +12,7 @@
 
 1. 把 App 从 DMG 拖入“应用程序”。
 2. 在“配置”选择“应用托管环境”，填写该测试 Mac 能访问的 LLM API、模型和输出根目录。
-3. 点击“安装/修复”，联网安装校验过的 Python、依赖和媒体工具。
+3. 点击“安装/修复”，联网安装校验过的 Python、依赖、Whisper 运行库、媒体工具和 Pandoc。安装过程中日志会实时显示当前阶段。
 4. 到“校验”运行“检查依赖”，再执行一个小任务。
 
 如果“安装/修复”在 `pypi.org` 处出现 `SSLEOFError`、证书、代理或超时错误，通常是测试网络把 PyPI/TLS 链路截断，不代表 `pypdf` 等锁定版本不存在。0.1.6 起，应用会用相同的锁定版本自动重试备用 PyPI 镜像。特殊网络仍失败时，可以临时从终端指定可访问镜像再启动 App：
@@ -249,7 +249,7 @@ Waiting for your frontend dev server...
 - `requests`
 - `yt-dlp`
 - `ffmpeg`
-- 可选：`mlx-whisper`
+- `mlx-whisper`（托管环境会安装；高级 Conda/Python 后端可按需安装）
 - 可选：`opencc`
 - 可选：`textutil`，macOS 通常自带；转换旧版 `.doc` 文件时需要
 - 可选：`tesseract` 和 `pdftoppm`，当你希望在没有多模态 Qwen 时做图片 / 扫描 PDF OCR 备用
@@ -589,7 +589,7 @@ https://space.bilibili.com/1420210197/upload/opus
 
 这个任务会递归收集输入目录下的 `.md` 文件，按路径排序后调用 `pandoc` 合并导出为一个 EPUB。它会跳过 `.git`、`.obsidian`、`indexes`、`cache` 等内部目录，并尝试通过 Markdown 相对路径打包图片资源。
 
-导出前需要安装 `pandoc`：
+托管环境会在“安装/修复”阶段安装 `pandoc`；使用托管环境时无需再通过 Homebrew 或 Conda 单独安装。高级 Conda/Python 后端仍需自行安装：
 
 ```bash
 brew install pandoc

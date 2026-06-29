@@ -7,6 +7,7 @@
 - Managed runtime and macOS packaging are implemented on the development side, but the app-managed environment has not yet been validated on a clean Mac. Treat T-108 and T-109 as release gates until independent clean-Mac runtime initialization, task execution, signing, and notarization checks are complete.
 - Hardened clean-Mac managed-runtime installation against PyPI/TLS failures. Locked Python dependencies now install with longer pip retry/timeout settings, retry the same requirements through fallback PyPI mirrors when the default source fails with network-like errors, and report the failure as a network/proxy/TLS issue rather than implying the pinned package version is missing. Documented the `LOCAL_NOTE_STUDIO_PIP_INDEX_URL` override for special test networks. Built and verified the 0.1.6 arm64 DMG with SHA-256 `8881763f64b2bd84076a37060bf435d64a71f9f42657ee45a12f07f6e4feedec`.
 - Hardened the earlier Python runtime/tool archive download stage after a clean-Mac failure with `curl: (16) Error in the HTTP2 framing layer`. Runtime and tool downloads now prefer HTTP/1.1, retry the default protocol, suppress progress-meter spam, and document `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL` for same-file mirrors while preserving SHA-256 verification. Built and verified the 0.1.7 arm64 DMG with SHA-256 `2ce4e11b9f91bb402e16abbdeea6551018219b0b40bd016820e725246d8a2a69`.
+- Fixed clean-Mac managed-runtime UX gaps: install/repair now streams progress logs, installs Pandoc during setup, reports Whisper (`mlx-whisper`) and Python package status explicitly, and Cookie refresh uses the current managed Python interpreter so `yt_dlp` is available. Built and verified the `0.1.8` arm64 DMG with SHA-256 `ff4850441fa7d638e71d7778eb5dd8a8cd7095446202422c0bc17b1c938bb464`.
 
 ## 2026-06-26
 
@@ -77,7 +78,7 @@ Implemented since the initial checkpoint:
 - Semantic keyframe selection aligned to structured note sections, black/transition/near-duplicate filtering, stale-frame cleanup, and detailed keyframe manifests.
 - Explicit static-HTTP versus selected-Chrome-Profile browser capture for authenticated or JavaScript-rendered webpages.
 - Per-task timeout, retry, cooldown, and chunk-size overrides for long batches.
-- Versioned Application Support runtime management with checksum-pinned standalone Python, locked packages, yt-dlp, ffmpeg/ffprobe, on-demand Pandoc, disk usage, repair/uninstall, and advanced Conda fallback.
+- Versioned Application Support runtime management with checksum-pinned standalone Python, locked packages, yt-dlp, mlx-whisper, ffmpeg/ffprobe, Pandoc setup, disk usage, repair/uninstall, and advanced Conda fallback.
 - macOS `.app`/DMG bundle configuration, generated icon set, worker resource whitelist, release checks, and a signing/notarization/clean-Mac acceptance checklist. Debug `.app` and arm64 DMG bundles were built successfully; Developer ID notarization and independent clean-Mac acceptance remain release gates.
 - Startup dependency checks now tolerate legacy task-history records and use the public Tauri runtime detector; the check runs automatically on app launch and remains manually retryable.
 - Optional incognito tasks generate normal outputs and local task history without reading or writing source/video/quickread/keyframe manifests or Bilibili incremental/failure state.

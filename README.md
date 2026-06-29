@@ -10,7 +10,7 @@ The app uses a Tauri desktop shell, a thin Rust process bridge, and a packaged P
 - Bilibili single video, favorites/series, opus/charging opus, and one-UP opus batch workflows.
 - Web/WeChat, Word/PDF/Office/image/OCR, paper quick-read, AI-Chat JSON, local video/audio, and recursive EPUB export.
 - Task history and recovery, structured output actions, progress/cancellation, incognito mode, and editable/batch Manifest state.
-- App-managed Python 3.11 runtime with locked packages, `yt-dlp`, `ffmpeg`/`ffprobe`, and on-demand Pandoc.
+- App-managed Python 3.11 runtime with locked packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`/`ffprobe`, and Pandoc.
 - Advanced existing-Conda backend for development or users who already maintain a compatible environment.
 
 ## Install a test build

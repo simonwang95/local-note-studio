@@ -1720,14 +1720,25 @@ async function manageRuntime(action: "status" | "install" | "remove"): Promise<v
     setOutput(tauriRuntimeHint());
     return;
   }
+  await ensureWorkerLogListener();
   setWorkerRunning(true);
   setState(action === "status" ? "读取托管环境..." : action === "install" ? "安装/修复托管环境..." : "卸载托管环境...");
+  setOutput(action === "install" ? "正在安装/修复托管环境...\n" : "");
   try {
     const result = await invoke<string>("manage_runtime", { action });
-    setOutput(result);
+    if (currentOutput().trim()) {
+      appendOutput(`\n${result}`);
+    } else {
+      setOutput(result);
+    }
     setState(action === "remove" ? "托管环境已卸载" : "托管环境就绪");
   } catch (error) {
-    setOutput(errorMessage(error));
+    const message = errorMessage(error);
+    if (currentOutput().trim()) {
+      appendOutput(`\n${message}`);
+    } else {
+      setOutput(message);
+    }
     setState("托管环境操作失败");
   } finally {
     setWorkerRunning(false);

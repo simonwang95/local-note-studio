@@ -63,6 +63,7 @@ class TaskRequest:
     source: str = ""
     output_dir: str = ""
     output_filename: str = ""
+    runtime_backend: str = ""
     conda_env: str = ""
     conda_bin: str = ""
     python_bin: str = "python3"
@@ -108,6 +109,7 @@ class TaskRequest:
             source=str(data.get("source") or ""),
             output_dir=str(data.get("output_dir") or ""),
             output_filename=str(data.get("output_filename") or ""),
+            runtime_backend=str(data.get("runtime_backend") or ""),
             conda_env=str(data.get("conda_env") or ""),
             conda_bin=str(data.get("conda_bin") or ""),
             python_bin=str(data.get("python_bin") or "python3"),
@@ -565,16 +567,25 @@ def conda_cmd(req: TaskRequest) -> str:
     return req.conda_bin.strip() or os.environ.get("CONDA_EXE", "").strip() or "conda"
 
 
+def selected_python(req: TaskRequest) -> str:
+    if req.runtime_backend == "managed":
+        return sys.executable
+    configured = (req.python_bin or "").strip()
+    if configured and configured != "python3":
+        return configured
+    return sys.executable
+
+
 def python_cmd(req: TaskRequest, script: pathlib.Path) -> list[str]:
     if req.conda_env:
         return [conda_cmd(req), "run", "--no-capture-output", "-n", req.conda_env, "python3", "-u", str(script)]
-    return [req.python_bin or "python3", "-u", str(script)]
+    return [selected_python(req), "-u", str(script)]
 
 
 def python_eval_cmd(req: TaskRequest, code: str) -> list[str]:
     if req.conda_env:
         return [conda_cmd(req), "run", "--no-capture-output", "-n", req.conda_env, "python3", "-c", code]
-    return [req.python_bin or "python3", "-c", code]
+    return [selected_python(req), "-c", code]
 
 
 def tool_cmd(req: TaskRequest, tool: str, *args: str) -> list[str]:

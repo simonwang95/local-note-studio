@@ -130,11 +130,11 @@
 
 ### T-108 应用托管运行环境
 
-状态：实现完成，待干净 Mac 独立验收（2026-06-29）。应用可下载 SHA-256 固定的双架构独立 Python 3.11，安装锁定 Python/ASR 依赖、yt-dlp、ffmpeg/ffprobe，首次 EPUB 时按需安装 Pandoc；运行时/工具下载优先 HTTP/1.1 并保留 SHA-256 校验，锁定 Python 依赖在默认 PyPI 源失败时会自动重试备用镜像并提示网络/代理/TLS 排查；资源按版本原子切换并支持状态、磁盘占用、修复与卸载。安装版默认托管后端；显式 Conda 选择跨启动保留，Finder 启动会补全常见 Conda 路径并允许填写绝对路径。尚需按验收标准在无开发工具机器执行完整任务矩阵。
+状态：实现完成，待干净 Mac 独立验收（2026-06-29）。应用可下载 SHA-256 固定的双架构独立 Python 3.11，安装锁定 Python/ASR 依赖、yt-dlp、ffmpeg/ffprobe 与 Pandoc；运行时/工具下载优先 HTTP/1.1 并保留 SHA-256 校验，锁定 Python 依赖在默认 PyPI 源失败时会自动重试备用镜像并提示网络/代理/TLS 排查；安装/修复阶段会实时输出进度，状态页会检查 Whisper、pandoc 和核心 Python 包；资源按版本原子切换并支持状态、磁盘占用、修复与卸载。安装版默认托管后端；显式 Conda 选择跨启动保留，Finder 启动会补全常见 Conda 路径并允许填写绝对路径。尚需按验收标准在无开发工具机器执行完整任务矩阵。
 
 - 采用混合模式：`.app` 保持轻量，Python、固定版本依赖和命令行工具由应用安装到 `~/Library/Application Support/Local Note Studio/`。
-- 管理可迁移的 Python 运行时和锁定依赖；管理 `ffmpeg` / `ffprobe`，允许 `yt-dlp` 独立更新，并在 EPUB 功能首次使用时按需安装 `pandoc`。
-- ASR 引擎由应用环境提供；Whisper 等模型作为应用管理的可选资源下载或选择，存放在独立模型目录，不直接打进 `.app`。
+- 管理可迁移的 Python 运行时和锁定依赖；管理 `ffmpeg` / `ffprobe`、`pandoc`，允许 `yt-dlp` 独立更新。
+- ASR 引擎由应用环境提供；Whisper 模型作为应用管理的可选资源下载或选择，存放在独立模型目录，不直接打进 `.app`。
 - LLM 与多模态 OCR 继续使用用户配置的 OpenAI-compatible API，不内置本地大模型服务。
 - 支持首次安装、依赖校验、版本升级、损坏修复、卸载和磁盘占用查看。
 - 保留“使用现有 conda 环境”高级模式，并允许在托管环境与 conda 之间切换。

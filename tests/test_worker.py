@@ -71,9 +71,10 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 worker.validate_chromium_profile_path(str(chrome_root))
 
             with mock.patch.dict("os.environ", {"LOCAL_NOTE_STUDIO_APP_DATA_DIR": str(app_data)}):
-                req = worker.TaskRequest(task="refresh-bilibili-cookies", browser_profile=str(profile))
+                req = worker.TaskRequest(task="refresh-bilibili-cookies", runtime_backend="managed", browser_profile=str(profile))
                 command = worker.command_for(req)
                 expected_output = app_data / "auth" / "bili_cookies.txt"
+                self.assertEqual(command[0], sys.executable)
                 self.assertEqual(command[command.index("--output") + 1], str(expected_output))
                 self.assertEqual(worker.cookie_output_path("./bili_cookies.txt"), expected_output)
 
