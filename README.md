@@ -15,7 +15,7 @@ The app uses a Tauri desktop shell, a thin Rust process bridge, and a packaged P
 
 ## Install a test build
 
-For another Mac with the same CPU architecture, the DMG is the only Local Note Studio file that needs to be transferred. The tester does not need this source checkout, Node.js, Rust, Xcode, Homebrew, or conda when using the managed runtime.
+For another Mac with the same CPU architecture, the DMG is the only Local Note Studio file that needs to be transferred. The intended managed-runtime path should not require this source checkout, Node.js, Rust, Xcode, Homebrew, or conda, but this path still needs independent clean-Mac validation before it is treated as release-ready.
 
 1. Open the matching DMG (`aarch64` for Apple Silicon, `x86_64` for Intel) and drag Local Note Studio to Applications.
 2. Open Configuration, keep **App-managed runtime**, enter the tester's LLM API/model and output root, then click **Install/Repair**.

@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-06-29
+
+- Confirmed the current implementation has completed the P0 reliability and P1 daily-use backlog, including automated regression checks, Bilibili favorites/series UX, restricted-content diagnostics, output integrity gates, task history/recovery, output actions, Manifest UI, OCR progress, semantic keyframes, browser-state capture, long-batch tuning, incognito mode, processing-record management, and the desktop tab workspace.
+- Added user-facing feature work beyond the original first-stage scope: app-side Bilibili Cookie refresh from a selected Chrome Profile, masked sensitive paths, dialogue detection controls, single-file custom output names, one-UP opus batching, recursive EPUB export, richer document/OCR support, and Qwen organization that preserves originals where required.
+- Managed runtime and macOS packaging are implemented on the development side, but the app-managed environment has not yet been validated on a clean Mac. Treat T-108 and T-109 as release gates until independent clean-Mac runtime initialization, task execution, signing, and notarization checks are complete.
+
 ## 2026-06-26
 
 - Fixed development-process leftovers and worker shutdown behavior: `npm run dev` now starts Vite through a cleanup wrapper, `npm run dev:stop` can stop old project-local Vite servers, and the Rust bridge runs worker tasks in a process group that is terminated on cancel or app exit. Documented that Activity Monitor's huge Node virtual-memory number is usually reserved address space; high CPU from an orphaned `node .../.bin/vite` is the actionable symptom. Built and verified the 0.1.5 arm64 DMG with SHA-256 `8590939e74b5f81ef6be1478eeade921b915d4519f8d75b4b4d11581efa0f3d2`.

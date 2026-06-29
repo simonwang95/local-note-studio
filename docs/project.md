@@ -29,7 +29,7 @@ The first version should make existing command-line workflows easier and safer t
 | Task | Priority | Notes |
 | --- | --- | --- |
 | Bilibili single URL | Implemented | Subtitle/web/ASR priority, key frames, dialogue detection, terminology checks, and optional raw subtitles. |
-| Bilibili favorite/series | Partial | Incremental limited/full processing works; in-app favorite selection and failed-item retry remain pending. |
+| Bilibili favorite/series | Implemented | In-app favorite/series selection, limited/full processing, progress logs, failure persistence, and failed-item retry. |
 | Bilibili opus/charging opus | Implemented | Cookie-authenticated API capture followed by Qwen organization. |
 | Bilibili UP opus batch | Implemented | Page through one UP account, download images, show per-item progress, and organize with Qwen. |
 | WeChat or general web URL | Implemented | Convert and organize while retaining the complete extracted original. |

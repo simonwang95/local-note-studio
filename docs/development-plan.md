@@ -13,31 +13,31 @@ Deliverables:
 - Task preview remains available through dry-run.
 - Task execution still uses the migrated Python scripts.
 
-## Stage 2: Better Desktop Ergonomics (Mostly Completed)
+## Stage 2: Better Desktop Ergonomics (Completed)
 
 Goal: reduce manual path entry and make common operations feel native.
 
 Candidate work:
 
 - Add native file and directory pickers. (Done for current path inputs.)
-- Add an "open output folder" action. (Pending.)
+- Add an "open output folder" action. (Done through structured output actions.)
 - Store named profiles for conda/model/output roots. (Pending; current settings use localStorage.)
 - Stream logs incrementally instead of returning them after completion. (Done for current worker runs.)
-- Add cancel/retry controls. (Cancel is available; retry remains pending.)
+- Add cancel/retry controls. (Cancel, rerun, failed-step recovery, and failed-item retry are available.)
 - Refresh Bilibili Cookie from a selected Chrome Profile. (Done.)
 - Mask API Key, Cookie path, and browser profile path by default. (Done.)
 
-## Stage 3: Task History And Recovery (Next Major Stage)
+## Stage 3: Task History And Recovery (Completed)
 
 Goal: make long-running and batch tasks easier to manage.
 
 Candidate work:
 
-- Store task history in SQLite.
-- Persist stdout/stderr logs per run.
-- Track generated Markdown paths.
-- Add task status, retry, and failure diagnostics.
-- Surface manifest/index status from migrated scripts.
+- Store task history in local persistent storage. (Done.)
+- Persist bounded logs per run. (Done.)
+- Track generated Markdown paths and batch output lists. (Done.)
+- Add task status, rerun, recovery, and failure diagnostics. (Done.)
+- Surface manifest/index status from migrated scripts. (Done.)
 
 ## Stage 4: Rich Video Notes (First Pass Completed)
 
@@ -52,7 +52,7 @@ Candidate work:
 - Avoid excessive screenshots by deduplicating visually similar frames and limiting frames per section/video.
 - Record extracted frame paths in `video-manifest.json` for later cleanup or regeneration.
 
-## Stage 5: App-Managed Runtime (Required Before Packaging)
+## Stage 5: App-Managed Runtime (Implemented, Awaiting Clean-Mac Validation)
 
 Goal: make the main workflows usable on a clean Mac without requiring conda or Homebrew, while preserving existing conda selection for advanced users.
 
@@ -64,9 +64,9 @@ Candidate work:
 - Keep LLM and multimodal OCR behind the user-configured OpenAI-compatible API.
 - Add runtime versioning, install progress, integrity checks, upgrades, repair, removal, disk usage, and rollback behavior.
 - Keep advanced users able to select their own conda environment.
-- Validate the main task matrix on a clean Mac without conda or Homebrew.
+- Validate the main task matrix on a clean Mac without conda or Homebrew. (Pending release gate.)
 
-## Stage 6: Signed Daily-Use Package
+## Stage 6: Signed Daily-Use Package (Development Build Works, Release Gate Open)
 
 Goal: package and distribute the app only after the managed runtime lifecycle works reliably.
 
