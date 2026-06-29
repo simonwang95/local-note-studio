@@ -9,11 +9,11 @@ For a Mac with the same CPU architecture, the DMG is the only Local Note Studio 
 The package is not completely self-contained:
 
 - The filename architecture must match the tester Mac: `aarch64` is for Apple Silicon; `x86_64` is for Intel. The current development machine only builds `aarch64`.
-- On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`, `ffprobe`, and `pandoc` into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts. Runtime/tool downloads prefer HTTP/1.1 before retrying the default protocol to avoid fragile HTTP/2 paths. Locked Python dependencies are first installed from the default pip/PyPI configuration; TLS/proxy/timeout failures automatically retry through fallback PyPI mirrors. If a test network requires a specific mirror, launch the app with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`; if the Python runtime archive itself is mirrored, use `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`.
+- On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`, `ffprobe`, `pandoc`, and the default MLX Whisper model into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts. Runtime/tool downloads prefer HTTP/1.1 before retrying the default protocol to avoid fragile HTTP/2 paths. Locked Python dependencies are first installed from the default pip/PyPI configuration; TLS/proxy/timeout failures automatically retry through fallback PyPI mirrors. If a test network requires a specific mirror, launch the app with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`; if the Python runtime archive itself is mirrored, use `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`.
 - Fresh installs and legacy settings without an explicit runtime preference default to the managed runtime. If the user explicitly selects the advanced Conda backend, that choice, environment name, and optional executable path persist across launches.
 - Finder-launched apps do not inherit the interactive shell's `PATH`. The app augments GUI process paths and searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. Non-standard Conda installations should be configured with an absolute `.../bin/conda` path in the UI.
 - An OpenAI-compatible LLM/OCR service is not bundled. The tester must configure an API URL, key, and model reachable from that Mac. Bilibili private/collection tests additionally need that tester's own Cookie or Chrome Profile; never distribute the developer's credentials.
-- Optional ASR model weights are separate large assets; the Whisper runtime library is installed with the managed environment. Pandoc is installed during “安装/修复” rather than on first EPUB export.
+- The app bundle does not embed ASR model weights, but managed “安装/修复” downloads the default MLX Whisper model into Application Support together with the runtime. Pandoc is installed during “安装/修复” rather than on first EPUB export.
 - Internal DMGs are currently unsigned and unnotarized. Give the tester the SHA-256 checksum through a separate trusted channel. After copying the app to `/Applications`, try Control-click → Open first. If Gatekeeper still blocks a package whose checksum they have verified, they may run `xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"` for this internal build only. Public distribution must use Developer ID signing and notarization instead.
 
 Recommended handoff steps:
@@ -30,11 +30,11 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 
 ## Current internal test build (2026-06-29)
 
-- Version: `0.1.10`
+- Version: `0.1.11`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.10_aarch64.dmg`
-- Size: `3,449,792 bytes`
-- SHA-256: `a168ec328d491147072153b47901a69e4109bb9229a44e2cfdb29ecdc62b3b25`
+- Artifact: `Local Note Studio_0.1.11_aarch64.dmg`
+- Size: `3,453,651 bytes`
+- SHA-256: `dbae710090a7d245c422b468971098c060b1656876cc50c6d34231d82163590a`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.

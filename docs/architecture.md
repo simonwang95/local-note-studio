@@ -31,15 +31,16 @@ Local Note Studio.app
   -> Tauri UI, Rust bridge, worker sources, runtime manager
   -> ~/Library/Application Support/Local Note Studio/
        runtime/<version>/   relocatable Python, pinned packages, ffmpeg/ffprobe, yt-dlp
-       tools/               optional tools such as pandoc
-       models/              optional app-managed ASR models
+       tools/               optional tool metadata
+       models/              default managed Whisper model and user-selected ASR models
+       cache/audio/         temporary Bilibili/local-video audio work files
        state/               runtime metadata, checksums, logs, rollback state
   -> user-configured OpenAI-compatible LLM/OCR API
 ```
 
 Keeping the managed runtime outside the `.app` allows dependency repair and yt-dlp updates without replacing the signed application. Runtime downloads must use pinned versions and checksums. The app must support install, verify, upgrade, rollback/repair, and removal. Existing conda selection remains an advanced execution backend.
 
-LLM inference and multimodal OCR remain external API configuration. ASR code can live in the managed Python environment, while large model weights are downloaded or selected on demand rather than bundled into the installer.
+LLM inference and multimodal OCR remain external API configuration. ASR code lives in the managed Python environment, and the default MLX Whisper model is downloaded into Application Support during install/repair rather than bundled into the installer. Users can still select a different local model directory.
 
 ## Worker Contract
 
@@ -88,7 +89,7 @@ The worker also supports an environment-check request:
 
 This request should not run user content processing. It checks the selected runtime, required Python packages, command-line tools, optional ASR helpers, and local path configuration, then returns actionable hints.
 
-For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For local video tasks, the desktop UI only exposes local subtitle-first and ASR-first choices. The worker maps these to `BILIBILI_PREFER_WEB_SUBTITLE` and `FORCE_ASR` before calling the migrated scripts. `favorite_limit` defaults to `1` for safe favorite-list testing; `0` means full favorite or UP-opus processing. Video options are mapped to environment variables consumed by the migrated scripts, including key-frame extraction, dialogue detection, original-subtitle retention, overwrite behavior, and A-share terminology validation.
+For Bilibili tasks, `subtitle_strategy` accepts `yt-dlp`, `web`, or `asr`. For local video tasks, the desktop UI only exposes local subtitle-first and ASR-first choices. The worker maps these to `BILIBILI_PREFER_WEB_SUBTITLE` and `FORCE_ASR` before calling the migrated scripts. Forced ASR requires an existing model directory before audio download starts; managed install/repair provides the default model path. `favorite_limit` defaults to `1` for safe favorite-list testing; `0` means full favorite or UP-opus processing. Video options are mapped to environment variables consumed by the migrated scripts, including key-frame extraction, dialogue detection, original-subtitle retention, overwrite behavior, and A-share terminology validation.
 
 Cookie refresh uses two internal tasks: `refresh-bilibili-cookies` validates that the selected directory directly contains `Cookies` or `Network/Cookies` before calling the dedicated exporter, and `bilibili-cookie-status` validates the resulting Netscape file without running content processing. Broad roots are rejected before yt-dlp's recursive lookup. An empty output setting resolves to the app-owned Application Support auth directory, and only Bilibili-domain cookies are persisted.
 

@@ -66,6 +66,43 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(env["CONDA_ENV"], "")
         self.assertNotIn("CONDA_EXE", env)
 
+    def test_managed_runtime_uses_app_data_for_cache_and_default_asr_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_data = pathlib.Path(temp_dir) / "app"
+            model = app_data / "models" / worker.MANAGED_ASR_MODEL_NAME
+            model.mkdir(parents=True)
+            (model / "config.json").write_text("{}", encoding="utf-8")
+            (model / "weights.safetensors").write_text("fixture", encoding="utf-8")
+            req = worker.TaskRequest(task="bilibili-url", runtime_backend="managed")
+            with mock.patch.dict("os.environ", {"LOCAL_NOTE_STUDIO_APP_DATA_DIR": str(app_data)}):
+                env = worker.build_env(req)
+        self.assertEqual(env["CACHE_DIR"], str(app_data / "cache" / "audio"))
+        self.assertEqual(env["MODEL_CACHE_DIR"], str(app_data / "models"))
+        self.assertEqual(env["ASR_ENGINE"], "whisper")
+        self.assertEqual(env["ASR_LOCAL_MODEL"], str(model))
+
+    def test_managed_runtime_does_not_leak_legacy_asr_model_from_env_file(self):
+        req = worker.TaskRequest(task="bilibili-url", runtime_backend="managed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict("os.environ", {"LOCAL_NOTE_STUDIO_APP_DATA_DIR": temp_dir}):
+                with mock.patch.object(worker, "load_env_file", return_value={"ASR_LOCAL_MODEL": "/old/model", "ASR_ENGINE": "qwen3"}):
+                    env = worker.build_env(req)
+        self.assertEqual(env["ASR_ENGINE"], "whisper")
+        self.assertNotIn("ASR_LOCAL_MODEL", env)
+
+    def test_forced_asr_requires_model_before_downloading_audio(self):
+        req = worker.TaskRequest(
+            task="bilibili-url",
+            runtime_backend="managed",
+            subtitle_strategy="asr",
+            source="https://www.bilibili.com/video/BV1111111111",
+            output_dir="/tmp/local-note-output",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.dict("os.environ", {"LOCAL_NOTE_STUDIO_APP_DATA_DIR": temp_dir}):
+                with self.assertRaisesRegex(ValueError, "ASR 模型目录"):
+                    worker.command_for(req)
+
     def test_bilibili_runner_preserves_conda_only_when_explicit(self):
         with mock.patch.object(runner, "load_env_file", return_value={"CONDA_ENV": "course-whisper"}):
             with mock.patch.dict("os.environ", {"CONDA_ENV": ""}, clear=True):

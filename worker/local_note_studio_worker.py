@@ -58,7 +58,8 @@ OCR_FALLBACK_COMMANDS = {
     "pdftoppm": "Install poppler if you want OCR fallback for scanned PDFs.",
 }
 
-ASR_MODEL_HINT = "Set ASR_LOCAL_MODEL in worker/env.local when videos have no usable subtitles."
+MANAGED_ASR_MODEL_NAME = "whisper-large-v3-turbo"
+ASR_MODEL_HINT = "Choose an existing Whisper model directory in the app Configuration, or run managed Install/Repair to download the default model."
 
 
 @dataclass
@@ -194,9 +195,14 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
     env["PYTHONUNBUFFERED"] = "1"
+    app_root = app_data_root()
+    if os.environ.get("LOCAL_NOTE_STUDIO_APP_DATA_DIR", "").strip():
+        env["CACHE_DIR"] = str(app_root / "cache" / "audio")
+        env["MODEL_CACHE_DIR"] = str(app_root / "models")
     if req.runtime_backend == "managed":
         env["CONDA_ENV"] = ""
         env.pop("CONDA_EXE", None)
+        env["ASR_ENGINE"] = "whisper"
     elif req.conda_env:
         env["CONDA_ENV"] = req.conda_env
     if req.runtime_backend != "managed" and req.conda_bin:
@@ -212,6 +218,11 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["SUMMARY_MODEL"] = req.model
     if req.asr_model:
         env["ASR_LOCAL_MODEL"] = req.asr_model
+    elif req.runtime_backend == "managed":
+        if default_asr_model_path().exists():
+            env["ASR_LOCAL_MODEL"] = str(default_asr_model_path())
+        else:
+            env.pop("ASR_LOCAL_MODEL", None)
     if req.cookies:
         env["BILIBILI_COOKIES_FILE"] = req.cookies
         env["BILI_COOKIE_FILE"] = req.cookies
@@ -269,6 +280,21 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     return env
 
 
+def require_asr_model_for_forced_asr(req: TaskRequest) -> None:
+    if (req.subtitle_strategy or "yt-dlp").strip().lower() != "asr":
+        return
+    env = build_env(req)
+    engine = (env.get("ASR_ENGINE") or "whisper").strip().lower()
+    if engine != "whisper":
+        return
+    raw_model = (env.get("ASR_LOCAL_MODEL") or "").strip()
+    if not raw_model:
+        raise ValueError("已选择“ASR 语音转写优先”，请先在配置页选择 ASR 模型目录，或点击“安装/修复”下载默认 Whisper 模型。")
+    model_path = resolve_local_path(raw_model)
+    if not model_path.is_dir():
+        raise ValueError(f"ASR 模型目录不存在：{model_path}。请重新选择模型目录，或点击“安装/修复”下载默认 Whisper 模型。")
+
+
 def inspect_cookie_file(path: pathlib.Path) -> str:
     bilibili_lines = 0
     total_lines = 0
@@ -300,6 +326,20 @@ def default_bilibili_cookie_path() -> pathlib.Path:
         state_dir = os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR", "").strip()
         root = pathlib.Path(state_dir).expanduser().parent if state_dir else pathlib.Path.home() / "Library/Application Support/Local Note Studio"
     return root / "auth" / "bili_cookies.txt"
+
+
+def app_data_root() -> pathlib.Path:
+    configured_root = os.environ.get("LOCAL_NOTE_STUDIO_APP_DATA_DIR", "").strip()
+    if configured_root:
+        return pathlib.Path(configured_root).expanduser()
+    state_dir = os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR", "").strip()
+    if state_dir:
+        return pathlib.Path(state_dir).expanduser().parent
+    return pathlib.Path.home() / "Library/Application Support/Local Note Studio"
+
+
+def default_asr_model_path() -> pathlib.Path:
+    return app_data_root() / "models" / MANAGED_ASR_MODEL_NAME
 
 
 def cookie_output_path(raw: str) -> pathlib.Path:
@@ -941,6 +981,7 @@ def command_for(req: TaskRequest) -> list[str]:
         raise ValueError("output_dir is required")
 
     if req.task == "bilibili-url":
+        require_asr_model_for_forced_asr(req)
         command = [
             *python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"),
             "--url",
@@ -952,6 +993,7 @@ def command_for(req: TaskRequest) -> list[str]:
             command.extend(["--output-filename", req.output_filename])
         return command
     if req.task == "bilibili-favorite":
+        require_asr_model_for_forced_asr(req)
         command = [
             *python_cmd(req, SCRIPTS_DIR / "run_bilibili_transcript.py"),
             "--favorite",
@@ -969,6 +1011,7 @@ def command_for(req: TaskRequest) -> list[str]:
             command.append("--overwrite")
         return command
     if req.task == "local-video":
+        require_asr_model_for_forced_asr(req)
         source_path = pathlib.Path(req.source)
         args = ["--local-dir" if source_path.is_dir() else "--local-file", req.source]
         if source_path.is_dir() and req.output_filename:

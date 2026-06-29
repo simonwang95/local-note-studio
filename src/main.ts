@@ -1222,6 +1222,11 @@ function currentOutput(): string {
   return document.querySelector<HTMLPreElement>("#output")?.textContent ?? "";
 }
 
+function managedAsrModelPath(text: string): string {
+  const match = text.match(/^默认 ASR 模型：(.+)$/m);
+  return match?.[1]?.trim() ?? "";
+}
+
 function setState(text: string): void {
   const state = document.querySelector<HTMLSpanElement>("#runState");
   if (state) state.textContent = text;
@@ -1731,6 +1736,11 @@ async function manageRuntime(action: "status" | "install" | "remove"): Promise<v
       appendOutput(`\n${result}`);
     } else {
       setOutput(result);
+    }
+    const managedModel = managedAsrModelPath(result);
+    if (managedModel && !inputValue("asrModel").trim()) {
+      setInputValue("asrModel", managedModel);
+      saveSettings();
     }
     if (action === "remove") {
       setState("托管环境已卸载");

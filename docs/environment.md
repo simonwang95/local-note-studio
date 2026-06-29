@@ -72,7 +72,7 @@ SUMMARY_MODEL
 
 Video task options selected in the UI override the corresponding process environment for that run. Important examples include `EXTRACT_KEYFRAMES`, `ENABLE_DIALOGUE_DETECTION`, `KEEP_ORIGINAL_SUBTITLES`, `FORCE_ASR`, `OVERWRITE_OUTPUT`, and `A_SHARE_TERMS_ENABLED`. The app does not rewrite `worker/env.local` when an option is toggled.
 
-The ASR model directory is persisted in local UI settings, masked by default, and can be revealed or explicitly saved beside the selector. Replaying task history keeps the current Configuration values instead of restoring an old or empty ASR path.
+The ASR model directory is persisted in local UI settings, masked by default, and can be revealed or explicitly saved beside the selector. Managed install/repair downloads the default MLX Whisper model into Application Support and the UI auto-fills that model path when the field is empty. Replaying task history keeps the current Configuration values instead of restoring an old or empty ASR path.
 
 The long-task “model cooldown” field is an explicit per-run override. A blank field keeps environment defaults; `0` disables waiting. A numeric value is exported to `COOLDOWN_DELAY`, `QWEN_ORGANIZE_COOLDOWN_DELAY`, `QWEN_PDF_POLISH_COOLDOWN_DELAY`, `QWEN_QUICKREAD_COOLDOWN_DELAY`, and `SUMMARY_CHUNK_COOLDOWN_DELAY`, so a specialized value from `env.local` cannot mask the UI override.
 
@@ -135,9 +135,9 @@ Planned ownership matrix:
 | `yt-dlp` | App-managed with an independent update channel |
 | `pandoc` | App-managed during install/repair |
 | ASR engine | App-managed Python dependency (`mlx-whisper` on Apple Silicon) |
-| ASR model weights | App-managed optional download or user-selected path |
+| ASR model weights | Default MLX Whisper model installed during managed install/repair; user-selected path remains supported |
 | LLM organization and multimodal OCR | User-configured OpenAI-compatible API |
 | B站 authentication | User account state refreshed from the selected Chrome Profile |
 | macOS `textutil`, Quick Look and Vision | Use system-provided frameworks/tools when available |
 
-Packaging acceptance requires a clean Mac without conda or Homebrew to initialize this runtime and complete the main task matrix. External prerequisites are limited to the configured LLM/OCR API service, account/browser state such as B站 Cookie, source/network access, and optional ASR model assets managed through the app.
+Packaging acceptance requires a clean Mac without conda or Homebrew to initialize this runtime and complete the main task matrix. External prerequisites are limited to the configured LLM/OCR API service, account/browser state such as B站 Cookie, source/network access, and network access for the managed ASR model download.

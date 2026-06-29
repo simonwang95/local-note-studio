@@ -8,11 +8,11 @@
 
 同架构的测试 Mac 只需要对应的 DMG，不需要项目源码、Node.js、Rust、Xcode、Homebrew 或 conda。`aarch64` 安装包只适用于 Apple Silicon，`x86_64` 适用于 Intel；当前开发机构建的是 `aarch64`。
 
-安装包包含 App 和 Python worker，但不会捆绑个人配置、Cookie、本地索引、LLM 服务或大型 ASR 模型。第一次启动后请：
+安装包包含 App 和 Python worker，但不会捆绑个人配置、Cookie、本地索引、LLM 服务或内嵌大型 ASR 模型。第一次启动后请：
 
 1. 把 App 从 DMG 拖入“应用程序”。
 2. 在“配置”选择“应用托管环境”，填写该测试 Mac 能访问的 LLM API、模型和输出根目录。
-3. 点击“安装/修复”，联网安装校验过的 Python、依赖、Whisper 运行库、媒体工具和 Pandoc。安装过程中日志会实时显示当前阶段。
+3. 点击“安装/修复”，联网安装校验过的 Python、依赖、Whisper 运行库、默认 Whisper ASR 模型、媒体工具和 Pandoc。安装过程中日志会实时显示当前阶段。
 4. 到“校验”运行“检查依赖”，再执行一个小任务。
 
 从旧版本升级后，如果“查看状态”出现 `状态：需要修复` 或 `[MISSING] pandoc`，直接回到“配置”点击“安装/修复”补齐新增托管组件；不需要为托管环境另外执行 `brew install pandoc`。
@@ -255,7 +255,7 @@ Waiting for your frontend dev server...
 - 可选：`opencc`
 - 可选：`textutil`，macOS 通常自带；转换旧版 `.doc` 文件时需要
 - 可选：`tesseract` 和 `pdftoppm`，当你希望在没有多模态 Qwen 时做图片 / 扫描 PDF OCR 备用
-- 条件需要：`ASR_LOCAL_MODEL`，当 B站视频没有字幕、需要本地语音转文字时使用
+- `ASR_LOCAL_MODEL`：托管环境会在安装/修复后自动填入默认模型路径；高级 Conda/Python 后端需自行选择
 
 如果使用 conda，可参考：
 
@@ -328,14 +328,14 @@ ASR_ENGINE="whisper"
 ASR_LOCAL_MODEL=""
 ```
 
-`ASR_ENGINE=whisper` 时，必须把 `ASR_LOCAL_MODEL` 指向本机已有的 Whisper 模型目录，例如：
+`ASR_ENGINE=whisper` 时，`ASR_LOCAL_MODEL` 必须指向本机已有的 Whisper 模型目录。使用托管环境时，“安装/修复”会下载默认模型并自动填入配置页；也可以手动选择其他模型目录，例如：
 
 ```bash
 ASR_ENGINE="whisper"
 ASR_LOCAL_MODEL="/Users/xxx/Models/whisper-large-v3-turbo"
 ```
 
-如果这个路径为空，带字幕的视频仍可能成功；但没有字幕的视频会在下载音频后失败，并提示需要设置 `ASR_LOCAL_MODEL`。
+如果这个路径为空，带字幕的视频仍可能成功；但主动选择“ASR 语音转写优先”时，应用会在下载音频前提示先选择模型目录或点击“安装/修复”下载默认模型。
 
 也可以使用 Qwen3-ASR：
 

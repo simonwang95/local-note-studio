@@ -74,4 +74,4 @@ The worker should receive absolute output directories whenever possible.
 
 Current priorities and acceptance criteria are tracked only in [`docs/todo.md`](todo.md).
 
-The signed daily-use package is gated on the app-managed runtime. Python, worker packages and non-LLM tools should be versioned under Application Support; LLM/multimodal OCR remains API-configured, and optional ASR model assets are managed separately.
+The signed daily-use package is gated on the app-managed runtime. Python, worker packages, non-LLM tools and the default ASR model should be versioned under Application Support; LLM/multimodal OCR remains API-configured, and user-selected ASR model paths remain supported.

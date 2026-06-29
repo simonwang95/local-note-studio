@@ -355,7 +355,7 @@ run_asr_transcribe() {
 
         local model_path="${ASR_LOCAL_MODEL:-}"
         if [ -z "$model_path" ]; then
-            echo "   ❌ 请在 env.local 中设置 ASR_LOCAL_MODEL 指向 Whisper 模型路径"
+            echo "   ❌ 请在配置页选择 ASR 模型目录，或点击“安装/修复”下载默认 Whisper 模型"
             return 1
         fi
         if [[ "$model_path" != /* ]]; then

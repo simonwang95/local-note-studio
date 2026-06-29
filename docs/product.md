@@ -21,7 +21,7 @@ Rich video options include transcript-source priority, key-frame notes, dialogue
 ## Non-Goals For MVP
 
 - Bundled local LLM runtime; LLM and multimodal OCR remain user-configured API services.
-- Large ASR model files embedded in the `.app`; models may be downloaded or selected through the app-managed resource directory.
+- Large ASR model files embedded in the `.app`; the default model is downloaded into Application Support during managed install/repair, and custom model directories may still be selected.
 - Bilibili QR login UI; current releases refresh Cookie from a selected Chrome Profile.
 - Full task database and cloud sync.
 - macOS signing/notarization.
@@ -42,4 +42,4 @@ The canonical prioritized backlog is [`docs/todo.md`](todo.md).
 
 ## Distribution Principle
 
-The macOS package depends on a working app-managed runtime. Python, worker packages and command-line tools are installed and versioned under Application Support; they are not expected to be present in conda or Homebrew. ASR models are managed separately as optional large assets. Packaging, signing, and notarization begin only after this lifecycle passes clean-Mac installation, upgrade, repair, and removal tests.
+The macOS package depends on a working app-managed runtime. Python, worker packages, command-line tools and the default ASR model are installed and versioned under Application Support; they are not expected to be present in conda or Homebrew. Packaging, signing, and notarization begin only after this lifecycle passes clean-Mac installation, upgrade, repair, and removal tests.

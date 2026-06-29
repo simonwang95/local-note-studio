@@ -24,6 +24,8 @@ struct WorkerLogPayload {
 
 const MANAGED_RUNTIME_VERSION: &str = "2026.06-py311";
 const PYTHON_STANDALONE_TAG: &str = "20260610";
+const MANAGED_ASR_MODEL_REPO: &str = "mlx-community/whisper-large-v3-turbo";
+const MANAGED_ASR_MODEL_DIR: &str = "whisper-large-v3-turbo";
 const MANAGED_PIP_FALLBACK_INDEXES: &[(&str, &str)] = &[
     ("清华 PyPI 镜像", "https://pypi.tuna.tsinghua.edu.cn/simple"),
     ("阿里云 PyPI 镜像", "https://mirrors.aliyun.com/pypi/simple"),
@@ -480,6 +482,9 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     install_managed_media_tools(&runtime_root, &version_dir.join("bin"))?;
     emit_log(app, "正在安装/修复 pandoc（EPUB 导出组件）...\n");
     install_managed_pandoc(&runtime_root, &version_dir.join("bin"))?;
+    fs::create_dir_all(root.join("models")).map_err(|err| err.to_string())?;
+    emit_log(app, "正在下载/修复默认 Whisper ASR 模型...\n");
+    install_managed_asr_model(&version_dir.join("bin/python3"), &root)?;
 
     if current.exists() {
         fs::remove_file(&current)
@@ -488,7 +493,6 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(&version_dir, &current).map_err(|err| err.to_string())?;
-    fs::create_dir_all(root.join("models")).map_err(|err| err.to_string())?;
     fs::create_dir_all(root.join("tools")).map_err(|err| err.to_string())?;
     fs::create_dir_all(root.join("state")).map_err(|err| err.to_string())?;
     fs::write(
@@ -776,6 +780,87 @@ fn install_managed_pandoc(
     install_zip_tool(runtime_root, bin_dir, "pandoc", url, checksum)
 }
 
+fn managed_asr_model_repo() -> String {
+    std::env::var("LOCAL_NOTE_STUDIO_ASR_MODEL_REPO")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| MANAGED_ASR_MODEL_REPO.to_string())
+}
+
+fn managed_asr_model_path(root: &Path) -> PathBuf {
+    let repo = managed_asr_model_repo();
+    let name = repo
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MANAGED_ASR_MODEL_DIR);
+    root.join("models").join(name)
+}
+
+fn managed_asr_model_ready(path: &Path) -> bool {
+    path.join("config.json").exists() && directory_contains_extension(path, "safetensors")
+}
+
+fn directory_contains_extension(path: &Path, extension: &str) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let child = entry.path();
+        if child.is_dir() {
+            if directory_contains_extension(&child, extension) {
+                return true;
+            }
+        } else if child
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn install_managed_asr_model(python: &Path, root: &Path) -> Result<(), String> {
+    let repo = managed_asr_model_repo();
+    let model_dir = managed_asr_model_path(root);
+    if managed_asr_model_ready(&model_dir) {
+        return Ok(());
+    }
+    fs::create_dir_all(root.join("models")).map_err(|err| err.to_string())?;
+    let code = r#"
+import sys
+from huggingface_hub import snapshot_download
+
+repo_id = sys.argv[1]
+local_dir = sys.argv[2]
+snapshot_download(
+    repo_id=repo_id,
+    local_dir=local_dir,
+    local_dir_use_symlinks=False,
+    resume_download=True,
+)
+print(local_dir)
+"#;
+    let model_dir_string = model_dir.to_string_lossy().to_string();
+    let output = Command::new(python)
+        .args(["-c", code, &repo, &model_dir_string])
+        .env("HF_HOME", root.join("models").join(".hf-cache"))
+        .env("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() || !managed_asr_model_ready(&model_dir) {
+        return Err(format!(
+            "默认 Whisper ASR 模型下载失败：\n{}{}\n\n排查建议：请确认当前网络可访问 Hugging Face，或用 LOCAL_NOTE_STUDIO_ASR_MODEL_REPO 指定兼容的 MLX Whisper 模型仓库后重试“安装/修复”。",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 fn install_zip_tool(
     runtime_root: &std::path::Path,
     bin_dir: &std::path::Path,
@@ -857,6 +942,7 @@ fn find_named_file(root: &std::path::Path, name: &str) -> Option<PathBuf> {
 fn runtime_status_text(root: &std::path::Path) -> String {
     let python = root.join("runtime/current/bin/python3");
     let bin = root.join("runtime/current/bin");
+    let asr_model = managed_asr_model_path(root);
     let tools = ["python3", "yt-dlp", "ffmpeg", "ffprobe", "pandoc"];
     let packages = [
         ("pypdf", "pypdf"),
@@ -886,6 +972,15 @@ fn runtime_status_text(root: &std::path::Path) -> String {
             if ready { "[OK]" } else { "[MISSING]" }
         ));
     }
+    let asr_ready = managed_asr_model_ready(&asr_model);
+    if !asr_ready {
+        missing_components.push("默认 ASR 模型".to_string());
+    }
+    component_lines.push(format!(
+        "- {} 默认 ASR 模型 ({})",
+        if asr_ready { "[OK]" } else { "[MISSING]" },
+        managed_asr_model_repo()
+    ));
     let status = if !python.exists() {
         "未安装"
     } else if missing_components.is_empty() {
@@ -914,7 +1009,11 @@ fn runtime_status_text(root: &std::path::Path) -> String {
     }
     lines.push("".to_string());
     lines.push(format!("模型目录：{}", root.join("models").display()));
-    lines.push("Whisper 运行库随托管环境安装；ASR 模型文件与运行时分开管理。".to_string());
+    lines.push(format!("默认 ASR 模型：{}", asr_model.display()));
+    lines.push(
+        "Whisper 运行库和默认 ASR 模型会随托管环境安装；也可以在配置页选择其他已有模型目录。"
+            .to_string(),
+    );
     lines.join("\n") + "\n"
 }
 
