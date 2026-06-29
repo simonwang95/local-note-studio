@@ -26,6 +26,7 @@ const MANAGED_RUNTIME_VERSION: &str = "2026.06-py311";
 const PYTHON_STANDALONE_TAG: &str = "20260610";
 const MANAGED_ASR_MODEL_REPO: &str = "mlx-community/whisper-large-v3-turbo";
 const MANAGED_ASR_MODEL_DIR: &str = "whisper-large-v3-turbo";
+const MANAGED_ASR_MODEL_FALLBACK_ENDPOINT: &str = "https://hf-mirror.com";
 const MANAGED_PIP_FALLBACK_INDEXES: &[(&str, &str)] = &[
     ("清华 PyPI 镜像", "https://pypi.tuna.tsinghua.edu.cn/simple"),
     ("阿里云 PyPI 镜像", "https://mirrors.aliyun.com/pypi/simple"),
@@ -489,7 +490,7 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     }
     fs::create_dir_all(root.join("models")).map_err(|err| err.to_string())?;
     emit_log(app, "正在下载/修复默认 Whisper ASR 模型...\n");
-    install_managed_asr_model(&version_dir.join("bin/python3"), &root)?;
+    install_managed_asr_model(app, &version_dir.join("bin/python3"), &root)?;
 
     if current.exists() {
         fs::remove_file(&current)
@@ -842,7 +843,48 @@ fn directory_contains_extension(path: &Path, extension: &str) -> bool {
     false
 }
 
-fn install_managed_asr_model(python: &Path, root: &Path) -> Result<(), String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedAsrEndpointAttempt {
+    label: String,
+    endpoint: Option<String>,
+}
+
+fn managed_asr_endpoint_attempts(
+    local_override: Option<&str>,
+    hf_endpoint: Option<&str>,
+) -> Vec<ManagedAsrEndpointAttempt> {
+    if let Some(endpoint) = local_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return vec![ManagedAsrEndpointAttempt {
+            label: "自定义 Hugging Face 镜像".to_string(),
+            endpoint: Some(endpoint.to_string()),
+        }];
+    }
+    if let Some(endpoint) = hf_endpoint.map(str::trim).filter(|value| !value.is_empty()) {
+        return vec![ManagedAsrEndpointAttempt {
+            label: "当前 HF_ENDPOINT".to_string(),
+            endpoint: Some(endpoint.to_string()),
+        }];
+    }
+    vec![
+        ManagedAsrEndpointAttempt {
+            label: "Hugging Face 官方源".to_string(),
+            endpoint: None,
+        },
+        ManagedAsrEndpointAttempt {
+            label: "hf-mirror.com 镜像".to_string(),
+            endpoint: Some(MANAGED_ASR_MODEL_FALLBACK_ENDPOINT.to_string()),
+        },
+    ]
+}
+
+fn install_managed_asr_model(
+    app: &tauri::AppHandle,
+    python: &Path,
+    root: &Path,
+) -> Result<(), String> {
     let repo = managed_asr_model_repo();
     let model_dir = managed_asr_model_path(root);
     if managed_asr_model_ready(&model_dir) {
@@ -864,20 +906,48 @@ snapshot_download(
 print(local_dir)
 "#;
     let model_dir_string = model_dir.to_string_lossy().to_string();
-    let output = Command::new(python)
-        .args(["-c", code, &repo, &model_dir_string])
-        .env("HF_HOME", root.join("models").join(".hf-cache"))
-        .env("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-        .output()
-        .map_err(|err| err.to_string())?;
-    if !output.status.success() || !managed_asr_model_ready(&model_dir) {
-        return Err(format!(
-            "默认 Whisper ASR 模型下载失败：\n{}{}\n\n排查建议：请确认当前网络可访问 Hugging Face，或用 LOCAL_NOTE_STUDIO_ASR_MODEL_REPO 指定兼容的 MLX Whisper 模型仓库后重试“安装/修复”。",
+    let attempts = managed_asr_endpoint_attempts(
+        std::env::var("LOCAL_NOTE_STUDIO_HF_ENDPOINT")
+            .ok()
+            .as_deref(),
+        std::env::var("HF_ENDPOINT").ok().as_deref(),
+    );
+    let mut attempt_logs = Vec::new();
+    let attempt_count = attempts.len();
+    for (index, attempt) in attempts.into_iter().enumerate() {
+        emit_log(
+            app,
+            &format!("正在通过{}下载默认 Whisper ASR 模型...\n", attempt.label),
+        );
+        let mut command = Command::new(python);
+        command
+            .args(["-c", code, &repo, &model_dir_string])
+            .env("HF_HOME", root.join("models").join(".hf-cache"))
+            .env("HF_HUB_DISABLE_SYMLINKS_WARNING", "1");
+        if let Some(endpoint) = &attempt.endpoint {
+            command.env("HF_ENDPOINT", endpoint);
+        }
+        let output = command.output().map_err(|err| err.to_string())?;
+        let text = format!(
+            "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        ));
+        );
+        if output.status.success() && managed_asr_model_ready(&model_dir) {
+            return Ok(());
+        }
+        attempt_logs.push(format!("--- {} ---\n{}", attempt.label, text.trim()));
+        if index + 1 < attempt_count {
+            emit_log(
+                app,
+                &format!("{}下载失败，准备尝试下一个模型源...\n", attempt.label),
+            );
+        }
     }
-    Ok(())
+    Err(format!(
+        "默认 Whisper ASR 模型下载失败：\n{}\n\n排查建议：请确认当前网络可访问 Hugging Face；应用在未设置端点时会自动重试 hf-mirror.com。特殊网络可用 LOCAL_NOTE_STUDIO_HF_ENDPOINT 指定 Hugging Face 兼容镜像，或用 LOCAL_NOTE_STUDIO_ASR_MODEL_REPO 指定兼容的 MLX Whisper 模型仓库后重试“安装/修复”。",
+        attempt_logs.join("\n\n")
+    ))
 }
 
 fn install_zip_tool(
@@ -1260,5 +1330,34 @@ mod tests {
             tool_url_override_key("ffprobe"),
             "LOCAL_NOTE_STUDIO_FFPROBE_URL"
         );
+    }
+
+    #[test]
+    fn managed_asr_model_download_falls_back_to_hf_mirror() {
+        let attempts = managed_asr_endpoint_attempts(None, None);
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].label, "Hugging Face 官方源");
+        assert_eq!(attempts[0].endpoint, None);
+        assert_eq!(attempts[1].label, "hf-mirror.com 镜像");
+        assert_eq!(
+            attempts[1].endpoint.as_deref(),
+            Some(MANAGED_ASR_MODEL_FALLBACK_ENDPOINT)
+        );
+    }
+
+    #[test]
+    fn managed_asr_model_download_respects_explicit_endpoint() {
+        let attempts = managed_asr_endpoint_attempts(Some(" https://example.test "), None);
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].label, "自定义 Hugging Face 镜像");
+        assert_eq!(
+            attempts[0].endpoint.as_deref(),
+            Some("https://example.test")
+        );
+
+        let attempts = managed_asr_endpoint_attempts(None, Some("https://hf.example"));
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].label, "当前 HF_ENDPOINT");
+        assert_eq!(attempts[0].endpoint.as_deref(), Some("https://hf.example"));
     }
 }

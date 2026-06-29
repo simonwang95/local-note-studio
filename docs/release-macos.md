@@ -9,7 +9,7 @@ For a Mac with the same CPU architecture, the DMG is the only Local Note Studio 
 The package is not completely self-contained:
 
 - The filename architecture must match the tester Mac: `aarch64` is for Apple Silicon; `x86_64` is for Intel. The current development machine only builds `aarch64`.
-- On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`, `ffprobe`, `pandoc`, and the default MLX Whisper model into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts. Runtime/tool downloads prefer HTTP/1.1 before retrying the default protocol to avoid fragile HTTP/2 paths. Locked Python dependencies are first installed from the default pip/PyPI configuration; TLS/proxy/timeout failures automatically retry through fallback PyPI mirrors. If a test network requires a specific mirror, launch the app with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`; if the Python runtime archive itself is mirrored, use `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`; if a tool archive is mirrored, use `LOCAL_NOTE_STUDIO_PANDOC_URL`, `LOCAL_NOTE_STUDIO_FFMPEG_URL`, or `LOCAL_NOTE_STUDIO_FFPROBE_URL`.
+- On first use, “应用托管环境 → 安装/修复” downloads the checksum-pinned Python runtime, worker packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`, `ffprobe`, `pandoc`, and the default MLX Whisper model into `~/Library/Application Support/Local Note Studio/`. The tester therefore needs network access to the configured download hosts. Runtime/tool downloads prefer HTTP/1.1 before retrying the default protocol to avoid fragile HTTP/2 paths. Locked Python dependencies are first installed from the default pip/PyPI configuration; TLS/proxy/timeout failures automatically retry through fallback PyPI mirrors. If a test network requires a specific mirror, launch the app with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`; if the Python runtime archive itself is mirrored, use `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL=https://.../cpython-...tar.gz`; if a tool archive is mirrored, use `LOCAL_NOTE_STUDIO_PANDOC_URL`, `LOCAL_NOTE_STUDIO_FFMPEG_URL`, or `LOCAL_NOTE_STUDIO_FFPROBE_URL`. Default ASR model downloads try Hugging Face first and then `https://hf-mirror.com`; use `LOCAL_NOTE_STUDIO_HF_ENDPOINT=https://...` for another Hugging Face-compatible endpoint.
 - Fresh installs and legacy settings without an explicit runtime preference default to the managed runtime. If the user explicitly selects the advanced Conda backend, that choice, environment name, and optional executable path persist across launches.
 - Finder-launched apps do not inherit the interactive shell's `PATH`. The app augments GUI process paths and searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. Non-standard Conda installations should be configured with an absolute `.../bin/conda` path in the UI.
 - An OpenAI-compatible LLM/OCR service is not bundled. The tester must configure an API URL, key, and model reachable from that Mac. Bilibili private/collection tests additionally need that tester's own Cookie or Chrome Profile; never distribute the developer's credentials.
@@ -31,11 +31,11 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 
 ## Current internal test build (2026-06-29)
 
-- Version: `0.1.12`
+- Version: `0.1.13`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.12_aarch64.dmg`
-- Size: `3,468,525 bytes`
-- SHA-256: `e53b787011fc08e473b76663dc8a4768817d91535f7238f65977fd27b9ba9696`
+- Artifact: `Local Note Studio_0.1.13_aarch64.dmg`
+- Size: `3,452,115 bytes`
+- SHA-256: `0edecb1d2667e903931b96d1240ab3054ea6f33b8a7b8c8fdd76d750b68596e6`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.

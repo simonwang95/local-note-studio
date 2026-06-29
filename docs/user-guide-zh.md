@@ -40,6 +40,15 @@ LOCAL_NOTE_STUDIO_PANDOC_URL="https://你的镜像/pandoc.zip" \
 
 `ffmpeg` / `ffprobe` 工具包也支持相同模式，变量名分别是 `LOCAL_NOTE_STUDIO_FFMPEG_URL` 和 `LOCAL_NOTE_STUDIO_FFPROBE_URL`。这些工具镜像仍会执行 SHA-256 校验，因此镜像内容必须与应用期望的原始压缩包完全一致。
 
+如果失败发生在 “默认 Whisper ASR 模型下载”，通常是当前网络访问 Hugging Face 不稳定。0.1.13 起，应用会先尝试官方 `huggingface.co`，失败后自动重试 `https://hf-mirror.com`。如果测试网络有自己的 Hugging Face 兼容镜像，可以这样启动：
+
+```bash
+LOCAL_NOTE_STUDIO_HF_ENDPOINT="https://hf-mirror.com" \
+  open -a "Local Note Studio"
+```
+
+如果已经在系统环境里设置了 `HF_ENDPOINT`，应用也会尊重它；`LOCAL_NOTE_STUDIO_HF_ENDPOINT` 的优先级更高。需要换模型仓库时仍可使用 `LOCAL_NOTE_STUDIO_ASR_MODEL_REPO` 指定兼容的 MLX Whisper 模型。
+
 全新安装默认使用托管环境。若用户主动切换到“现有 Conda / Python（高级）”，所选后端、环境名和 Conda 可执行文件路径会保存在这台 Mac，后续启动继续使用，不会自动切回托管环境。
 
 从 Finder 启动的 App 不会继承终端 shell 的完整 `PATH`。应用会自动查找 `~/miniforge3`、`~/miniconda3`、`~/anaconda3`、Homebrew 等常见位置；如果 Conda 安装在自定义目录，请在配置页填写完整路径，例如：

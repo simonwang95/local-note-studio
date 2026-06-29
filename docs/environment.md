@@ -121,7 +121,7 @@ Runtime policy:
 3. Install locked Python dependencies with `pip --prefer-binary` and conservative retry/timeout settings. If the default PyPI route fails because of TLS, proxy, DNS, or timeout problems, the installer retries the same locked requirements through fallback PyPI mirrors. Advanced testers can override the first package index by launching with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`.
 4. Manage `ffmpeg` / `ffprobe`; allow `yt-dlp` to update independently because B站 extraction changes frequently.
 5. Install `pandoc` during “安装/修复” so EPUB export works without a separate Homebrew or Conda step. Pandoc is best-effort because it only gates EPUB export: download failures are logged as repair warnings and should not block video, document, OCR, Cookie, ASR, or Bilibili workflows.
-6. Provide the ASR engine (`mlx-whisper` on Apple Silicon) in the runtime, but download or select large model weights separately and show disk usage.
+6. Provide the ASR engine (`mlx-whisper` on Apple Silicon) in the runtime, but download or select large model weights separately and show disk usage. Managed ASR model downloads try Hugging Face first and then `https://hf-mirror.com` when no explicit endpoint is configured; advanced testers can use `LOCAL_NOTE_STUDIO_HF_ENDPOINT=https://...` or standard `HF_ENDPOINT=https://...` for a specific Hugging Face-compatible mirror.
 7. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
 8. Support install progress, integrity checks, upgrade, rollback/repair, and removal. A missing managed component marks the runtime as “需要修复” and should direct users back to Install/Repair rather than Homebrew or pip.
 9. Preserve existing conda selection as an advanced backend.
@@ -135,7 +135,7 @@ Planned ownership matrix:
 | `yt-dlp` | App-managed with an independent update channel |
 | `pandoc` | App-managed during install/repair; best-effort and only required for EPUB export |
 | ASR engine | App-managed Python dependency (`mlx-whisper` on Apple Silicon) |
-| ASR model weights | Default MLX Whisper model installed during managed install/repair; user-selected path remains supported |
+| ASR model weights | Default MLX Whisper model installed during managed install/repair with `hf-mirror.com` fallback; user-selected path remains supported |
 | LLM organization and multimodal OCR | User-configured OpenAI-compatible API |
 | B站 authentication | User account state refreshed from the selected Chrome Profile |
 | macOS `textutil`, Quick Look and Vision | Use system-provided frameworks/tools when available |
