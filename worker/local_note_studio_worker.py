@@ -203,6 +203,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["CONDA_ENV"] = ""
         env.pop("CONDA_EXE", None)
         env["ASR_ENGINE"] = "whisper"
+        env["LOCAL_NOTE_STUDIO_PYTHON_BIN"] = sys.executable
     elif req.conda_env:
         env["CONDA_ENV"] = req.conda_env
     if req.runtime_backend != "managed" and req.conda_bin:
@@ -756,10 +757,7 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         ok, output = probe(
             python_eval_cmd(
                 req,
-                f"import importlib.util, sys; "
-                f"found = importlib.util.find_spec('{package}') is not None; "
-                f"print('installed' if found else 'not installed'); "
-                f"raise SystemExit(0 if found else 1)",
+                f"import {package}; print('import ok')",
             ),
             env,
         )

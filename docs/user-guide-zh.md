@@ -355,6 +355,8 @@ ASR_LOCAL_MODEL="/Users/xxx/Models/whisper-large-v3-turbo"
 
 如果这个路径为空，带字幕的视频仍可能成功；但主动选择“ASR 语音转写优先”时，应用会在下载音频前提示先选择模型目录或点击“安装/修复”下载默认模型。
 
+0.1.14 起，托管环境运行 B站本地 ASR 时，内层 bash 转录脚本会强制复用外层托管 Python，不再受本机 Conda、项目 `.venv` 或 Finder 启动时 `PATH` 差异影响。如果日志仍出现 `mlx-whisper 导入失败`，日志会同时显示实际使用的 Python 路径和底层 ImportError；此时先回到“配置”点击“安装/修复”，再到“校验”运行“检查依赖”。
+
 也可以使用 Qwen3-ASR：
 
 ```bash

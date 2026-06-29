@@ -13,6 +13,7 @@
 - ASR 模型目录可持久保存并默认隐藏，历史重跑不会覆盖当前配置；模型冷却覆盖会同步到各 Qwen 专用变量，UP 主图文批量按真实相邻模型调用执行等待。
 - 源码开发的 Vite 服务通过清理包装器启动，可用 `npm run dev:stop` 停止旧的项目本地开发服务器；桌面任务取消或 App 退出会终止 worker 进程组，减少 Python、ffmpeg、yt-dlp 等子进程残留。
 - 托管环境安装对 Python 运行时/工具下载、PyPI/TLS 和 Hugging Face 模型网络失败增加自动重试和明确诊断；运行时下载优先 HTTP/1.1，锁定依赖版本不放宽，特殊网络可用 `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL`、`LOCAL_NOTE_STUDIO_PIP_INDEX_URL`、`LOCAL_NOTE_STUDIO_HF_ENDPOINT` 或 `LOCAL_NOTE_STUDIO_PANDOC_URL` / `LOCAL_NOTE_STUDIO_FFMPEG_URL` / `LOCAL_NOTE_STUDIO_FFPROBE_URL` 指定可访问镜像；Pandoc 下载失败只标记 EPUB 组件待修复，不阻断其他托管任务。
+- 托管 B站 ASR 内层脚本会复用外层托管 Python，依赖检查对 `mlx-whisper` 使用真实 import，避免状态页显示 OK 但实际转录被本机 Conda、`.venv` 或 PATH 影响。
 - 转换草稿使用系统临时目录，正式目录只接收 Qwen 整理后的 Markdown 和图片资产；需要保留原文的任务会在笔记末尾附完整原文。
 - P0 稳定性与可验证性、P1 日常使用体验均已完成开发；托管运行环境与安装包仍处于开发侧完成、未做干净 Mac 独立验收状态。
 
@@ -130,7 +131,7 @@
 
 ### T-108 应用托管运行环境
 
-状态：实现完成，待干净 Mac 独立验收（2026-06-29）。应用可下载 SHA-256 固定的双架构独立 Python 3.11，安装锁定 Python/ASR 依赖、yt-dlp、ffmpeg/ffprobe 与 Pandoc；运行时/工具下载优先 HTTP/1.1 并保留 SHA-256 校验，锁定 Python 依赖在默认 PyPI 源失败时会自动重试备用镜像并提示网络/代理/TLS 排查，默认 ASR 模型下载会从 Hugging Face 自动回退到 `hf-mirror.com`，工具压缩包支持按组件指定镜像；安装/修复阶段会实时输出进度，Pandoc 下载失败只影响 EPUB 导出并允许其他托管任务继续使用，状态页会检查 Whisper、pandoc 和核心 Python 包；资源按版本原子切换并支持状态、磁盘占用、修复与卸载。安装版默认托管后端；显式 Conda 选择跨启动保留，Finder 启动会补全常见 Conda 路径并允许填写绝对路径。尚需按验收标准在无开发工具机器执行完整任务矩阵。
+状态：实现完成，待干净 Mac 独立验收（2026-06-29）。应用可下载 SHA-256 固定的双架构独立 Python 3.11，安装锁定 Python/ASR 依赖、yt-dlp、ffmpeg/ffprobe 与 Pandoc；运行时/工具下载优先 HTTP/1.1 并保留 SHA-256 校验，锁定 Python 依赖在默认 PyPI 源失败时会自动重试备用镜像并提示网络/代理/TLS 排查，默认 ASR 模型下载会从 Hugging Face 自动回退到 `hf-mirror.com`，工具压缩包支持按组件指定镜像；安装/修复阶段会实时输出进度，Pandoc 下载失败只影响 EPUB 导出并允许其他托管任务继续使用，状态页会通过真实 import 检查 Whisper、pandoc 和核心 Python 包，托管 B站 ASR 内层脚本会复用同一个托管 Python；资源按版本原子切换并支持状态、磁盘占用、修复与卸载。安装版默认托管后端；显式 Conda 选择跨启动保留，Finder 启动会补全常见 Conda 路径并允许填写绝对路径。尚需按验收标准在无开发工具机器执行完整任务矩阵。
 
 - 采用混合模式：`.app` 保持轻量，Python、固定版本依赖和命令行工具由应用安装到 `~/Library/Application Support/Local Note Studio/`。
 - 管理可迁移的 Python 运行时和锁定依赖；管理 `ffmpeg` / `ffprobe`、`pandoc`，允许 `yt-dlp` 独立更新。

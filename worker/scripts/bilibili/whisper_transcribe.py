@@ -111,8 +111,11 @@ def main():
 
     try:
         import mlx_whisper
-    except ImportError:
-        print("错误: 请安装 mlx-whisper: pip install mlx-whisper", file=sys.stderr)
+    except ImportError as err:
+        print("错误: mlx-whisper 导入失败。", file=sys.stderr)
+        print(f"   Python: {sys.executable}", file=sys.stderr)
+        print(f"   详情: {err}", file=sys.stderr)
+        print("   请在托管环境点击“安装/修复”，或在当前 Python 环境安装/修复 mlx-whisper。", file=sys.stderr)
         sys.exit(1)
 
     try:

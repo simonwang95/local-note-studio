@@ -25,6 +25,8 @@ The DMG contains the app and worker, but not an LLM service, personal cookies, i
 
 Pandoc is only required for recursive Markdown-to-EPUB export. If the Pandoc GitHub/CDN download fails during Install/Repair, Local Note Studio keeps the managed runtime usable for video, document, OCR, Cookie, ASR, and Bilibili workflows and marks the runtime as needing repair until Pandoc is installed.
 
+In app-managed mode, nested Bilibili ASR scripts are pinned to the same managed Python executable as the outer worker, so a stray Conda, `.venv`, or GUI `PATH` entry cannot shadow `mlx-whisper` during transcription. Dependency checks use real imports for managed ASR packages instead of only checking package metadata.
+
 Internal test packages are currently ad-hoc signed rather than Developer ID signed/notarized. Verify the published SHA-256 first, then use Control-click → Open. See [macOS release and tester handoff](docs/release-macos.md) and the [Chinese user guide](docs/user-guide-zh.md) for exact steps.
 
 To upgrade an internal build, quit the app and replace `/Applications/Local Note Studio.app` with the copy from the new DMG. Replacing or trashing only the `.app` preserves settings and managed data under `~/Library/Application Support/Local Note Studio/`. Do not remove that directory during a normal upgrade.

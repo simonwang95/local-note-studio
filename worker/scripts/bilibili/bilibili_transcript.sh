@@ -101,7 +101,9 @@ custom_markdown_path() {
 
 # ===== 获取 Python 路径（conda 环境优先） =====
 get_python() {
-    if [ -n "$CONDA_ENV" ] && command -v conda &>/dev/null && conda env list 2>/dev/null | grep -qw "$CONDA_ENV"; then
+    if [ -n "${LOCAL_NOTE_STUDIO_PYTHON_BIN:-}" ] && [ -x "$LOCAL_NOTE_STUDIO_PYTHON_BIN" ]; then
+        echo "$LOCAL_NOTE_STUDIO_PYTHON_BIN"
+    elif [ -n "$CONDA_ENV" ] && command -v conda &>/dev/null && conda env list 2>/dev/null | grep -qw "$CONDA_ENV"; then
         echo "conda"
     elif [ -f "$PROJECT_DIR/.venv/bin/python3" ]; then
         echo "$PROJECT_DIR/.venv/bin/python3"

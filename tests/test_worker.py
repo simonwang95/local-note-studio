@@ -109,7 +109,9 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 managed_cfg = runner.config()
         self.assertEqual(managed_cfg["CONDA_ENV"], "")
         self.assertEqual(runner.bash_command(managed_cfg, pathlib.Path("script.sh"), "url")[0], "bash")
-        self.assertEqual(runner.project_env(managed_cfg)["CONDA_ENV"], "")
+        managed_env = runner.project_env(managed_cfg)
+        self.assertEqual(managed_env["CONDA_ENV"], "")
+        self.assertEqual(managed_env["LOCAL_NOTE_STUDIO_PYTHON_BIN"], sys.executable)
 
         conda_cfg = dict(managed_cfg)
         conda_cfg["CONDA_ENV"] = "course-whisper"

@@ -226,6 +226,8 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
     for key, value in mappings.items():
         if value or key == "CONDA_ENV":
             env[key] = value
+    if not cfg.get("CONDA_ENV"):
+        env["LOCAL_NOTE_STUDIO_PYTHON_BIN"] = sys.executable
     return env
 
 

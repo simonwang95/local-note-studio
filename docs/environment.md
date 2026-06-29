@@ -124,7 +124,8 @@ Runtime policy:
 6. Provide the ASR engine (`mlx-whisper` on Apple Silicon) in the runtime, but download or select large model weights separately and show disk usage. Managed ASR model downloads try Hugging Face first and then `https://hf-mirror.com` when no explicit endpoint is configured; advanced testers can use `LOCAL_NOTE_STUDIO_HF_ENDPOINT=https://...` or standard `HF_ENDPOINT=https://...` for a specific Hugging Face-compatible mirror.
 7. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
 8. Support install progress, integrity checks, upgrade, rollback/repair, and removal. A missing managed component marks the runtime as “需要修复” and should direct users back to Install/Repair rather than Homebrew or pip.
-9. Preserve existing conda selection as an advanced backend.
+9. Pin nested Bilibili ASR scripts to the same managed Python executable as the outer worker, and validate managed ASR packages with real imports so a stale Conda, `.venv`, or GUI `PATH` cannot hide `mlx-whisper` problems.
+10. Preserve existing conda selection as an advanced backend.
 
 Planned ownership matrix:
 

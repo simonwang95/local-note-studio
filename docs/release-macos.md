@@ -14,6 +14,7 @@ The package is not completely self-contained:
 - Finder-launched apps do not inherit the interactive shell's `PATH`. The app augments GUI process paths and searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. Non-standard Conda installations should be configured with an absolute `.../bin/conda` path in the UI.
 - An OpenAI-compatible LLM/OCR service is not bundled. The tester must configure an API URL, key, and model reachable from that Mac. Bilibili private/collection tests additionally need that tester's own Cookie or Chrome Profile; never distribute the developer's credentials.
 - The app bundle does not embed ASR model weights, but managed “安装/修复” downloads the default MLX Whisper model into Application Support together with the runtime. Pandoc is installed during “安装/修复” rather than on first EPUB export.
+- In managed mode, nested Bilibili ASR scripts are pinned to the app-managed Python executable; dependency checks use real `mlx_whisper` imports rather than package metadata probes.
 - Pandoc is best-effort during managed install/repair because it is only required for EPUB export. If the GitHub/CDN route fails, initialization continues for video, document, OCR, Cookie and ASR workflows; status will remain “需要修复” until Pandoc is installed.
 - Internal DMGs are currently unsigned and unnotarized. Give the tester the SHA-256 checksum through a separate trusted channel. After copying the app to `/Applications`, try Control-click → Open first. If Gatekeeper still blocks a package whose checksum they have verified, they may run `xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"` for this internal build only. Public distribution must use Developer ID signing and notarization instead.
 
@@ -31,11 +32,11 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 
 ## Current internal test build (2026-06-29)
 
-- Version: `0.1.13`
+- Version: `0.1.14`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.13_aarch64.dmg`
-- Size: `3,452,115 bytes`
-- SHA-256: `0edecb1d2667e903931b96d1240ab3054ea6f33b8a7b8c8fdd76d750b68596e6`
+- Artifact: `Local Note Studio_0.1.14_aarch64.dmg`
+- Size: `3,453,935 bytes`
+- SHA-256: `d262b0d54e319c3533c39e4684672a6945e3dc0b93bc18ca97e796d303457454`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
 - Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.
