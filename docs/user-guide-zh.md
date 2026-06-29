@@ -15,6 +15,13 @@
 3. 点击“安装/修复”，联网安装校验过的 Python、依赖和媒体工具。
 4. 到“校验”运行“检查依赖”，再执行一个小任务。
 
+如果“安装/修复”在 `pypi.org` 处出现 `SSLEOFError`、证书、代理或超时错误，通常是测试网络把 PyPI/TLS 链路截断，不代表 `pypdf` 等锁定版本不存在。0.1.6 起，应用会用相同的锁定版本自动重试备用 PyPI 镜像。特殊网络仍失败时，可以临时从终端指定可访问镜像再启动 App：
+
+```bash
+LOCAL_NOTE_STUDIO_PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
+  open -a "Local Note Studio"
+```
+
 全新安装默认使用托管环境。若用户主动切换到“现有 Conda / Python（高级）”，所选后端、环境名和 Conda 可执行文件路径会保存在这台 Mac，后续启动继续使用，不会自动切回托管环境。
 
 从 Finder 启动的 App 不会继承终端 shell 的完整 `PATH`。应用会自动查找 `~/miniforge3`、`~/miniconda3`、`~/anaconda3`、Homebrew 等常见位置；如果 Conda 安装在自定义目录，请在配置页填写完整路径，例如：

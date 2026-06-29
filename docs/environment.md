@@ -118,12 +118,13 @@ Runtime policy:
 
 1. Keep the signed `.app` small; it contains the UI, Rust bridge, worker sources, and runtime manager.
 2. Install a relocatable Python runtime and locked dependencies under Application Support without touching system Python.
-3. Manage `ffmpeg` / `ffprobe`; allow `yt-dlp` to update independently because B站 extraction changes frequently.
-4. Install `pandoc` only when EPUB export is first requested.
-5. Provide the ASR engine in the runtime, but download or select large model weights separately and show disk usage.
-6. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
-7. Support install progress, integrity checks, upgrade, rollback/repair, and removal.
-8. Preserve existing conda selection as an advanced backend.
+3. Install locked Python dependencies with `pip --prefer-binary` and conservative retry/timeout settings. If the default PyPI route fails because of TLS, proxy, DNS, or timeout problems, the installer retries the same locked requirements through fallback PyPI mirrors. Advanced testers can override the first package index by launching with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL=https://.../simple`.
+4. Manage `ffmpeg` / `ffprobe`; allow `yt-dlp` to update independently because B站 extraction changes frequently.
+5. Install `pandoc` only when EPUB export is first requested.
+6. Provide the ASR engine in the runtime, but download or select large model weights separately and show disk usage.
+7. Continue using the configured OpenAI-compatible API for LLM organization and multimodal OCR.
+8. Support install progress, integrity checks, upgrade, rollback/repair, and removal.
+9. Preserve existing conda selection as an advanced backend.
 
 Planned ownership matrix:
 

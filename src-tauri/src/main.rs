@@ -24,6 +24,10 @@ struct WorkerLogPayload {
 
 const MANAGED_RUNTIME_VERSION: &str = "2026.06-py311";
 const PYTHON_STANDALONE_TAG: &str = "20260610";
+const MANAGED_PIP_FALLBACK_INDEXES: &[(&str, &str)] = &[
+    ("清华 PyPI 镜像", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+    ("阿里云 PyPI 镜像", "https://mirrors.aliyun.com/pypi/simple"),
+];
 
 #[tauri::command]
 async fn run_worker(app: tauri::AppHandle, request: String) -> Result<String, String> {
@@ -462,18 +466,7 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     if !ensurepip.status.success() {
         return Err(String::from_utf8_lossy(&ensurepip.stderr).to_string());
     }
-    let pip_output = Command::new(version_dir.join("bin/python3"))
-        .args(["-m", "pip", "install", "--disable-pip-version-check", "-r"])
-        .arg(&requirements)
-        .output()
-        .map_err(|err| err.to_string())?;
-    if !pip_output.status.success() {
-        return Err(format!(
-            "托管依赖安装失败：\n{}{}",
-            String::from_utf8_lossy(&pip_output.stdout),
-            String::from_utf8_lossy(&pip_output.stderr)
-        ));
-    }
+    install_managed_python_packages(&version_dir.join("bin/python3"), &requirements)?;
     install_managed_media_tools(&runtime_root, &version_dir.join("bin"))?;
 
     if current.exists() {
@@ -492,6 +485,101 @@ fn manage_runtime_blocking(app: &tauri::AppHandle, action: &str) -> Result<Strin
     )
     .map_err(|err| err.to_string())?;
     Ok(runtime_status_text(&root))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PipIndexAttempt {
+    label: String,
+    index_url: Option<String>,
+}
+
+fn managed_pip_index_attempts() -> Vec<PipIndexAttempt> {
+    let mut attempts = Vec::new();
+    if let Ok(value) = std::env::var("LOCAL_NOTE_STUDIO_PIP_INDEX_URL") {
+        let value = value.trim();
+        if !value.is_empty() {
+            attempts.push(PipIndexAttempt {
+                label: "自定义 PyPI 源".to_string(),
+                index_url: Some(value.to_string()),
+            });
+        }
+    }
+    attempts.push(PipIndexAttempt {
+        label: "默认 PyPI 源".to_string(),
+        index_url: None,
+    });
+    for (label, url) in MANAGED_PIP_FALLBACK_INDEXES {
+        attempts.push(PipIndexAttempt {
+            label: (*label).to_string(),
+            index_url: Some((*url).to_string()),
+        });
+    }
+    attempts
+}
+
+fn install_managed_python_packages(python: &Path, requirements: &Path) -> Result<(), String> {
+    let mut attempt_logs = Vec::new();
+    for attempt in managed_pip_index_attempts() {
+        let mut command = Command::new(python);
+        command
+            .args([
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--prefer-binary",
+                "--retries",
+                "8",
+                "--timeout",
+                "45",
+                "-r",
+            ])
+            .arg(requirements)
+            .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+            .env("PIP_NO_INPUT", "1");
+        if let Some(index_url) = &attempt.index_url {
+            command.args(["--index-url", index_url]);
+        }
+        let output = command.output().map_err(|err| err.to_string())?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() {
+            return Ok(());
+        }
+        attempt_logs.push(format!("--- {} ---\n{}", attempt.label, text.trim()));
+        if attempt.index_url.is_none() && !pip_failure_looks_network_related(&text) {
+            break;
+        }
+    }
+
+    Err(format!(
+        "托管依赖安装失败：\n{}\n\n排查建议：当前失败通常是网络、代理或 TLS/证书链路问题，而不是依赖版本不存在。请换一个网络，关闭会拦截 HTTPS 的代理/安全软件，或在终端启动前设置 LOCAL_NOTE_STUDIO_PIP_INDEX_URL 指向可访问的 PyPI 镜像后重试“安装/修复”。",
+        attempt_logs.join("\n\n")
+    ))
+}
+
+fn pip_failure_looks_network_related(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "could not fetch url",
+        "ssl",
+        "ssleoferror",
+        "certificate",
+        "connection",
+        "connectionpool",
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "proxy",
+        "network is unreachable",
+        "name or service not known",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn install_standalone_python(
@@ -876,5 +964,38 @@ mod tests {
             find_conda_executable(home, Some("~/custom-conda/bin/conda")),
             Some(home.join("custom-conda/bin/conda"))
         );
+    }
+
+    #[test]
+    fn managed_pip_install_uses_default_then_fallback_indexes() {
+        let attempts = managed_pip_index_attempts();
+        assert!(attempts.len() >= 3);
+        let default_position = attempts
+            .iter()
+            .position(|attempt| attempt.label == "默认 PyPI 源" && attempt.index_url.is_none())
+            .expect("default PyPI attempt");
+        let tuna_position = attempts
+            .iter()
+            .position(|attempt| {
+                attempt.index_url.as_deref() == Some("https://pypi.tuna.tsinghua.edu.cn/simple")
+            })
+            .expect("tuna mirror attempt");
+        let aliyun_position = attempts
+            .iter()
+            .position(|attempt| {
+                attempt.index_url.as_deref() == Some("https://mirrors.aliyun.com/pypi/simple")
+            })
+            .expect("aliyun mirror attempt");
+        assert!(default_position < tuna_position);
+        assert!(tuna_position < aliyun_position);
+    }
+
+    #[test]
+    fn pip_network_error_detection_matches_ssl_fetch_failures() {
+        let text = "Could not fetch URL https://pypi.org/simple/pypdf/: There was a problem confirming the ssl certificate: SSLEOFError";
+        assert!(pip_failure_looks_network_related(text));
+        assert!(!pip_failure_looks_network_related(
+            "ERROR: Could not find a version that satisfies the requirement definitely-not-real==0"
+        ));
     }
 }
