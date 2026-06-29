@@ -26,7 +26,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-${BILIBILI_OUTPUT_DIR:-$PROJECT_DIR/notes/_inbox/bilib
 CACHE_DIR="${CACHE_DIR:-$PROJECT_DIR/cache/audio}"
 MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-$PROJECT_DIR/models}"
 BROWSER_TYPE="${BROWSER_TYPE:-chromium}"
-CONDA_ENV="${CONDA_ENV:-course-whisper}"
+CONDA_ENV="${CONDA_ENV-course-whisper}"
 ENABLE_OPENCC="${ENABLE_OPENCC:-true}"
 FORCE_ASR="${FORCE_ASR:-false}"
 BILIBILI_PREFER_WEB_SUBTITLE="${BILIBILI_PREFER_WEB_SUBTITLE:-false}"
@@ -101,7 +101,7 @@ custom_markdown_path() {
 
 # ===== 获取 Python 路径（conda 环境优先） =====
 get_python() {
-    if command -v conda &>/dev/null && conda env list 2>/dev/null | grep -qw "$CONDA_ENV"; then
+    if [ -n "$CONDA_ENV" ] && command -v conda &>/dev/null && conda env list 2>/dev/null | grep -qw "$CONDA_ENV"; then
         echo "conda"
     elif [ -f "$PROJECT_DIR/.venv/bin/python3" ]; then
         echo "$PROJECT_DIR/.venv/bin/python3"

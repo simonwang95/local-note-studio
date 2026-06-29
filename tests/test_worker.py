@@ -49,6 +49,7 @@ class RequestAndCommandContractTests(unittest.TestCase):
 
     def test_explicit_conda_executable_is_used_by_worker_commands(self):
         req = worker.TaskRequest.from_mapping({
+            "runtime_backend": "conda",
             "task": "source-file",
             "conda_env": "course-whisper",
             "conda_bin": "/Users/tester/miniforge3/bin/conda",
@@ -57,6 +58,25 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(worker.conda_cmd(req), req.conda_bin)
         self.assertEqual(worker.python_eval_cmd(req, "print('ok')")[0], req.conda_bin)
         self.assertEqual(worker.build_env(req)["CONDA_EXE"], req.conda_bin)
+
+    def test_managed_runtime_clears_legacy_conda_environment(self):
+        req = worker.TaskRequest(task="bilibili-url", runtime_backend="managed")
+        with mock.patch.object(worker, "load_env_file", return_value={"CONDA_ENV": "course-whisper", "CONDA_EXE": "/tmp/conda"}):
+            env = worker.build_env(req)
+        self.assertEqual(env["CONDA_ENV"], "")
+        self.assertNotIn("CONDA_EXE", env)
+
+    def test_bilibili_runner_preserves_conda_only_when_explicit(self):
+        with mock.patch.object(runner, "load_env_file", return_value={"CONDA_ENV": "course-whisper"}):
+            with mock.patch.dict("os.environ", {"CONDA_ENV": ""}, clear=True):
+                managed_cfg = runner.config()
+        self.assertEqual(managed_cfg["CONDA_ENV"], "")
+        self.assertEqual(runner.bash_command(managed_cfg, pathlib.Path("script.sh"), "url")[0], "bash")
+        self.assertEqual(runner.project_env(managed_cfg)["CONDA_ENV"], "")
+
+        conda_cfg = dict(managed_cfg)
+        conda_cfg["CONDA_ENV"] = "course-whisper"
+        self.assertEqual(runner.bash_command(conda_cfg, pathlib.Path("script.sh"), "url")[:5], ["conda", "run", "--no-capture-output", "-n", "course-whisper"])
 
     def test_cookie_refresh_rejects_broad_profile_and_uses_app_data_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -104,6 +124,31 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertIn("点击“安装/修复”补齐托管环境组件", result)
         self.assertNotIn("brew install pandoc", result)
         self.assertNotIn("python3 -m pip install", result)
+
+    def test_bilibili_access_uses_default_app_cookie_after_refresh(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_path = pathlib.Path(temp_dir) / "bili_cookies.txt"
+            cookie_path.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".bilibili.com\tTRUE\t/\tFALSE\t2147483647\tSESSDATA\tfixture\n"
+                ".bilibili.com\tTRUE\t/\tFALSE\t2147483647\tDedeUserID\t42\n",
+                encoding="utf-8",
+            )
+            response = mock.Mock()
+            response.__enter__ = mock.Mock(return_value=response)
+            response.__exit__ = mock.Mock(return_value=None)
+            response.read.return_value = b'{"code":0,"data":{"isLogin":true,"mid":42,"uname":"tester"}}'
+            opener = mock.Mock()
+            opener.open.return_value = response
+            req = worker.TaskRequest(task="bilibili-access-check", runtime_backend="managed")
+
+            with mock.patch.object(worker, "default_bilibili_cookie_path", return_value=cookie_path):
+                with mock.patch.object(worker.urllib.request, "build_opener", return_value=opener):
+                    login = worker.bilibili_login_data(req)
+
+            self.assertEqual(login["mid"], 42)
+            request = opener.open.call_args.args[0]
+            self.assertIn("nav", request.full_url)
 
     def test_empty_output_snapshot_never_scans_the_current_directory(self):
         with mock.patch.object(pathlib.Path, "rglob", side_effect=AssertionError("unexpected directory scan")):

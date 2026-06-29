@@ -181,7 +181,7 @@ def config() -> dict[str, str]:
     values = dict(DEFAULTS)
     values.update(load_env_file(ROOT / "env.local"))
     for key in DEFAULTS:
-        if os.environ.get(key):
+        if key in os.environ:
             values[key] = os.environ[key]
     values["BILIBILI_FAV_MEDIA_ID"] = values.get("BILIBILI_FAV_MEDIA_ID") or values.get("FAV_MEDIA_ID", "")
     values["BILIBILI_COOKIES_FILE"] = values.get("BILIBILI_COOKIES_FILE") or values.get("BILI_COOKIE_FILE", "")
@@ -221,9 +221,10 @@ def project_env(cfg: dict[str, str]) -> dict[str, str]:
         "ENABLE_DIALOGUE_DETECTION": cfg["ENABLE_DIALOGUE_DETECTION"],
         "KEEP_ORIGINAL_SUBTITLES": cfg["KEEP_ORIGINAL_SUBTITLES"],
         "OVERWRITE_OUTPUT": cfg["OVERWRITE_OUTPUT"],
+        "CONDA_ENV": cfg["CONDA_ENV"],
     }
     for key, value in mappings.items():
-        if value:
+        if value or key == "CONDA_ENV":
             env[key] = value
     return env
 

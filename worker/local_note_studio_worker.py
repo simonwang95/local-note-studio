@@ -194,9 +194,12 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
     env["PYTHONUNBUFFERED"] = "1"
-    if req.conda_env:
+    if req.runtime_backend == "managed":
+        env["CONDA_ENV"] = ""
+        env.pop("CONDA_EXE", None)
+    elif req.conda_env:
         env["CONDA_ENV"] = req.conda_env
-    if req.conda_bin:
+    if req.runtime_backend != "managed" and req.conda_bin:
         env["CONDA_EXE"] = req.conda_bin
     if req.api_base:
         env["DEFAULT_LLM_API_BASE"] = req.api_base
@@ -417,7 +420,14 @@ def bilibili_error_category(code: object = None, message: str = "", http_status:
 
 def bilibili_json(req: TaskRequest, url: str, referer: str = "https://www.bilibili.com/") -> dict[str, Any]:
     local_env = load_env_file(WORKER_DIR / "env.local")
-    raw_cookie = req.cookies.strip() or local_env.get("BILIBILI_COOKIES_FILE", "") or local_env.get("BILI_COOKIE_FILE", "")
+    runtime_env = build_env(req)
+    raw_cookie = (
+        req.cookies.strip()
+        or runtime_env.get("BILIBILI_COOKIES_FILE", "")
+        or runtime_env.get("BILI_COOKIE_FILE", "")
+        or local_env.get("BILIBILI_COOKIES_FILE", "")
+        or local_env.get("BILI_COOKIE_FILE", "")
+    )
     handlers: list[urllib.request.BaseHandler] = []
     if raw_cookie:
         cookie_path = resolve_local_path(raw_cookie)

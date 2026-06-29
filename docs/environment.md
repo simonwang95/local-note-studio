@@ -102,7 +102,7 @@ QR login remains an optional later enhancement; Chrome Profile refresh is the cu
 
 ## App-Managed Runtime
 
-The managed runtime is implemented for the daily-use package and is initialized from the desktop UI. It is designed to make the main workflows usable without requiring conda or Homebrew; independent clean-Mac acceptance remains a release gate. Managed task requests deliberately clear saved Conda fields so a previous advanced configuration cannot leak into managed execution.
+The managed runtime is implemented for the daily-use package and is initialized from the desktop UI. It is designed to make the main workflows usable without requiring conda or Homebrew; independent clean-Mac acceptance remains a release gate. Managed task requests deliberately clear saved Conda fields and legacy `CONDA_ENV` values before invoking nested Bilibili scripts so a previous advanced configuration cannot leak into managed execution.
 
 Target layout:
 

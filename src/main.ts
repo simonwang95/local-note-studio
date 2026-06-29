@@ -741,6 +741,7 @@ async function refreshBilibiliCookies(): Promise<void> {
     await invokeWorker({ ...payload(false), task: "refresh-bilibili-cookies", source: "", output_dir: "" });
     appendOutput("\nCookie 导出完成，正在校验登录态...\n");
     const checkResult = await invokeWorker({ ...payload(false), task: "bilibili-cookie-status", source: "", output_dir: "" });
+    appendOutput(checkResult);
     setState(checkResult.includes("[OK] Bilibili cookie file") ? "Cookie 刷新完成" : "Cookie 需要关注");
   } catch (error) {
     appendOutput(`\n刷新失败：${errorMessage(error)}\n`);
