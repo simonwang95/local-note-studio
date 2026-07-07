@@ -4,6 +4,7 @@ import { open, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
 import { createAppTabs } from "./app-shell";
 import { ManifestViewStateStore } from "./manifest-state";
 import {
+  clearRecentValues,
   createHistoryEntry,
   historyReplayRequest,
   loadTaskHistory,
@@ -12,6 +13,7 @@ import {
   filterTaskHistory,
   rememberRecentValue,
   progressFromLine,
+  removeRecentValue,
   removeHistoryEntry,
   runtimeSelectionPayload,
   saveTaskHistory,
@@ -367,6 +369,10 @@ app.innerHTML = `
               <button id="chooseOutputDir" type="button" class="secondary compact-button">选择</button>
             </div>
             <datalist id="recentOutputDirs">${recentOptions("outputDir")}</datalist>
+            <div class="recent-actions">
+              <button id="deleteOutputDirRecent" type="button" class="secondary link-button">删除当前记录</button>
+              <button id="clearOutputDirRecent" type="button" class="secondary link-button">清空输出目录记录</button>
+            </div>
           </label>
           <label id="outputFilenameField" class="hidden">
             输出文件名（可选）
@@ -422,7 +428,7 @@ app.innerHTML = `
             <span>隐身模式</span>
             <input id="incognitoMode" type="checkbox" ${savedSettings.incognitoMode ? "checked" : ""} />
           </label>
-          <p class="field-note full-row incognito-note">开启后仍会生成笔记并保留任务历史，但不会读取或写入 source/video/quickread Manifest、关键帧 Manifest、B站已处理列表和批量失败状态。</p>
+          <p class="field-note full-row incognito-note">开启后仍会生成笔记并保留任务历史，但不会读取或写入 source/video/quickread Manifest、关键帧 Manifest、B站已处理列表、批量失败状态和最近输入/输出记录。</p>
           <label id="stockTermsField" class="checkbox-field">
             <span>A股术语校验</span>
             <input id="stockTerms" type="checkbox" ${savedSettings.stockTerms ? "checked" : ""} />
@@ -456,6 +462,10 @@ app.innerHTML = `
             <button id="chooseSourceDir" type="button" class="secondary compact-button">目录</button>
           </div>
           <datalist id="recentSources">${recentOptions("source")}</datalist>
+          <div class="recent-actions">
+            <button id="deleteSourceRecent" type="button" class="secondary link-button">删除当前记录</button>
+            <button id="clearSourceRecent" type="button" class="secondary link-button">清空输入源记录</button>
+          </div>
         </label>
         <p id="taskHint" class="field-note"></p>
         <details class="advanced-options">
@@ -610,6 +620,10 @@ document.querySelector<HTMLButtonElement>("#toggleChromeProfile")?.addEventListe
 );
 document.querySelector<HTMLInputElement>("#outputDir")?.addEventListener("blur", () => rememberTaskPath("outputDir"));
 document.querySelector<HTMLInputElement>("#source")?.addEventListener("blur", () => rememberTaskPath("source"));
+document.querySelector<HTMLButtonElement>("#deleteOutputDirRecent")?.addEventListener("click", () => deleteCurrentRecentPath("outputDir"));
+document.querySelector<HTMLButtonElement>("#clearOutputDirRecent")?.addEventListener("click", () => clearRecentPathList("outputDir"));
+document.querySelector<HTMLButtonElement>("#deleteSourceRecent")?.addEventListener("click", () => deleteCurrentRecentPath("source"));
+document.querySelector<HTMLButtonElement>("#clearSourceRecent")?.addEventListener("click", () => clearRecentPathList("source"));
 
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
@@ -649,10 +663,37 @@ function renderRecentValues(kind: RecentValueKind): void {
   if (target) target.innerHTML = recentOptions(kind);
 }
 
+function recentKindLabel(kind: RecentValueKind): string {
+  return kind === "outputDir" ? "输出目录" : "输入源";
+}
+
 function rememberTaskPath(kind: RecentValueKind): void {
+  if (checkboxChecked("incognitoMode")) return;
   const inputId = kind === "outputDir" ? "outputDir" : "source";
   rememberRecentValue(kind, inputValue(inputId));
   renderRecentValues(kind);
+}
+
+function deleteCurrentRecentPath(kind: RecentValueKind): void {
+  const inputId = kind === "outputDir" ? "outputDir" : "source";
+  const value = inputValue(inputId);
+  if (!value) {
+    setState(`没有可删除的当前${recentKindLabel(kind)}记录`);
+    return;
+  }
+  const before = loadRecentValues(kind);
+  const next = removeRecentValue(kind, value);
+  renderRecentValues(kind);
+  setState(next.length === before.length ? `当前${recentKindLabel(kind)}不在最近记录中` : `已删除当前${recentKindLabel(kind)}记录`);
+}
+
+function clearRecentPathList(kind: RecentValueKind): void {
+  const label = recentKindLabel(kind);
+  const confirmed = window.confirm(`确定清空最近${label}记录吗？\n\n只清空本机界面记录，不会删除任何文件或任务历史。`);
+  if (!confirmed) return;
+  clearRecentValues(kind);
+  renderRecentValues(kind);
+  setState(`最近${label}记录已清空`);
 }
 
 function toggleSecretField(inputId: string, buttonId: string, label: string): void {

@@ -11,6 +11,9 @@ globalThis.localStorage = {
   setItem(key, value) {
     storage.set(key, String(value));
   },
+  removeItem(key) {
+    storage.delete(key);
+  },
 };
 
 const sourceUrl = new URL("../src/p1.ts", import.meta.url);
@@ -60,6 +63,10 @@ assert.deepEqual(history.rememberRecentValue("outputDir", "/tmp/out"), ["/tmp/ou
 assert.deepEqual(history.rememberRecentValue("source", "/tmp/source.pdf"), ["/tmp/source.pdf"]);
 assert.deepEqual(history.loadRecentValues("outputDir"), ["/tmp/out", "/tmp/second"]);
 assert.deepEqual(history.loadRecentValues("source"), ["/tmp/source.pdf"]);
+assert.deepEqual(history.removeRecentValue("outputDir", "/tmp/out"), ["/tmp/second"]);
+assert.deepEqual(history.loadRecentValues("outputDir"), ["/tmp/second"]);
+history.clearRecentValues("outputDir");
+assert.deepEqual(history.loadRecentValues("outputDir"), []);
 assert.deepEqual(history.migrateRuntimePreference({ runtimeBackend: "conda", condaEnv: "course-whisper" }), {
   runtimeBackend: "managed",
   condaEnv: "course-whisper",

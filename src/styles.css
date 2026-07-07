@@ -273,6 +273,13 @@ label > .input-row {
   gap: 8px;
 }
 
+.recent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 input,
 select {
   width: 100%;
@@ -315,6 +322,18 @@ button:disabled {
 button.secondary {
   background: #fffdf9;
   color: #9d4829;
+}
+
+button.link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #9d4829;
+  text-decoration: underline;
+}
+
+button.link-button:hover {
+  color: #6f321f;
 }
 
 button.danger-outline {

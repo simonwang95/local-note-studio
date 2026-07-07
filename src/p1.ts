@@ -181,6 +181,17 @@ export function rememberRecentValue(kind: RecentValueKind, value: unknown): stri
   return next;
 }
 
+export function removeRecentValue(kind: RecentValueKind, value: unknown): string[] {
+  const normalized = normalizeRecentValue(value);
+  const next = normalized ? loadRecentValues(kind).filter((item) => item !== normalized) : loadRecentValues(kind);
+  saveRecentValues(kind, next);
+  return next;
+}
+
+export function clearRecentValues(kind: RecentValueKind): void {
+  localStorage.removeItem(recentValueKeys[kind]);
+}
+
 function dedupeRecentValues(values: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];

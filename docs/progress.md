@@ -2,7 +2,7 @@
 
 ## 2026-07-07
 
-- Added independent recent-value history for the task output directory and input source fields. The UI now offers recent values through each field's suggestions, updates them on path selection, blur, preview, and task run, keeps the lists separate and local-only, and covers the behavior with frontend compatibility tests.
+- Added independent recent-value history for the task output directory and input source fields. The UI now offers recent values through each field's suggestions, updates them on path selection, blur, preview, and task run, supports deleting the current record or clearing each list, skips writes while incognito mode is enabled, keeps the lists separate and local-only, and covers the behavior with frontend compatibility tests.
 
 ## 2026-06-29
 
