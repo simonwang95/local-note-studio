@@ -7,8 +7,10 @@ import {
   createHistoryEntry,
   historyReplayRequest,
   loadTaskHistory,
+  loadRecentValues,
   migrateRuntimePreference,
   filterTaskHistory,
+  rememberRecentValue,
   progressFromLine,
   removeHistoryEntry,
   runtimeSelectionPayload,
@@ -18,6 +20,7 @@ import {
   type ProgressEvent,
   type TaskHistoryEntry,
   type TaskHistoryStatus,
+  type RecentValueKind,
 } from "./p1";
 import "./styles.css";
 
@@ -360,9 +363,10 @@ app.innerHTML = `
           <label>
             本次输出目录
             <div class="input-row">
-              <input id="outputDir" placeholder="/Users/xxx/Notes/Net/BiliBili" />
+              <input id="outputDir" list="recentOutputDirs" placeholder="/Users/xxx/Notes/Net/BiliBili" />
               <button id="chooseOutputDir" type="button" class="secondary compact-button">选择</button>
             </div>
+            <datalist id="recentOutputDirs">${recentOptions("outputDir")}</datalist>
           </label>
           <label id="outputFilenameField" class="hidden">
             输出文件名（可选）
@@ -447,10 +451,11 @@ app.innerHTML = `
         <label>
           输入源 URL、文件路径或目录路径
           <div class="input-row">
-            <input id="source" placeholder="https://www.bilibili.com/video/BV... 或 /path/to/file.pdf" />
+            <input id="source" list="recentSources" placeholder="https://www.bilibili.com/video/BV... 或 /path/to/file.pdf" />
             <button id="chooseSourceFile" type="button" class="secondary compact-button">文件</button>
             <button id="chooseSourceDir" type="button" class="secondary compact-button">目录</button>
           </div>
+          <datalist id="recentSources">${recentOptions("source")}</datalist>
         </label>
         <p id="taskHint" class="field-note"></p>
         <details class="advanced-options">
@@ -603,6 +608,8 @@ document.querySelector<HTMLButtonElement>("#toggleCookies")?.addEventListener("c
 document.querySelector<HTMLButtonElement>("#toggleChromeProfile")?.addEventListener("click", () =>
   toggleSecretField("chromeProfile", "toggleChromeProfile", "Chrome 个人资料路径"),
 );
+document.querySelector<HTMLInputElement>("#outputDir")?.addEventListener("blur", () => rememberTaskPath("outputDir"));
+document.querySelector<HTMLInputElement>("#source")?.addEventListener("blur", () => rememberTaskPath("source"));
 
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
@@ -628,6 +635,24 @@ function setInputValue(id: string, value: string): void {
   if (!input) return;
   input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function recentOptions(kind: RecentValueKind): string {
+  return loadRecentValues(kind)
+    .map((value) => `<option value="${escapeHtml(value)}"></option>`)
+    .join("");
+}
+
+function renderRecentValues(kind: RecentValueKind): void {
+  const targetId = kind === "outputDir" ? "recentOutputDirs" : "recentSources";
+  const target = document.querySelector<HTMLDataListElement>(`#${targetId}`);
+  if (target) target.innerHTML = recentOptions(kind);
+}
+
+function rememberTaskPath(kind: RecentValueKind): void {
+  const inputId = kind === "outputDir" ? "outputDir" : "source";
+  rememberRecentValue(kind, inputValue(inputId));
+  renderRecentValues(kind);
 }
 
 function toggleSecretField(inputId: string, buttonId: string, label: string): void {
@@ -854,6 +879,8 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): 
   }
 
   const request = payload(dryRun, retryFailed);
+  rememberTaskPath("outputDir");
+  if (inputValue("source")) rememberTaskPath("source");
   if (!dryRun) {
     activeHistoryEntry = createHistoryEntry(task, request as Record<string, unknown>, retryOf);
     taskHistory = upsertHistoryEntry(taskHistory, activeHistoryEntry);
@@ -978,6 +1005,8 @@ async function choosePath(
     const path = Array.isArray(selected) ? selected[0] : selected;
     if (typeof path === "string" && path) {
       setInputValue(targetId, path);
+      if (targetId === "outputDir") rememberTaskPath("outputDir");
+      if (targetId === "source") rememberTaskPath("source");
       if (targetId !== "source") saveSettings();
     }
   } catch (error) {

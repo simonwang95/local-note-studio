@@ -53,6 +53,13 @@ const sampleEntries = [
 ];
 assert.deepEqual(history.filterTaskHistory(sampleEntries, "failed").map((item) => item.id), ["failed"]);
 assert.deepEqual(history.removeHistoryEntry(sampleEntries, "done").map((item) => item.id), ["failed"]);
+assert.deepEqual(history.loadRecentValues("outputDir"), []);
+assert.deepEqual(history.rememberRecentValue("outputDir", " /tmp/out "), ["/tmp/out"]);
+assert.deepEqual(history.rememberRecentValue("outputDir", "/tmp/second"), ["/tmp/second", "/tmp/out"]);
+assert.deepEqual(history.rememberRecentValue("outputDir", "/tmp/out"), ["/tmp/out", "/tmp/second"]);
+assert.deepEqual(history.rememberRecentValue("source", "/tmp/source.pdf"), ["/tmp/source.pdf"]);
+assert.deepEqual(history.loadRecentValues("outputDir"), ["/tmp/out", "/tmp/second"]);
+assert.deepEqual(history.loadRecentValues("source"), ["/tmp/source.pdf"]);
 assert.deepEqual(history.migrateRuntimePreference({ runtimeBackend: "conda", condaEnv: "course-whisper" }), {
   runtimeBackend: "managed",
   condaEnv: "course-whisper",

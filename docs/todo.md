@@ -1,6 +1,6 @@
 # Local Note Studio 待办清单
 
-更新时间：2026-06-29
+更新时间：2026-07-07
 
 本文档是项目待办事项的唯一维护入口。`docs/progress.md` 记录已经完成的能力，`docs/development-plan.md` 只描述阶段方向，不再分别维护重复清单。
 
@@ -14,6 +14,7 @@
 - 源码开发的 Vite 服务通过清理包装器启动，可用 `npm run dev:stop` 停止旧的项目本地开发服务器；桌面任务取消或 App 退出会终止 worker 进程组，减少 Python、ffmpeg、yt-dlp 等子进程残留。
 - 托管环境安装对 Python 运行时/工具下载、PyPI/TLS 和 Hugging Face 模型网络失败增加自动重试和明确诊断；运行时下载优先 HTTP/1.1，锁定依赖版本不放宽，特殊网络可用 `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL`、`LOCAL_NOTE_STUDIO_PIP_INDEX_URL`、`LOCAL_NOTE_STUDIO_HF_ENDPOINT` 或 `LOCAL_NOTE_STUDIO_PANDOC_URL` / `LOCAL_NOTE_STUDIO_FFMPEG_URL` / `LOCAL_NOTE_STUDIO_FFPROBE_URL` 指定可访问镜像；Pandoc 下载失败只标记 EPUB 组件待修复，不阻断其他托管任务。
 - 托管 B站 ASR 内层脚本会复用外层托管 Python，依赖检查对 `mlx-whisper` 使用真实 import，避免状态页显示 OK 但实际转录被本机 Conda、`.venv` 或 PATH 影响。
+- 任务页分别保存最近使用的“本次输出目录”和“输入源 URL/文件/目录”，两个列表互不覆盖，仅保存在本机 UI `localStorage`。
 - 转换草稿使用系统临时目录，正式目录只接收 Qwen 整理后的 Markdown 和图片资产；需要保留原文的任务会在笔记末尾附完整原文。
 - P0 稳定性与可验证性、P1 日常使用体验均已完成开发；托管运行环境与安装包仍处于开发侧完成、未做干净 Mac 独立验收状态。
 

@@ -69,6 +69,13 @@ export function historyReplayRequest(request: Record<string, unknown>): Record<s
 const historyKey = "local-note-studio.task-history.v1";
 const maxEntries = 100;
 const maxLogChars = 200_000;
+const recentValueKeys = {
+  outputDir: "local-note-studio.recent-output-dirs.v1",
+  source: "local-note-studio.recent-sources.v1",
+} as const;
+const maxRecentValues = 12;
+
+export type RecentValueKind = keyof typeof recentValueKeys;
 
 export function createHistoryEntry(task: string, request: Record<string, unknown>, retryOf?: string): TaskHistoryEntry {
   return {
@@ -142,6 +149,49 @@ export function removeHistoryEntry(entries: TaskHistoryEntry[], id: string): Tas
 
 export function filterTaskHistory(entries: TaskHistoryEntry[], status: TaskHistoryStatus | "all"): TaskHistoryEntry[] {
   return status === "all" ? entries : entries.filter((entry) => entry.status === status);
+}
+
+export function normalizeRecentValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function loadRecentValues(kind: RecentValueKind): string[] {
+  try {
+    const raw = localStorage.getItem(recentValueKeys[kind]);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    const values = dedupeRecentValues(parsed.map(normalizeRecentValue).filter(Boolean));
+    if (raw !== JSON.stringify(values)) saveRecentValues(kind, values);
+    return values;
+  } catch {
+    return [];
+  }
+}
+
+export function saveRecentValues(kind: RecentValueKind, values: string[]): void {
+  localStorage.setItem(recentValueKeys[kind], JSON.stringify(dedupeRecentValues(values)));
+}
+
+export function rememberRecentValue(kind: RecentValueKind, value: unknown): string[] {
+  const normalized = normalizeRecentValue(value);
+  const current = loadRecentValues(kind);
+  if (!normalized) return current;
+  const next = dedupeRecentValues([normalized, ...current]);
+  saveRecentValues(kind, next);
+  return next;
+}
+
+function dedupeRecentValues(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = normalizeRecentValue(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+    if (result.length >= maxRecentValues) break;
+  }
+  return result;
 }
 
 export function structuredLine<T>(text: string, prefix: string): T | null {

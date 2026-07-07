@@ -1,5 +1,9 @@
 # Progress
 
+## 2026-07-07
+
+- Added independent recent-value history for the task output directory and input source fields. The UI now offers recent values through each field's suggestions, updates them on path selection, blur, preview, and task run, keeps the lists separate and local-only, and covers the behavior with frontend compatibility tests.
+
 ## 2026-06-29
 
 - Confirmed the current implementation has completed the P0 reliability and P1 daily-use backlog, including automated regression checks, Bilibili favorites/series UX, restricted-content diagnostics, output integrity gates, task history/recovery, output actions, Manifest UI, OCR progress, semantic keyframes, browser-state capture, long-batch tuning, incognito mode, processing-record management, and the desktop tab workspace.
