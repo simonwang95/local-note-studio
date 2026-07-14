@@ -3,6 +3,7 @@
 ## 2026-07-14
 
 - Fixed output integrity checks for generated Markdown image paths whose local asset directories contain balanced parentheses, such as Bilibili opus titles like `7.8(复盘)`. The checker now scans inline image links instead of truncating at the first `)`, and regression coverage verifies these paths resolve correctly.
+- Built and verified the `0.1.15` arm64 DMG with SHA-256 `0464c62f26a2025ef24e610eb6556a0e6162eef995871c927b2a05ed64544578`.
 
 ## 2026-07-07
 

@@ -30,16 +30,16 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
-## Current internal test build (2026-06-29)
+## Current internal test build (2026-07-14)
 
-- Version: `0.1.14`
+- Version: `0.1.15`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.14_aarch64.dmg`
-- Size: `3,453,935 bytes`
-- SHA-256: `d262b0d54e319c3533c39e4684672a6945e3dc0b93bc18ca97e796d303457454`
+- Artifact: `Local Note Studio_0.1.15_aarch64.dmg`
+- Size: `3,454,832 bytes`
+- SHA-256: `0464c62f26a2025ef24e610eb6556a0e6162eef995871c927b2a05ed64544578`
 - Build type: optimized release
 - Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
-- Verification: `hdiutil verify` passed; the mounted app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.
+- Verification: `npm run release:check` and `hdiutil verify` passed; the app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.
 
 This record identifies the current internal artifact only. Rebuilds may produce a different checksum; update this section before handing off a newer DMG.
 
