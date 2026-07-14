@@ -1556,8 +1556,61 @@ def emit_task_result(req: TaskRequest, before: dict[pathlib.Path, tuple[int, int
     print("TASK_RESULT_JSON:" + json.dumps(result, ensure_ascii=False))
 
 
+def find_unescaped(text: str, needle: str, start: int) -> int:
+    index = start
+    while True:
+        index = text.find(needle, index)
+        if index < 0:
+            return -1
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return index
+        index += 1
+
+
+def markdown_inline_image_targets(markdown: str) -> list[str]:
+    targets: list[str] = []
+    cursor = 0
+    while True:
+        start = markdown.find("![", cursor)
+        if start < 0:
+            break
+        label_end = find_unescaped(markdown, "]", start + 2)
+        if label_end < 0:
+            break
+        if label_end + 1 >= len(markdown) or markdown[label_end + 1] != "(":
+            cursor = label_end + 1
+            continue
+        target_start = label_end + 2
+        depth = 0
+        index = target_start
+        while index < len(markdown):
+            char = markdown[index]
+            if char == "\\":
+                index += 2
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    target = markdown[target_start:index].strip()
+                    if target:
+                        targets.append(target)
+                    cursor = index + 1
+                    break
+                depth -= 1
+            index += 1
+        else:
+            break
+    return targets
+
+
 def markdown_image_targets(markdown: str) -> list[str]:
-    targets = [match.group(1).strip() for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", markdown)]
+    targets = markdown_inline_image_targets(markdown)
     targets.extend(match.group(1).strip() for match in re.finditer(r"<img\b[^>]*\bsrc=[\"']([^\"']+)[\"']", markdown, re.I))
     return targets
 

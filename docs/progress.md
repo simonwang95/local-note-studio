@@ -1,5 +1,9 @@
 # Progress
 
+## 2026-07-14
+
+- Fixed output integrity checks for generated Markdown image paths whose local asset directories contain balanced parentheses, such as Bilibili opus titles like `7.8(复盘)`. The checker now scans inline image links instead of truncating at the first `)`, and regression coverage verifies these paths resolve correctly.
+
 ## 2026-07-07
 
 - Added independent recent-value history for the task output directory and input source fields. The UI now offers recent values through each field's suggestions, updates them on path selection, blur, preview, and task run, supports deleting the current record or clearing each list, skips writes while incognito mode is enabled, keeps the lists separate and local-only, and covers the behavior with frontend compatibility tests.

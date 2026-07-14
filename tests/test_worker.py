@@ -305,6 +305,21 @@ class IntegrityTests(unittest.TestCase):
         req = worker.TaskRequest(task="web-url", output_dir=str(self.root))
         self.assertEqual(worker.validate_markdown_output(path, req), [])
 
+    def test_image_paths_with_parentheses_pass_integrity_check(self):
+        asset_dir = self.root / "assets" / "BILI-OPUS-7.8(复盘)_1222699793902469157"
+        asset_dir.mkdir(parents=True)
+        (asset_dir / "image-001.png").write_bytes(b"png")
+        path = self.root / "BILI-OPUS-7.8(复盘)_1222699793902469157.md"
+        path.write_text(
+            "---\nsource_url: https://www.bilibili.com/opus/1222699793902469157\nstatus: organized\n---\n\n"
+            "# 7.8(复盘)\n\n"
+            "![动态图片 1](assets/BILI-OPUS-7.8(复盘)_1222699793902469157/image-001.png)\n\n"
+            "## 原文抽取\n\n正文\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(worker.markdown_image_targets(path.read_text(encoding="utf-8")), ["assets/BILI-OPUS-7.8(复盘)_1222699793902469157/image-001.png"])
+        self.assertEqual(worker.validate_markdown_output(path, worker.TaskRequest(task="bilibili-opus")), [])
+
     def test_missing_image_and_temp_draft_are_rejected(self):
         path = self.fixture()
         text = path.read_text(encoding="utf-8").replace("assets/cover.png", "assets/missing.png")
