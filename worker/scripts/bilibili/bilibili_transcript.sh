@@ -678,7 +678,7 @@ transcribe_bilibili_url() {
     if [ -f "$OUTPUT_FILE" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
         echo "⏭️  已存在同名笔记，跳过转录: $OUTPUT_FILE"
         echo "   如需重写，请勾选“覆盖同名文件”或传入 --overwrite。"
-        echo "$OUTPUT_FILE"
+        echo "SKIPPED_EXISTING_MARKDOWN_PATH:$OUTPUT_FILE"
         return 0
     fi
 
@@ -687,7 +687,7 @@ transcribe_bilibili_url() {
     echo ""
     echo "✅ 转录完成！"
     echo "📄 文件已保存: $OUTPUT_FILE"
-    echo "$OUTPUT_FILE"
+    echo "GENERATED_MARKDOWN_PATH:$OUTPUT_FILE"
 }
 
 # ===== 本地文件转录 =====
@@ -746,7 +746,7 @@ transcribe_local_file() {
     fi
     if [ -n "$EXISTING" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
         echo "   ⏭️  $file_label: 已存在转录文件: $(basename "$EXISTING")，跳过 ASR"
-        echo "$EXISTING"
+        echo "SKIPPED_EXISTING_MARKDOWN_PATH:$EXISTING"
         return 0
     fi
 
@@ -764,7 +764,7 @@ transcribe_local_file() {
             echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
             write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "本地SRT字幕" "$subtitle_text"
             echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
-            echo "$subtitle_output"
+            echo "GENERATED_MARKDOWN_PATH:$subtitle_output"
             return 0
         fi
 
@@ -853,7 +853,7 @@ transcribe_local_file() {
     write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
 
     echo "   ✅ $file_label: 转录完成 → $(basename "$OUTPUT_FILE")"
-    echo "$OUTPUT_FILE"
+    echo "GENERATED_MARKDOWN_PATH:$OUTPUT_FILE"
 }
 
 write_output_file() {

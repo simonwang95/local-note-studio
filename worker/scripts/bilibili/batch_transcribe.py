@@ -240,13 +240,15 @@ def _stream_subprocess(args, **kwargs):
 
 
 def _extract_output_paths(stdout):
-    """从子脚本输出中提取独立一行打印的真实 Markdown 路径。"""
+    """只提取本次真正生成或覆盖的 Markdown，排除命中跳过策略的旧文件。"""
     paths = []
     seen = set()
     for line in stdout.splitlines():
-        path = line.strip()
-        if not path.endswith(".md"):
+        marker = "GENERATED_MARKDOWN_PATH:"
+        stripped = line.strip()
+        if not stripped.startswith(marker):
             continue
+        path = stripped[len(marker):].strip()
         if not os.path.isabs(path):
             continue
         if not os.path.isfile(path):

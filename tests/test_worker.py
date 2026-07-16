@@ -27,6 +27,7 @@ def load_module(name: str, path: pathlib.Path):
 
 worker = load_module("local_note_studio_worker_test", WORKER_PATH)
 runner = load_module("run_bilibili_transcript_test", ROOT / "worker" / "scripts" / "run_bilibili_transcript.py")
+batch_transcriber = load_module("batch_transcribe_test", ROOT / "worker" / "scripts" / "bilibili" / "batch_transcribe.py")
 converter = load_module("convert_sources_to_md_test", ROOT / "worker" / "scripts" / "convert_sources_to_md.py")
 quickread = load_module("quick_read_pdf_test", ROOT / "worker" / "scripts" / "quick_read_pdf.py")
 organizer = load_module("qwen_organize_notes_test", ROOT / "worker" / "scripts" / "qwen_organize_notes.py")
@@ -529,6 +530,33 @@ class IntegrityTests(unittest.TestCase):
 
 
 class BatchAndDiagnosticsTests(unittest.TestCase):
+    def test_generated_path_contract_excludes_skipped_existing_markdown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            generated = pathlib.Path(temp) / "new note.md"
+            skipped = pathlib.Path(temp) / "old note.md"
+            generated.write_text("new", encoding="utf-8")
+            skipped.write_text("old", encoding="utf-8")
+            output = "\n".join([
+                f"SKIPPED_EXISTING_MARKDOWN_PATH:{skipped}",
+                f"GENERATED_MARKDOWN_PATH:{generated}",
+            ])
+            self.assertEqual(runner.extract_markdown_paths(output), [str(generated)])
+            self.assertEqual(batch_transcriber._extract_output_paths(output), [str(generated)])
+
+    def test_skipped_local_file_does_not_enter_postprocessing(self):
+        cfg = {"CONDA_ENV": "", "VIDEO_MANIFEST_ENABLED": "false"}
+        skipped_output = "SKIPPED_EXISTING_MARKDOWN_PATH:/tmp/already-exists.md\n"
+        with (
+            mock.patch.object(runner, "project_env", return_value={}),
+            mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
+            mock.patch.object(runner, "stream_command", return_value=(0, skipped_output)) as stream,
+            mock.patch.object(runner, "postprocess_video_notes") as postprocess,
+        ):
+            code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
+        self.assertEqual(code, 0)
+        self.assertEqual(stream.call_count, 1)
+        postprocess.assert_not_called()
+
     def test_collection_batch_applies_cooldown_only_between_qwen_calls(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)

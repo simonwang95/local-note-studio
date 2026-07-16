@@ -11,6 +11,7 @@ import {
   loadRecentValues,
   migrateRuntimePreference,
   filterTaskHistory,
+  pathDialogDefault,
   rememberRecentValue,
   progressFromLine,
   removeRecentValue,
@@ -1042,7 +1043,8 @@ async function choosePath(
     return;
   }
   try {
-    const selected = await open(options);
+    const defaultPath = dialogDefaultPath(targetId);
+    const selected = await open(defaultPath ? { ...options, defaultPath } : options);
     const path = Array.isArray(selected) ? selected[0] : selected;
     if (typeof path === "string" && path) {
       setInputValue(targetId, path);
@@ -1053,6 +1055,12 @@ async function choosePath(
   } catch (error) {
     appendOutput(`\n路径选择失败：${errorMessage(error)}\n`);
   }
+}
+
+function dialogDefaultPath(targetId: "outputRoot" | "outputDir" | "source" | "chromeProfile" | "asrModel"): string {
+  const current = inputValue(targetId);
+  if (targetId === "outputDir" || targetId === "source") return pathDialogDefault(targetId, current);
+  return current;
 }
 
 async function ensureWorkerLogListener(): Promise<void> {

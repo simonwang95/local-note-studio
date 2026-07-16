@@ -181,6 +181,11 @@ export function rememberRecentValue(kind: RecentValueKind, value: unknown): stri
   return next;
 }
 
+export function pathDialogDefault(kind: RecentValueKind, currentValue: unknown): string {
+  const candidates = [normalizeRecentValue(currentValue), ...loadRecentValues(kind)];
+  return candidates.find((value) => value && (kind === "outputDir" || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value))) || "";
+}
+
 export function removeRecentValue(kind: RecentValueKind, value: unknown): string[] {
   const normalized = normalizeRecentValue(value);
   const next = normalized ? loadRecentValues(kind).filter((item) => item !== normalized) : loadRecentValues(kind);

@@ -63,6 +63,9 @@ assert.deepEqual(history.rememberRecentValue("outputDir", "/tmp/out"), ["/tmp/ou
 assert.deepEqual(history.rememberRecentValue("source", "/tmp/source.pdf"), ["/tmp/source.pdf"]);
 assert.deepEqual(history.loadRecentValues("outputDir"), ["/tmp/out", "/tmp/second"]);
 assert.deepEqual(history.loadRecentValues("source"), ["/tmp/source.pdf"]);
+assert.equal(history.pathDialogDefault("outputDir", ""), "/tmp/out");
+assert.equal(history.pathDialogDefault("source", "/tmp/current-video.mp4"), "/tmp/current-video.mp4");
+assert.equal(history.pathDialogDefault("source", "https://www.bilibili.com/video/BV1test"), "/tmp/source.pdf");
 assert.deepEqual(history.removeRecentValue("outputDir", "/tmp/out"), ["/tmp/second"]);
 assert.deepEqual(history.loadRecentValues("outputDir"), ["/tmp/second"]);
 history.clearRecentValues("outputDir");

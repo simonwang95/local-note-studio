@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-07-16
+
+- Fixed local video/audio reruns so an existing Markdown matched by the no-overwrite policy is excluded from every later summary, proofreading, frontmatter, keyframe, and Manifest post-processing stage instead of being modified after ASR was skipped.
+- Made native input-source and output-directory pickers open from their own current/recent paths, so choosing a note output directory no longer changes the starting directory used for the next local media selection.
+- Built and verified the `0.1.16` arm64 DMG with SHA-256 `b1cc38d850ea214302d50fbcd3d4da1eeeb9beae75e6c50ef44be0c2a50ef487`.
+
 ## 2026-07-14
 
 - Fixed output integrity checks for generated Markdown image paths whose local asset directories contain balanced parentheses, such as Bilibili opus titles like `7.8(复盘)`. The checker now scans inline image links instead of truncating at the first `)`, and regression coverage verifies these paths resolve correctly.
