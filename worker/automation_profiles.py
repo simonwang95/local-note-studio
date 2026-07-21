@@ -18,6 +18,7 @@ PROFILE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 ALLOWED_CONTENT_TYPES = {"opus", "video"}
 ALLOWED_SUBTITLE_STRATEGIES = {"yt-dlp", "web", "asr"}
 ALLOWED_RUNTIME_BACKENDS = {"managed", "conda", "python"}
+ALLOWED_OPUS_IMAGE_ANALYSIS_MODES = {"off", "ocr", "vision"}
 ALLOWED_PROFILE_KEYS = {
     "id",
     "enabled",
@@ -47,6 +48,7 @@ ALLOWED_PROFILE_KEYS = {
     "timeout_seconds",
     "retry_count",
     "chunk_chars",
+    "opus_image_analysis",
 }
 
 
@@ -162,6 +164,7 @@ class AutomationProfile:
     timeout_seconds: int
     retry_count: int
     chunk_chars: int
+    opus_image_analysis: str
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AutomationProfile":
@@ -204,6 +207,9 @@ class AutomationProfile:
         backend = str(data.get("runtime_backend") or "managed").strip()
         if backend not in ALLOWED_RUNTIME_BACKENDS:
             raise AutomationError("runtime_backend is invalid", "PROFILE_INVALID")
+        opus_image_analysis = str(data.get("opus_image_analysis") or "off").strip().lower()
+        if opus_image_analysis not in ALLOWED_OPUS_IMAGE_ANALYSIS_MODES:
+            raise AutomationError("opus_image_analysis must be off, ocr, or vision", "PROFILE_INVALID")
         return cls(
             id=profile_id,
             enabled=_strict_bool(data, "enabled", False),
@@ -235,6 +241,7 @@ class AutomationProfile:
             timeout_seconds=_bounded_int(data.get("timeout_seconds", 0), "timeout_seconds", 0, 86400, 0),
             retry_count=_bounded_int(data.get("retry_count", 0), "retry_count", 0, 20, 0),
             chunk_chars=_bounded_int(data.get("chunk_chars", 0), "chunk_chars", 0, 1000000, 0),
+            opus_image_analysis=opus_image_analysis,
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -252,6 +259,7 @@ class AutomationProfile:
                 "limit": self.limit,
                 "subtitle_strategy": self.subtitle_strategy,
                 "runtime_backend": self.runtime_backend,
+                "opus_image_analysis": self.opus_image_analysis,
             }
         )
 

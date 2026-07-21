@@ -14,6 +14,18 @@ The current known-good environment is:
 CONDA_ENV="course-whisper"
 ```
 
+Source builds and regression checks also require Node.js 20 or newer. On machines with multiple Node/Python installations, verify the selected executables before attributing a build failure to the application:
+
+```bash
+node --version
+python3 --version
+python3 -c "import requests, pypdf, lxml"
+```
+
+The July 2026 development-machine acceptance used Node.js `20.20.2` and the `course-whisper` Python `3.11.15`. The older `/usr/local/bin/node` 16 and Apple Command Line Tools Python 3.9 on that machine are not suitable for the full source regression command.
+
+The same `course-whisper` environment contains `mlx-whisper 0.4.3`; a normal macOS process can import `mlx_whisper` successfully. Because importing MLX initializes Metal, an environment check executed inside a headless or GPU-restricted sandbox may report `No Metal device available`. Treat that message as a runtime-permission limitation rather than a missing-package result, and repeat the import from Terminal or the installed GUI context.
+
 ## Local Path Variables
 
 Machine-specific paths belong in `worker/env.local`, not in committed source code or docs. Use placeholder paths in examples, such as `/Users/xxx/Notes`.
@@ -33,7 +45,7 @@ OBSIDIAN_VAULT_DIR="/Users/xxx/Notes"
 
 Agent automation Profiles are non-secret and live under `~/Library/Application Support/Local Note Studio/config/automation-profiles.json`. Start from `worker/automation-profiles.example.json`; do not add API keys, Cookie content, Chrome Profiles or arbitrary executable arguments. The Agent request may override only its explicit source, bounded limit and dry-run flag. Profile values override ordinary Worker defaults, while secrets continue to come only from protected local configuration.
 
-Automation state is stored under `~/Library/Application Support/Local Note Studio/state/`: `global-task.*` for the active cross-process lock, `automation-history.sqlite3` for redacted audit history, and `up-sync/` for per-UP incremental status. `LOCAL_NOTE_STUDIO_STATE_DIR` and `LOCAL_NOTE_STUDIO_PROFILES_FILE` are intended for isolated development/tests.
+Automation state is stored under `~/Library/Application Support/Local Note Studio/state/`: `global-task.*` for the active cross-process lock, `automation-history.sqlite3` for redacted audit history, `up-sync/` for per-UP incremental status, and `opus-image-analysis-cache/` for SHA-256 keyed Bilibili attachment OCR/vision results. `LOCAL_NOTE_STUDIO_STATE_DIR` and `LOCAL_NOTE_STUDIO_PROFILES_FILE` are intended for isolated development/tests; overriding State also moves the image-analysis cache, while `LOCAL_NOTE_STUDIO_APP_DATA_DIR` must remain explicit when an isolated test read-only reuses the normal Cookie/model configuration.
 
 ## Required Tools
 
@@ -78,9 +90,11 @@ Video task options selected in the UI override the corresponding process environ
 
 The ASR model directory is persisted in local UI settings, masked by default, and can be revealed or explicitly saved beside the selector. Managed install/repair downloads the default MLX Whisper model into Application Support and the UI auto-fills that model path when the field is empty. Replaying task history keeps the current Configuration values instead of restoring an old or empty ASR path.
 
-The long-task “model cooldown” field is an explicit per-run override. A blank field keeps environment defaults; `0` disables waiting. A numeric value is exported to `COOLDOWN_DELAY`, `QWEN_ORGANIZE_COOLDOWN_DELAY`, `QWEN_PDF_POLISH_COOLDOWN_DELAY`, `QWEN_QUICKREAD_COOLDOWN_DELAY`, and `SUMMARY_CHUNK_COOLDOWN_DELAY`, so a specialized value from `env.local` cannot mask the UI override.
+The long-task “model cooldown” field is an explicit per-run override. A blank field keeps environment defaults; `0` disables waiting. A numeric value is exported to `COOLDOWN_DELAY`, `QWEN_ORGANIZE_COOLDOWN_DELAY`, `QWEN_PDF_POLISH_COOLDOWN_DELAY`, `QWEN_QUICKREAD_COOLDOWN_DELAY`, `SUMMARY_CHUNK_COOLDOWN_DELAY`, and `OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY`, so a specialized value from `env.local` cannot mask the UI override. Waiting occurs only between adjacent real calls; Bilibili attachment `off` mode and SHA-256 cache hits do not wait.
 
 For image OCR and scanned-PDF OCR, the app now prefers the configured multimodal Qwen/OpenAI-compatible model. Local OCR tools are only fallbacks when a vision-capable model is unavailable.
+
+Bilibili opus attachment analysis is a separate Profile option, `opus_image_analysis`, with `off`, `ocr`, and `vision` modes. It does not change `ENABLE_OCR`, which continues to serve direct image sources and sparse/scanned PDFs. Finance Profiles should normally choose `vision`; each uncached attachment can consume one multimodal request, up to 12 images per post. OCR/vision failures retain the downloaded image and post body for a safe retry.
 
 ## Bilibili Cookie
 

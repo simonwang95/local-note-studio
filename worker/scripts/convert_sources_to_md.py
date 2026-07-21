@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import html as html_lib
@@ -29,6 +30,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from pypdf import PdfReader
@@ -89,6 +91,12 @@ DEFAULTS = {
     "WEB_DOWNLOAD_ASSETS": "true",
     "WEB_ASSET_MAX_BYTES": str(50 * 1024 * 1024),
     "ENABLE_OCR": "false",
+    "OPUS_IMAGE_ANALYSIS": "off",
+    "OPUS_IMAGE_ANALYSIS_CACHE_DIR": "",
+    "OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY": "",
+    "OPUS_IMAGE_ANALYSIS_MAX_IMAGES": "12",
+    "BILIBILI_TIMEZONE": "Asia/Shanghai",
+    "BILIBILI_FUTURE_SKEW_SECONDS": "300",
     "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
     "WEB_USER_AGENT": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -123,6 +131,8 @@ def config() -> dict[str, str]:
             values[key] = os.environ[key]
     if not values.get("QWEN_PDF_POLISH_COOLDOWN_DELAY"):
         values["QWEN_PDF_POLISH_COOLDOWN_DELAY"] = values.get("COOLDOWN_DELAY", "0")
+    if not values.get("OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY"):
+        values["OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY"] = values.get("COOLDOWN_DELAY", "0")
     return values
 
 
@@ -224,6 +234,69 @@ def unix_seconds_to_iso(value: Any) -> str:
         return ""
 
 
+def timezone_for(name: str = "Asia/Shanghai") -> dt.tzinfo:
+    try:
+        return ZoneInfo(name or "Asia/Shanghai")
+    except ZoneInfoNotFoundError:
+        return dt.timezone(dt.timedelta(hours=8))
+
+
+def parse_bilibili_datetime(value: Any, timezone_name: str = "Asia/Shanghai") -> dt.datetime | None:
+    """Parse Bilibili timestamps deterministically; naive values use Asia/Shanghai."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    zone = timezone_for(timezone_name)
+    if re.fullmatch(r"\d{10,13}", text):
+        timestamp = int(text)
+        if len(text) == 13:
+            timestamp /= 1000
+        try:
+            return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).astimezone(zone)
+        except (OverflowError, OSError, ValueError):
+            return None
+    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+            try:
+                parsed = dt.datetime.strptime(text, pattern)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=zone)
+    return parsed.astimezone(zone)
+
+
+def bilibili_published_iso(value: Any, timezone_name: str = "Asia/Shanghai") -> str:
+    parsed = parse_bilibili_datetime(value, timezone_name)
+    return parsed.isoformat(timespec="seconds") if parsed is not None else str(value or "").strip()
+
+
+def bilibili_future_warning(
+    published: Any,
+    now: dt.datetime | None = None,
+    timezone_name: str = "Asia/Shanghai",
+    allowed_skew_seconds: int = 300,
+) -> str:
+    parsed = parse_bilibili_datetime(published, timezone_name)
+    if parsed is None:
+        return ""
+    zone = timezone_for(timezone_name)
+    current = now or dt.datetime.now(zone)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=zone)
+    current = current.astimezone(zone)
+    if parsed > current + dt.timedelta(seconds=max(0, allowed_skew_seconds)):
+        return f"程序检测到 B站发布时间明显晚于当前时间：{parsed.isoformat(timespec='seconds')}（时区 {timezone_name}）"
+    return ""
+
+
 def model_label(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -286,7 +359,7 @@ def read_text_with_fallback(path: pathlib.Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) -> str:
+def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, Any]]) -> str:
     api_base = cfg["DEFAULT_LLM_API_BASE"].rstrip("/")
     url = f"{api_base}/chat/completions"
     payload = {
@@ -353,6 +426,289 @@ def vision_ocr_image(cfg: dict[str, str], path: pathlib.Path) -> str:
             ],
         )
     )
+
+
+_LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC: float | None = None
+
+
+class OpusImageAnalysisError(RuntimeError):
+    def __init__(self, model_called: bool):
+        super().__init__("Bilibili opus image analysis failed")
+        self.model_called = model_called
+
+
+def normalize_opus_image_analysis_mode(value: Any) -> str:
+    mode = str(value or "off").strip().lower()
+    if mode not in {"off", "ocr", "vision"}:
+        raise ValueError("OPUS_IMAGE_ANALYSIS must be off, ocr, or vision")
+    return mode
+
+
+def opus_image_analysis_cache_dir(cfg: dict[str, str]) -> pathlib.Path:
+    configured = str(cfg.get("OPUS_IMAGE_ANALYSIS_CACHE_DIR") or "").strip()
+    if configured:
+        return pathlib.Path(configured).expanduser().resolve()
+    state = os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR", "").strip()
+    if state:
+        return pathlib.Path(state).expanduser().resolve() / "opus-image-analysis-cache"
+    index_dir = pathlib.Path(str(cfg.get("INDEX_DIR") or "indexes"))
+    return (index_dir if index_dir.is_absolute() else ROOT / index_dir).resolve() / "opus-image-analysis-cache"
+
+
+def opus_image_cache_path(cfg: dict[str, str], image_hash: str, mode: str) -> pathlib.Path:
+    model_hash = sha256_bytes(str(cfg.get("DEFAULT_LLM_MODEL") or "").encode("utf-8"))[:12]
+    return opus_image_analysis_cache_dir(cfg) / f"{image_hash}.{mode}.{model_hash}.json"
+
+
+def load_opus_image_analysis_cache(cfg: dict[str, str], image_hash: str, mode: str) -> dict[str, str] | None:
+    path = opus_image_cache_path(cfg, image_hash, mode)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != "1.0"
+        or payload.get("image_sha256") != image_hash
+        or payload.get("mode") != mode
+        or payload.get("model") != cfg.get("DEFAULT_LLM_MODEL")
+        or not isinstance(payload.get("result"), dict)
+    ):
+        return None
+    return {str(key): str(value or "") for key, value in payload["result"].items()}
+
+
+def save_opus_image_analysis_cache(
+    cfg: dict[str, str], image_hash: str, mode: str, result: dict[str, str]
+) -> None:
+    path = opus_image_cache_path(cfg, image_hash, mode)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = {
+        "schema_version": "1.0",
+        "image_sha256": image_hash,
+        "mode": mode,
+        "model": str(cfg.get("DEFAULT_LLM_MODEL") or ""),
+        "result": result,
+    }
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with contextlib.suppress(OSError):
+        temp.chmod(0o600)
+    os.replace(temp, path)
+
+
+def _wait_before_opus_image_model_call(cfg: dict[str, str]) -> None:
+    global _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC
+    delay = max(0.0, float(cfg.get("OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY") or 0))
+    if delay <= 0 or _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC is None:
+        return
+    remaining = delay - (time.monotonic() - _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC)
+    if remaining > 0:
+        print(f"图片分析冷却等待 {remaining:.1f} 秒", file=sys.stderr, flush=True)
+        time.sleep(remaining)
+
+
+def _model_json_object(content: str) -> dict[str, Any]:
+    text = content.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.I | re.S)
+    if fenced:
+        text = fenced.group(1)
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            return {}
+        try:
+            payload = json.loads(match.group(0))
+        except ValueError:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _vision_result(content: str) -> dict[str, str]:
+    payload = _model_json_object(content)
+    if not payload:
+        return {
+            "relevance": "中",
+            "visible_text": "[模型未返回结构化文字，待核验]",
+            "visual_information": clean_qwen_markdown(content) or "[待核验]",
+            "contextual_summary": "仅保留模型返回的可见画面描述，未形成扩展结论。",
+            "uncertainties": "模型返回格式不完整，需人工复核。",
+        }
+    relevance = str(payload.get("relevance") or "中").strip()
+    if relevance not in {"高", "中", "低"}:
+        relevance = "中"
+    result = {
+        "relevance": relevance,
+        "visible_text": clean_text(str(payload.get("visible_text") or "未识别到明确文字")),
+        "visual_information": clean_text(str(payload.get("visual_information") or "未识别到明确图表或画面信息")),
+        "contextual_summary": clean_text(str(payload.get("contextual_summary") or "未形成可核验的关联整理")),
+        "uncertainties": clean_text(str(payload.get("uncertainties") or "无")),
+    }
+    if relevance == "低":
+        result["contextual_summary"] = "该图片与正文观点低相关，不据此扩展财经、交易或投资结论。"
+    return result
+
+
+def analyze_opus_image(
+    path: pathlib.Path,
+    image_hash: str,
+    mode: str,
+    opus_content: str,
+    cfg: dict[str, str],
+) -> tuple[dict[str, str], bool, bool, float]:
+    """Return (result, cache_hit, real_model_call, call_finished_epoch)."""
+    global _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC
+    cached = load_opus_image_analysis_cache(cfg, image_hash, mode)
+    if cached is not None:
+        return cached, True, False, 0.0
+    if mode == "ocr":
+        prompt = (
+            "请只提取图片中直接可见的文字，尽量保持原始阅读顺序。不要总结、推断或补写；"
+            "无法确认的字符用 [待核验]。只输出提取文字。"
+        )
+    else:
+        prompt = f"""请分析一张 B站图文动态附件，并只返回一个 JSON 对象。
+
+动态正文（仅用于判断相关性）：
+{opus_content}
+
+JSON 字段必须为：
+- relevance: 只能是“高”“中”“低”；
+- visible_text: 图片中直接可见且可核验的文字、数字和表格内容，模糊处写“[待核验]”；
+- visual_information: 直接可见的图表、K线、排行榜、截图或画面事实；
+- contextual_summary: 基于正文与图片的有限整理，必须和直接可见事实分开；
+- uncertainties: 无法确认的信息。
+
+禁止臆造股票代码、价格、涨跌幅、日期、持仓或操作建议。粉丝榜、互动榜、头像和装饰图若与财经正文无关，relevance 必须为“低”，只做简短说明，不扩展成财经结论。不要输出 JSON 以外内容。"""
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_to_data_url(path)}},
+            ],
+        }
+    ]
+    _wait_before_opus_image_model_call(cfg)
+    try:
+        try:
+            content = call_chat_completion(cfg, messages)
+        except Exception as exc:
+            raise OpusImageAnalysisError(True) from exc
+    finally:
+        _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC = time.monotonic()
+        call_finished_epoch = time.time()
+    try:
+        if mode == "ocr":
+            result = {
+                "relevance": "未评估（OCR 模式）",
+                "visible_text": clean_qwen_markdown(content) or "未识别到明确文字",
+                "visual_information": "OCR 模式只提取可见文字，不做图表或画面推断。",
+                "contextual_summary": "OCR 模式不基于正文扩展推断。",
+                "uncertainties": "模糊字符已标记为 [待核验]。",
+            }
+        else:
+            result = _vision_result(content)
+        save_opus_image_analysis_cache(cfg, image_hash, mode, result)
+    except Exception as exc:
+        raise OpusImageAnalysisError(True) from exc
+    return result, False, True, call_finished_epoch
+
+
+def _analysis_value(value: Any) -> str:
+    return str(value or "无").strip().replace("\n", "\n  ")
+
+
+def build_opus_image_analysis(
+    image_urls: list[str],
+    assets: list[dict[str, Any]],
+    opus_content: str,
+    cfg: dict[str, str],
+) -> tuple[str, dict[str, Any]]:
+    mode = normalize_opus_image_analysis_mode(cfg.get("OPUS_IMAGE_ANALYSIS"))
+    summary: dict[str, Any] = {
+        "schema_version": "1.0",
+        "mode": mode,
+        "image_count": len(image_urls),
+        "analyzed": 0,
+        "cache_hits": 0,
+        "model_calls": 0,
+        "failed": 0,
+        "limited": 0,
+        "status": "off" if mode == "off" else "complete",
+        "warnings": [],
+        "last_model_call_epoch": 0.0,
+        "cooldown_delay": max(0.0, float(cfg.get("OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY") or 0)),
+    }
+    if mode == "off" or not image_urls:
+        return "", summary
+
+    by_url = {
+        str(item.get("source_url") or ""): item
+        for item in assets
+        if isinstance(item, dict) and item.get("status") == "downloaded"
+    }
+    max_images = max(1, min(50, int(cfg.get("OPUS_IMAGE_ANALYSIS_MAX_IMAGES") or 12)))
+    sections = ["## 图片分析"]
+    for index, image_url in enumerate(image_urls, 1):
+        sections.extend(["", f"### 图片 {index}"])
+        asset = by_url.get(image_url)
+        markdown_path = str((asset or {}).get("markdown_path") or "未下载")
+        sections.extend([f"- 本地路径：`{markdown_path}`", f"- 分析模式：{mode}"])
+        if index > max_images:
+            summary["limited"] += 1
+            warning = f"图片 {index} 超过单条动态最多 {max_images} 张的分析上限，待人工处理"
+            summary["warnings"].append(warning)
+            sections.extend(["- 分析状态：未分析（超过安全调用上限）", "- 不确定项：待人工复核。"])
+            continue
+        if asset is None:
+            summary["failed"] += 1
+            warning = f"图片 {index} 未成功下载，图片分析待重试"
+            summary["warnings"].append(warning)
+            sections.extend(["- 分析状态：图片分析失败/待重试", "- 不确定项：本地附件不可用。"])
+            continue
+        raw_path = pathlib.Path(str(asset.get("path") or ""))
+        local_path = raw_path if raw_path.is_absolute() else ROOT / raw_path
+        image_hash = str(asset.get("hash") or "")
+        if not local_path.is_file() or not image_hash:
+            summary["failed"] += 1
+            warning = f"图片 {index} 本地附件不完整，图片分析待重试"
+            summary["warnings"].append(warning)
+            sections.extend(["- 分析状态：图片分析失败/待重试", "- 不确定项：本地附件不完整。"])
+            continue
+        try:
+            result, cache_hit, model_called, finished_epoch = analyze_opus_image(
+                local_path, image_hash, mode, opus_content, cfg
+            )
+            summary["analyzed"] += 1
+            summary["cache_hits"] += int(cache_hit)
+            summary["model_calls"] += int(model_called)
+            summary["last_model_call_epoch"] = max(summary["last_model_call_epoch"], finished_epoch)
+            sections.extend(
+                [
+                    f"- 分析状态：{'缓存复用' if cache_hit else '完成'}",
+                    f"- 与正文相关性：{_analysis_value(result.get('relevance'))}",
+                    f"- 可见文字：{_analysis_value(result.get('visible_text'))}",
+                    f"- 图表/画面信息：{_analysis_value(result.get('visual_information'))}",
+                    f"- 基于正文和图片的整理：{_analysis_value(result.get('contextual_summary'))}",
+                    f"- 不确定项：{_analysis_value(result.get('uncertainties'))}",
+                ]
+            )
+        except Exception as exc:
+            model_called = bool(getattr(exc, "model_called", False))
+            summary["model_calls"] += int(model_called)
+            if model_called:
+                summary["last_model_call_epoch"] = max(summary["last_model_call_epoch"], time.time())
+            summary["failed"] += 1
+            warning = f"图片 {index} 分析失败，正文和附件已保留，待重试"
+            summary["warnings"].append(warning)
+            sections.extend(["- 分析状态：图片分析失败/待重试", "- 不确定项：模型分析未完成；不得据此推断图片内容。"])
+
+    if summary["failed"]:
+        summary["status"] = "failed" if summary["analyzed"] == 0 else "partial"
+    return "\n".join(sections).strip(), summary
 
 
 def chunk_pages(page_texts: list[tuple[int, str]], max_chars: int, overlap_pages: int = 0) -> list[tuple[str, str]]:
@@ -906,7 +1262,8 @@ def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, 
         )
 
     pub_ts = author.get("pub_ts")
-    published = unix_seconds_to_iso(str(pub_ts)) if str(pub_ts or "").isdigit() else str(author.get("pub_time") or "")
+    published_value = str(pub_ts) if str(pub_ts or "").isdigit() else str(author.get("pub_time") or "")
+    published = bilibili_published_iso(published_value)
     return {
         "item": item,
         "title": title,
@@ -916,6 +1273,25 @@ def parse_bilibili_opus_payload(payload: dict[str, Any], url: str) -> dict[str, 
         "content": content,
         "images": collect_opus_images(dynamic),
     }
+
+
+def bilibili_opus_source_hash(parsed: dict[str, Any], opus_id: str) -> str:
+    """Hash stable post evidence, excluding volatile API display/statistics fields."""
+    canonical_images = []
+    for raw_url in parsed.get("images") or []:
+        value = str(raw_url or "").strip()
+        parts = urllib.parse.urlsplit(value)
+        canonical_images.append(urllib.parse.urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, "", "")))
+    evidence = {
+        "dynamic_id": opus_id,
+        "title": str(parsed.get("title") or ""),
+        "author": str(parsed.get("author") or ""),
+        "author_mid": str(parsed.get("author_mid") or ""),
+        "published": str(parsed.get("published") or ""),
+        "content": str(parsed.get("content") or ""),
+        "images": canonical_images,
+    }
+    return sha256_bytes(json.dumps(evidence, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 
 
 def parse_html(raw_html: str) -> Any:
@@ -1522,7 +1898,7 @@ def convert_bilibili_opus(
     )
     payload = fetch_json_with_cookies(api_url, url, cfg)
     parsed = parse_bilibili_opus_payload(payload, url)
-    source_hash = sha256_bytes(json.dumps(parsed["item"], ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    source_hash = bilibili_opus_source_hash(parsed, opus_id)
     title = parsed["title"]
     out_path = output_path_for(output_dir, f"BILI-OPUS-{slugify(title, opus_id)}_{opus_id}.md", output_filename)
     if should_skip_url(manifest, url, out_path, source_hash, overwrite, download_assets and bool(parsed["images"])):
@@ -1540,6 +1916,15 @@ def convert_bilibili_opus(
     if downloaded_assets:
         first_asset = pathlib.Path(str(downloaded_assets[0]["path"]))
         asset_dir = first_asset.parent.as_posix()
+    image_analysis, analysis_summary = build_opus_image_analysis(parsed["images"], assets, parsed["content"], cfg)
+    time_warning = bilibili_future_warning(
+        parsed["published"],
+        timezone_name=str(cfg.get("BILIBILI_TIMEZONE") or "Asia/Shanghai"),
+        allowed_skew_seconds=int(cfg.get("BILIBILI_FUTURE_SKEW_SECONDS") or 300),
+    )
+    if time_warning:
+        analysis_summary["warnings"].append(time_warning)
+    print("OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:" + json.dumps(analysis_summary, ensure_ascii=False), flush=True)
 
     meta = {
         "title": title,
@@ -1560,6 +1945,8 @@ def convert_bilibili_opus(
         "assets_downloaded": assets_downloaded,
         "asset_count": len(downloaded_assets),
         "asset_failed": len(failed_assets),
+        "opus_image_analysis": analysis_summary["mode"],
+        "opus_image_analysis_status": analysis_summary["status"],
     }
     markdown = [
         frontmatter(meta),
@@ -1582,8 +1969,10 @@ def convert_bilibili_opus(
         "## 原文抽取",
         "",
         extracted,
-        "",
     ]
+    if image_analysis:
+        markdown.extend(["", image_analysis])
+    markdown.append("")
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(markdown), encoding="utf-8")
     item = {
@@ -1600,6 +1989,11 @@ def convert_bilibili_opus(
         "asset_count": len(downloaded_assets),
         "asset_failed": len(failed_assets),
         "assets": assets,
+        "opus_image_analysis": analysis_summary["mode"],
+        "opus_image_analysis_status": analysis_summary["status"],
+        "opus_image_analysis_model_calls": analysis_summary["model_calls"],
+        "opus_image_analysis_cache_hits": analysis_summary["cache_hits"],
+        "warnings": analysis_summary["warnings"],
         "error": "",
     }
     return out_path, item, False

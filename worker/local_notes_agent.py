@@ -76,6 +76,7 @@ def base_request(profile: AutomationProfile, caller: str) -> dict[str, Any]:
         "timeout_seconds": profile.timeout_seconds,
         "retry_count": profile.retry_count,
         "chunk_chars": profile.chunk_chars,
+        "opus_image_analysis": profile.opus_image_analysis,
         "lock_timeout_seconds": profile.lock_timeout_seconds,
         "execution_timeout_seconds": profile.execution_timeout_seconds,
     }

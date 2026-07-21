@@ -37,11 +37,11 @@ The latest verified internal handoff artifact is:
 - Version: `0.1.17`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
 - Artifact: `Local Note Studio_0.1.17_aarch64.dmg`
-- Size: `3,454,029 bytes`
-- SHA-256: `0441e21b87093cb63dce09dd0d3f8e82eebb3b1a2425cf90b3995ec3664fcf0d`
+- Size: `3,460,489 bytes`
+- SHA-256: `4934f073cb386eb632d34c97717c3a341146d07db8659e5cfdf5004144d164e4`
 - Build type: optimized release
 - Signature: complete ad-hoc app signature with hardened runtime and sealed resources; no Developer ID and no notarization
-- Verification: `npm run release:check`, `hdiutil verify`, and strict deep `codesign` verification against the app mounted from the DMG passed. The mounted app reports version `0.1.17`, contains the arm64 executable, Worker/Agent/MCP entry points, locked requirements, scripts and stock-code reference resource, and contains no `env.local`.
+- Verification: `npm run release:check`, `hdiutil verify`, and strict deep `codesign` verification against the app mounted from the DMG passed. The mounted app reports version `0.1.17`, contains the arm64 executable, Worker/Agent/MCP entry points, locked requirements, Bilibili opus image-analysis/time-metadata fixes, scripts and stock-code reference resource, and contains no `env.local`.
 
 This record identifies the current internal artifact only. Rebuilds may produce a different checksum; update this section before handing off a newer DMG.
 

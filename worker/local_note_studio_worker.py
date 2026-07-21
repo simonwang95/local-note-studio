@@ -115,6 +115,7 @@ class TaskRequest:
     incognito_mode: bool = False
     stock_terms: bool = False
     enable_ocr: bool = False
+    opus_image_analysis: str = "off"
     web_capture_mode: str = "static"
     browser_executable: str = ""
     timeout_seconds: int = 0
@@ -135,6 +136,9 @@ class TaskRequest:
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "TaskRequest":
+        opus_image_analysis = str(data.get("opus_image_analysis") or "off").strip().lower()
+        if opus_image_analysis not in {"off", "ocr", "vision"}:
+            raise ValueError("opus_image_analysis must be off, ocr, or vision")
         return cls(
             task=str(data.get("task") or ""),
             caller=str(data.get("caller") or ""),
@@ -168,6 +172,7 @@ class TaskRequest:
             incognito_mode=parse_bool(data.get("incognito_mode")),
             stock_terms=parse_bool(data.get("stock_terms")),
             enable_ocr=parse_bool(data.get("enable_ocr")),
+            opus_image_analysis=opus_image_analysis,
             web_capture_mode=str(data.get("web_capture_mode") or "static"),
             browser_executable=str(data.get("browser_executable") or ""),
             timeout_seconds=parse_int(data.get("timeout_seconds"), 0),
@@ -279,6 +284,9 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env["KEYFRAME_MANIFEST_ENABLED"] = "false" if req.incognito_mode else env.get("KEYFRAME_MANIFEST_ENABLED", "true")
     env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
     env["ENABLE_OCR"] = "true" if req.enable_ocr else "false"
+    env["OPUS_IMAGE_ANALYSIS"] = req.opus_image_analysis
+    state_root = pathlib.Path(env.get("LOCAL_NOTE_STUDIO_STATE_DIR") or app_root / "state")
+    env["OPUS_IMAGE_ANALYSIS_CACHE_DIR"] = str(state_root / "opus-image-analysis-cache")
     env["WEB_CAPTURE_MODE"] = req.web_capture_mode if req.web_capture_mode in {"static", "browser"} else "static"
     env["BROWSER_EXECUTABLE"] = req.browser_executable
     env["BROWSER_PROFILE"] = req.browser_profile if req.web_capture_mode == "browser" else ""
@@ -298,6 +306,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["QWEN_PDF_POLISH_COOLDOWN_DELAY"] = delay
         env["QWEN_QUICKREAD_COOLDOWN_DELAY"] = delay
         env["SUMMARY_CHUNK_COOLDOWN_DELAY"] = delay
+        env["OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY"] = delay
     if req.chunk_chars > 0:
         env["QWEN_ORGANIZE_MAX_CHARS"] = str(req.chunk_chars)
         env["QWEN_QUICKREAD_TRANSLATION_CHARS"] = str(req.chunk_chars)
@@ -1534,6 +1543,7 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
                 result.status = "partial_failed"
                 result.warnings.append("new UP opus items failed while previously complete items were skipped")
                 return ""
+        analysis_cooldown_remaining = record_opus_image_analysis_summaries(output, result, req.cooldown_delay)
         if result is not None and req.task == "bilibili-up-opus":
             match = re.search(r"抓取阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", output)
             if match:
@@ -1573,6 +1583,8 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
             organize_command.extend(["--output-filename", req.output_filename])
         print("")
         print(f"开始 Qwen 整理：共 {len(converted_paths)} 篇，正式输出到 {req.output_dir}")
+        if analysis_cooldown_remaining > 0:
+            wait_for_adjacent_model_call(analysis_cooldown_remaining, "图片分析与正式整理之间")
         organize_before = output_snapshot(req.output_dir)
         try:
             run_process(organize_command, env)
@@ -1602,8 +1614,32 @@ def promote_staged_assets(staging_dir: pathlib.Path, output_dir: pathlib.Path) -
         return
     target = output_dir / "assets"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, dirs_exist_ok=True)
-    print(f"图片资产已写入: {target}")
+    copied = 0
+    reused = 0
+    for source_path in source.rglob("*"):
+        if not source_path.is_file():
+            continue
+        target_path = target / source_path.relative_to(source)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.is_file() and files_have_same_content(source_path, target_path):
+            reused += 1
+            continue
+        shutil.copy2(source_path, target_path)
+        copied += 1
+    print(f"图片资产已写入: {target}（新增/更新 {copied}，复用 {reused}）")
+
+
+def files_have_same_content(first: pathlib.Path, second: pathlib.Path) -> bool:
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as left, second.open("rb") as right:
+        while True:
+            left_chunk = left.read(1024 * 1024)
+            right_chunk = right.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
 
 
 def markdown_frontmatter_value(markdown: str, key: str) -> str:
@@ -2210,6 +2246,69 @@ def extract_converted_paths(output: str) -> list[str]:
     return paths
 
 
+def opus_image_analysis_summaries(output: str) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        if not line.startswith("OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:"):
+            continue
+        try:
+            payload = json.loads(line.split(":", 1)[1])
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            summaries.append(payload)
+    return summaries
+
+
+def record_opus_image_analysis_summaries(
+    output: str,
+    result: TaskResult | None,
+    cooldown_delay: int,
+) -> float:
+    summaries = opus_image_analysis_summaries(output)
+    if not summaries:
+        return 0.0
+    modes = sorted({str(item.get("mode") or "off") for item in summaries})
+    details = {
+        "mode": modes[0] if len(modes) == 1 else modes,
+        "posts": len(summaries),
+        "images": sum(max(0, parse_int(item.get("image_count"), 0)) for item in summaries),
+        "analyzed": sum(max(0, parse_int(item.get("analyzed"), 0)) for item in summaries),
+        "cache_hits": sum(max(0, parse_int(item.get("cache_hits"), 0)) for item in summaries),
+        "model_calls": sum(max(0, parse_int(item.get("model_calls"), 0)) for item in summaries),
+        "failed": sum(max(0, parse_int(item.get("failed"), 0)) for item in summaries),
+        "limited": sum(max(0, parse_int(item.get("limited"), 0)) for item in summaries),
+    }
+    if result is not None:
+        result.details["opus_image_analysis"] = details
+        for item in summaries:
+            warnings = item.get("warnings") if isinstance(item.get("warnings"), list) else []
+            for warning in warnings:
+                clean = redact_text(str(warning))
+                if clean and clean not in result.warnings:
+                    result.warnings.append(clean)
+    effective_cooldown = (
+        float(cooldown_delay)
+        if cooldown_delay >= 0
+        else max(float(item.get("cooldown_delay") or 0) for item in summaries)
+    )
+    if details["model_calls"] <= 0 or effective_cooldown <= 0:
+        return 0.0
+    last_call_epoch = max(float(item.get("last_model_call_epoch") or 0) for item in summaries)
+    if last_call_epoch <= 0:
+        return effective_cooldown
+    return max(0.0, effective_cooldown - max(0.0, time.time() - last_call_epoch))
+
+
+def wait_for_adjacent_model_call(seconds: float, label: str) -> None:
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        print(f"[冷却] {label}等待，剩余 {int(remaining + 0.999)} 秒...", flush=True)
+        step = min(10.0, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request-json", help="Task request JSON from the desktop app.")
@@ -2246,6 +2345,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--incognito-mode", action="store_true", help="Do not read or write manifests and incremental state.")
     parser.add_argument("--stock-terms", action="store_true", help="Enable A-share stock terminology validation.")
     parser.add_argument("--enable-ocr", action="store_true", help="Enable OCR for images and scanned PDFs in source conversion.")
+    parser.add_argument(
+        "--opus-image-analysis",
+        default="off",
+        choices=["off", "ocr", "vision"],
+        help="Analyze downloaded Bilibili opus attachments with OCR or vision; off preserves legacy behavior.",
+    )
     parser.add_argument("--web-capture-mode", default="static", choices=["static", "browser"], help="Use static HTTP or an explicit browser session for webpages.")
     parser.add_argument("--browser-executable", default="", help="Chrome/Chromium executable for browser-session webpage capture.")
     parser.add_argument("--timeout-seconds", type=int, default=0, help="Per-task network/model timeout override.")
@@ -2300,6 +2405,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         incognito_mode=args.incognito_mode,
         stock_terms=args.stock_terms,
         enable_ocr=args.enable_ocr,
+        opus_image_analysis=args.opus_image_analysis,
         web_capture_mode=args.web_capture_mode,
         browser_executable=args.browser_executable,
         timeout_seconds=args.timeout_seconds,

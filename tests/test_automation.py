@@ -72,6 +72,22 @@ class ProfileSafetyTests(unittest.TestCase):
             self.assertNotIn("api_key", request)
             self.assertNotIn("cookies", request)
 
+    def test_opus_image_analysis_profile_modes_validate_and_propagate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for mode in ("off", "ocr", "vision"):
+                with self.subTest(mode=mode):
+                    profile = profiles.AutomationProfile.from_mapping(profile_mapping(root, opus_image_analysis=mode))
+                    request = agent.build_request("sync-up", profile, caller="mcp")
+                    self.assertEqual(profile.opus_image_analysis, mode)
+                    self.assertEqual(request["opus_image_analysis"], mode)
+                    self.assertEqual(profile.public_dict()["opus_image_analysis"], mode)
+
+            legacy = profiles.AutomationProfile.from_mapping(profile_mapping(root))
+            self.assertEqual(legacy.opus_image_analysis, "off")
+            with self.assertRaises(core.AutomationError):
+                profiles.AutomationProfile.from_mapping(profile_mapping(root, opus_image_analysis="auto"))
+
     def test_output_and_input_allowlists_reject_escape_and_symlink_escape(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
@@ -467,6 +483,31 @@ class ContractAndMcpTests(unittest.TestCase):
             worker.execute_request(req, result)
         self.assertNotIn("super-secret", result.details["environment_report"])
         self.assertNotIn("super-secret", stdout.getvalue())
+
+    def test_opus_image_analysis_summary_enters_redacted_result_contract(self):
+        result = core.TaskResult("vision", "mcp", "bilibili-opus", "completed", core.utc_now())
+        output = "OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:" + json.dumps(
+            {
+                "mode": "vision",
+                "image_count": 2,
+                "analyzed": 1,
+                "cache_hits": 1,
+                "model_calls": 0,
+                "failed": 1,
+                "limited": 0,
+                "warnings": ["图片 2 分析失败，API_KEY=super-secret"],
+                "last_model_call_epoch": 0,
+                "cooldown_delay": 60,
+            },
+            ensure_ascii=False,
+        )
+        remaining = worker.record_opus_image_analysis_summaries(output, result, 60)
+        serialized = json.dumps(result.as_dict(), ensure_ascii=False)
+        self.assertEqual(remaining, 0)
+        self.assertEqual(result.details["opus_image_analysis"]["cache_hits"], 1)
+        self.assertIn("<redacted>", serialized)
+        self.assertNotIn("super-secret", serialized)
+        self.assertNotIn("last_model_call_epoch", serialized)
 
     def test_agent_worker_command_never_contains_request_or_secret(self):
         contract = {

@@ -40,6 +40,9 @@ DEFAULTS = {
 }
 
 
+_LAST_MODEL_CALL_MONOTONIC: float | None = None
+
+
 def load_env_file(path: pathlib.Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -182,7 +185,21 @@ def is_retryable_http_status(status_code: int) -> bool:
     return status_code in (408, 409, 425, 429) or status_code >= 500
 
 
+def wait_before_model_call(cfg: dict[str, str]) -> None:
+    global _LAST_MODEL_CALL_MONOTONIC
+    delay = max(0.0, float(cfg.get("QWEN_ORGANIZE_COOLDOWN_DELAY") or 0))
+    if delay <= 0 or _LAST_MODEL_CALL_MONOTONIC is None:
+        return
+    remaining = delay - (time.monotonic() - _LAST_MODEL_CALL_MONOTONIC)
+    while remaining > 0:
+        print(f"[模型冷却] 下一次真实调用前等待，剩余 {int(remaining + 0.999)} 秒...", flush=True)
+        step = min(10.0, remaining)
+        time.sleep(step)
+        remaining -= step
+
+
 def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) -> str:
+    global _LAST_MODEL_CALL_MONOTONIC
     url = f"{cfg['DEFAULT_LLM_API_BASE'].rstrip('/')}/chat/completions"
     payload = {
         "model": cfg["DEFAULT_LLM_MODEL"],
@@ -200,9 +217,13 @@ def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) ->
     retry_delay = max(0.0, float(cfg.get("QWEN_ORGANIZE_RETRY_DELAY") or 0))
     last_error: Exception | None = None
     for attempt in range(1, retry_count + 2):
+        wait_before_model_call(cfg)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            finally:
+                _LAST_MODEL_CALL_MONOTONIC = time.monotonic()
             return str(data["choices"][0]["message"]["content"]).strip()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -304,11 +325,32 @@ def merge_duplicate_h2_sections(markdown: str) -> str:
     return normalize_markdown("\n\n".join(part for part in output if part.strip()))
 
 
+def h2_section(body: str, title: str) -> str:
+    match = re.search(
+        rf"(?ms)^##\s+{re.escape(title)}\s*$\n(.*?)(?=^##\s+|\Z)",
+        body,
+    )
+    if not match:
+        return ""
+    content = match.group(1).strip()
+    return f"## {title}\n\n{content}" if content else ""
+
+
+def model_body_for_source(body: str, source_type: str) -> str:
+    if source_type != "bilibili-opus":
+        return body
+    evidence = [h2_section(body, "原文抽取"), h2_section(body, "图片分析")]
+    selected = "\n\n".join(part for part in evidence if part)
+    return selected or body
+
+
 def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: int, source_type: str, cfg: dict[str, str]) -> str:
     system = (
         "你是本地知识库整理助手。你负责把源文件转换草稿整理成 Obsidian 兼容 Markdown。"
         "必须忠于材料，不编造。需要区分原文观点、你的整理和待核验信息。"
         "遇到 PDF 公式、表格、符号缺损时，用 `[公式待核验]`、`[表格待核验]`、`[符号待核验]` 标注。"
+        "程序解析的来源 URL、作者、MID、动态 ID、发布时间和哈希属于确定性元数据，不要重新判断其真伪或合理性。"
+        "不要因为缺少当前时间而生成‘时间戳待核验’或‘未来预设’；只有正文明确讨论时间矛盾时才记录该观点。"
     )
     pdf_translation_requirement = ""
     if source_type == "pdf":
@@ -333,6 +375,7 @@ def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: 
 - 如果这是对话材料，提炼问题、结论、可沉淀知识和后续行动。
 - 如果这是论文材料，提炼摘要、方法、实验、贡献、局限和公式线索。
 - 分块之间可能包含少量重叠上下文；重叠部分仅用于衔接，不要重复沉淀为新信息。
+- 不要重新判断程序保存的来源元数据是否合理，也不要推测当前日期或时间。
 {pdf_translation_requirement}
 {stock_requirement}
 
@@ -347,6 +390,7 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
     system = (
         "你是本地知识库总编。请把多个分块整理综合成一篇不重复、层次清晰、"
         "适合 Obsidian 长期保存的正式 Markdown 笔记。不要编造来源中没有的信息。"
+        "程序确定的来源元数据不在你的判断范围内；不要生成无依据的时间戳待核验或未来预设。"
     )
     pdf_translation_requirement = ""
     if source_type == "pdf":
@@ -367,6 +411,7 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
 - `## 思维导图` 使用 Markdown 缩进列表，综合全文结构，合并分块导图并去重。
 - 合并重复内容，保留关键数据、公式线索、结论和不确定性。
 - 分块之间可能包含少量重叠上下文；请去重后综合，不要把重叠内容重复写入。
+- 不要重新判断程序保存的 URL、作者、MID、发布时间或哈希是否合理。
 {pdf_translation_requirement}
 {stock_requirement}
 
@@ -474,7 +519,12 @@ def existing_bilibili_opus_output(
     return max(candidates, key=lambda item: item[:3])[3]
 
 
-def organized_note_complete(path: pathlib.Path, source_type: str) -> bool:
+def organized_note_complete(
+    path: pathlib.Path,
+    source_type: str,
+    expected_opus_image_analysis: str = "",
+    expected_source_hash: str = "",
+) -> bool:
     try:
         markdown = path.read_text(encoding="utf-8")
         meta, body = parse_frontmatter(markdown)
@@ -483,7 +533,16 @@ def organized_note_complete(path: pathlib.Path, source_type: str) -> bool:
     if str(meta.get("status") or "") != "organized":
         return False
     if source_type == "bilibili-opus":
-        return re.search(r"(?m)^##\s+原文抽取\s*$", body) is not None
+        if re.search(r"(?m)^##\s+原文抽取\s*$", body) is None:
+            return False
+        if expected_source_hash and str(meta.get("source_hash") or "") != expected_source_hash:
+            return False
+        if expected_opus_image_analysis:
+            if str(meta.get("opus_image_analysis") or "off") != expected_opus_image_analysis:
+                return False
+            if expected_opus_image_analysis != "off" and str(meta.get("opus_image_analysis_status") or "") != "complete":
+                return False
+        return True
     return True
 
 
@@ -507,9 +566,9 @@ def original_source_section(body: str, source_type: str) -> str:
     original = body.strip()
     if not original:
         return ""
-    original_match = re.search(r"(?ms)^##\s+原文抽取\s*$\n(.+)\Z", original)
-    if original_match:
-        original = original_match.group(1).strip()
+    extracted_section = h2_section(original, "原文抽取")
+    if extracted_section:
+        original = extracted_section.split("\n", 1)[1].strip()
     if original.startswith("# "):
         lines = original.splitlines()
         original = "\n".join(lines[1:]).lstrip()
@@ -520,6 +579,12 @@ def original_source_section(body: str, source_type: str) -> str:
             original,
         ]
     )
+
+
+def image_analysis_source_section(body: str, source_type: str) -> str:
+    if source_type != "bilibili-opus":
+        return ""
+    return h2_section(body, "图片分析")
 
 
 def demote_markdown_headings(markdown: str) -> str:
@@ -542,9 +607,11 @@ def organize_file(
     source_path = str(meta.get("source_path") or "")
     source_url = str(meta.get("source_url") or "")
     source_ref = source_path or source_url or rel(draft_path)
+    model_source_ref = "B站图文动态（确定性来源元数据由程序保管）" if source_type == "bilibili-opus" else source_ref
+    model_body = model_body_for_source(body, source_type)
     draft_hash = sha256_text(markdown)
     chunks = chunk_text(
-        body,
+        model_body,
         int(cfg["QWEN_ORGANIZE_MAX_CHARS"]),
         int(cfg.get("QWEN_ORGANIZE_OVERLAP_CHARS") or 0),
     )
@@ -552,10 +619,12 @@ def organize_file(
     for index, chunk in enumerate(chunks, 1):
         if progress_label:
             print(f"{progress_label} Qwen 分块 {index}/{len(chunks)}...", flush=True)
-        chunk_notes.append(organize_chunk(title, source_ref, chunk, index, len(chunks), source_type, cfg))
+        chunk_notes.append(organize_chunk(title, model_source_ref, chunk, index, len(chunks), source_type, cfg))
     if progress_label:
         print(f"{progress_label} 正在合并结构化笔记...", flush=True)
-    organized_body = merge_duplicate_h2_sections(normalize_markdown(synthesize_chunks(title, source_ref, chunk_notes, cfg, source_type)))
+    organized_body = merge_duplicate_h2_sections(
+        normalize_markdown(synthesize_chunks(title, model_source_ref, chunk_notes, cfg, source_type))
+    )
     output_path = planned_output or build_output_path(
         output_dir,
         title,
@@ -579,7 +648,7 @@ def organize_file(
     }
     if not omit_draft_path:
         organized_meta["draft_path"] = rel(draft_path)
-    for key in ("dynamic_id", "author", "author_mid", "published"):
+    for key in ("dynamic_id", "author", "author_mid", "published", "opus_image_analysis", "opus_image_analysis_status"):
         if meta.get(key) not in (None, ""):
             organized_meta[key] = meta[key]
     source_trace_lines = [
@@ -602,6 +671,9 @@ def organize_file(
     original = original_source_section(body, source_type)
     if original:
         output_parts.append(original)
+    image_analysis = image_analysis_source_section(body, source_type)
+    if image_analysis:
+        output_parts.append(image_analysis)
     stock_validation = build_stock_validation_section("\n\n".join(part for part in [organized_body, body] if part), str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true")
     if stock_validation:
         output_parts.append(stock_validation)
@@ -692,7 +764,12 @@ def main() -> int:
             )
             manifest_item = find_manifest_item(manifest, draft_path)
             if planned_output.exists() and not args.overwrite:
-                if organized_note_complete(planned_output, source_type):
+                if organized_note_complete(
+                    planned_output,
+                    source_type,
+                    str(meta.get("opus_image_analysis") or "") if source_type == "bilibili-opus" else "",
+                    str(meta.get("source_hash") or "") if source_type == "bilibili-opus" else "",
+                ):
                     skipped += 1
                     print(f"{progress_label} 已存在完整笔记，跳过：{planned_output.name}", flush=True)
                     continue

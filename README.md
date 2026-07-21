@@ -27,6 +27,8 @@ scripts/local-notes-agent sync-up --profile qingfeng --dry-run
 
 OpenHanako's official app can launch `scripts/local-notes-mcp` as a local stdio Connector. Import [`docs/openhanako-mcp.example.json`](docs/openhanako-mcp.example.json) after replacing the placeholder absolute paths. Do not put API keys or Cookie values in the Connector or Profile; secrets remain in the existing protected Local Note Studio configuration.
 
+Bilibili opus Profiles can set `"opus_image_analysis": "off" | "ocr" | "vision"`. `off` keeps the download/reference-only behavior, `ocr` extracts visible text without expanded inference, and `vision` relates verifiable text, tables, charts, K-lines, screenshots, and relevance to the post body. Finance-oriented Profiles should normally use `vision`; it costs up to one multimodal model call per uncached attachment. Successful results are cached by image SHA-256 under isolated automation state, while the original Markdown image references are always retained.
+
 See [Agent automation](docs/agent-automation.md) for Profile precedence, allowlists, commands, MCP tool side effects, result/error schema, global locking, incremental rules, history storage, and controlled validation.
 
 ## Install a test build
@@ -61,13 +63,13 @@ Managed-runtime requests never pass a saved Conda environment to the worker.
 
 The selected ASR model directory is saved locally, masked by default, and can be revealed or explicitly saved from Configuration. Replaying an old task applies only task parameters; it no longer replaces the current runtime, API, model, ASR, or Cookie configuration with historical values.
 
-The optional model-cooldown override applies to the task's generic and specialized Qwen cooldown variables. Leave it empty to use the stable environment defaults, or set `0` to disable waiting. UP-opus batches wait only between two actual Qwen organization calls—not before the first call, after the last call, or for entries skipped because a complete note already exists.
+The optional model-cooldown override applies to the task's generic and specialized Qwen cooldown variables. Leave it empty to use the stable environment defaults, or set `0` to disable waiting. UP-opus image analysis and note organization wait only between adjacent real model calls—not for `off`, SHA-256 cache hits, or entries skipped because a complete note already exists.
 
 Cookie refresh follows a least-privilege path: in the signed-in Chrome window open `chrome://version/`, copy “Profile Path”, and select that concrete `Default` or `Profile N` directory. Leave the Cookie file field empty to store filtered Bilibili cookies under the app's Application Support directory, then choose “Authorize and refresh Cookie”. macOS may request access to other app data and Chrome Safe Storage; Local Note Studio does not need Documents, Desktop, Downloads, Apple Music/media-library, network-volume, or removable-volume access for Cookie refresh. Broad profile directories are rejected before any recursive search, and operational tasks with no note-output directory bypass the Markdown output scanner entirely.
 
 ## Source development
 
-Requirements: macOS 12+, Node.js, Rust/Tauri prerequisites, and either the managed runtime or a compatible Python/Conda environment.
+Requirements: macOS 12+, Node.js 20 or newer, Rust/Tauri prerequisites, and either the managed runtime or a compatible Python/Conda environment. Node.js 16 is not supported by the current Vite build.
 
 ```bash
 npm install

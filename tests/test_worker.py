@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import datetime as dt
 import io
 import json
 import os
@@ -48,6 +49,21 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual((req.favorite_limit, req.collection_type, req.collection_id, req.collection_mid), (0, "series", "42", "7"))
         self.assertTrue(req.retry_failed)
         self.assertFalse(req.keep_original_subtitles)
+
+    def test_opus_image_analysis_request_reaches_isolated_worker_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
+            os.environ, {"LOCAL_NOTE_STUDIO_STATE_DIR": str(pathlib.Path(temp_dir) / "state")}
+        ):
+            req = worker.TaskRequest.from_mapping(
+                {"task": "bilibili-opus", "opus_image_analysis": "vision", "cooldown_delay": 60}
+            )
+            env = worker.build_env(req)
+        self.assertEqual(req.opus_image_analysis, "vision")
+        self.assertEqual(env["OPUS_IMAGE_ANALYSIS"], "vision")
+        self.assertEqual(env["OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY"], "60")
+        self.assertTrue(env["OPUS_IMAGE_ANALYSIS_CACHE_DIR"].endswith("state/opus-image-analysis-cache"))
+        with self.assertRaisesRegex(ValueError, "off, ocr, or vision"):
+            worker.TaskRequest.from_mapping({"task": "bilibili-opus", "opus_image_analysis": "invalid"})
 
     def test_explicit_conda_executable_is_used_by_worker_commands(self):
         req = worker.TaskRequest.from_mapping({
@@ -291,6 +307,278 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(command[-3:], ["--overwrite", "--output-filename", "stable-name"])
 
 
+class OpusImageAnalysisTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.cache = self.root / "cache"
+        converter._LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC = None
+
+    def tearDown(self):
+        converter._LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC = None
+        self.temp.cleanup()
+
+    def cfg(self, mode: str) -> dict[str, str]:
+        return {
+            **converter.DEFAULTS,
+            "OPUS_IMAGE_ANALYSIS": mode,
+            "OPUS_IMAGE_ANALYSIS_CACHE_DIR": str(self.cache),
+            "OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY": "0",
+            "DEFAULT_LLM_MODEL": "fixture-vision",
+        }
+
+    def asset(self, index: int, url: str, content: bytes | None = None) -> dict[str, object]:
+        path = self.root / f"image-{index}.png"
+        path.write_bytes(content or f"image-{index}".encode())
+        return {
+            "source_url": url,
+            "path": str(path),
+            "markdown_path": f"assets/post/image-{index}.png",
+            "hash": converter.sha256_file(path),
+            "status": "downloaded",
+        }
+
+    def test_off_mode_keeps_legacy_download_only_behavior_without_model_call(self):
+        url = "https://i.example/one.png"
+        with mock.patch.object(converter, "call_chat_completion") as model:
+            section, summary = converter.build_opus_image_analysis([url], [self.asset(1, url)], "正文", self.cfg("off"))
+        self.assertEqual(section, "")
+        self.assertEqual(summary["status"], "off")
+        self.assertEqual(summary["model_calls"], 0)
+        model.assert_not_called()
+
+    def test_ocr_and_vision_preserve_image_order_and_limit_low_relevance(self):
+        urls = ["https://i.example/one.png", "https://i.example/two.png"]
+        assets = [self.asset(1, urls[0]), self.asset(2, urls[1])]
+        with mock.patch.object(converter, "call_chat_completion", return_value="第一行\n第二行") as model:
+            ocr, ocr_summary = converter.build_opus_image_analysis(urls[:1], assets[:1], "正文", self.cfg("ocr"))
+        self.assertIn("第一行\n  第二行", ocr)
+        self.assertIn("OCR 模式只提取", ocr)
+        self.assertEqual(ocr_summary["model_calls"], 1)
+        image_content = model.call_args.args[1][0]["content"]
+        self.assertEqual(image_content[1]["type"], "image_url")
+        self.assertTrue(image_content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+        responses = [
+            json.dumps(
+                {
+                    "relevance": "低",
+                    "visible_text": "粉丝观看榜",
+                    "visual_information": "互动排行榜截图",
+                    "contextual_summary": "据此推荐买入某股票",
+                    "uncertainties": "具体名次待核验",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "relevance": "高",
+                    "visible_text": "行业收入 100",
+                    "visual_information": "行业表格",
+                    "contextual_summary": "表格补充了正文数据",
+                    "uncertainties": "单位待核验",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+        with mock.patch.object(converter, "call_chat_completion", side_effect=responses):
+            vision, summary = converter.build_opus_image_analysis(urls, assets, "行业复盘", self.cfg("vision"))
+        self.assertLess(vision.index("### 图片 1"), vision.index("### 图片 2"))
+        self.assertLess(vision.index("assets/post/image-1.png"), vision.index("assets/post/image-2.png"))
+        self.assertIn("与正文相关性：低", vision)
+        self.assertIn("不据此扩展财经、交易或投资结论", vision)
+        self.assertNotIn("推荐买入", vision)
+        self.assertIn("行业收入 100", vision)
+        self.assertEqual(summary["model_calls"], 2)
+
+    def test_failed_analysis_retains_traceable_placeholder_and_structured_warning(self):
+        url = "https://i.example/fail.png"
+        with mock.patch.object(converter, "call_chat_completion", side_effect=RuntimeError("API_KEY=secret")):
+            section, summary = converter.build_opus_image_analysis([url], [self.asset(1, url)], "正文", self.cfg("vision"))
+        self.assertIn("图片分析失败/待重试", section)
+        self.assertIn("不得据此推断图片内容", section)
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["model_calls"], 1)
+        self.assertNotIn("secret", json.dumps(summary, ensure_ascii=False))
+
+    def test_sha256_cache_avoids_repeat_model_call(self):
+        url = "https://i.example/cache.png"
+        asset = self.asset(1, url)
+        response = json.dumps(
+            {
+                "relevance": "高",
+                "visible_text": "K线",
+                "visual_information": "日K图",
+                "contextual_summary": "与正文一致",
+                "uncertainties": "价格不可辨",
+            },
+            ensure_ascii=False,
+        )
+        cfg = self.cfg("vision")
+        cfg["OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY"] = "60"
+        with (
+            mock.patch.object(converter, "call_chat_completion", return_value=response) as model,
+            mock.patch.object(converter.time, "sleep") as sleep,
+        ):
+            _first, first_summary = converter.build_opus_image_analysis([url], [asset], "正文", cfg)
+            second, second_summary = converter.build_opus_image_analysis([url], [asset], "正文", cfg)
+        self.assertEqual(model.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(first_summary["model_calls"], 1)
+        self.assertEqual(second_summary["model_calls"], 0)
+        self.assertEqual(second_summary["cache_hits"], 1)
+        self.assertIn("分析状态：缓存复用", second)
+
+    def test_image_analysis_has_a_per_opus_model_call_limit(self):
+        urls = [f"https://i.example/{index}.png" for index in range(1, 5)]
+        assets = [self.asset(index, url) for index, url in enumerate(urls, 1)]
+        response = json.dumps(
+            {
+                "relevance": "中",
+                "visible_text": "表格",
+                "visual_information": "财经表格",
+                "contextual_summary": "补充正文",
+                "uncertainties": "数值待核验",
+            },
+            ensure_ascii=False,
+        )
+        cfg = self.cfg("vision")
+        cfg["OPUS_IMAGE_ANALYSIS_MAX_IMAGES"] = "2"
+        with mock.patch.object(converter, "call_chat_completion", return_value=response) as model:
+            section, summary = converter.build_opus_image_analysis(urls, assets, "正文", cfg)
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["limited"], 2)
+        self.assertEqual(section.count("超过安全调用上限"), 2)
+
+    def test_converter_keeps_original_markdown_image_references_in_order(self):
+        urls = ["https://i.example/one.png", "https://i.example/two.png"]
+        parsed = {
+            "item": {"id": "123"},
+            "title": "图文测试",
+            "author": "作者",
+            "author_mid": "42",
+            "published": "2026-07-21T15:11:00+08:00",
+            "content": "正文内容",
+            "images": urls,
+        }
+
+        def fake_download(markdown, out_path, _referer, _cfg, _enabled):
+            assets = [self.asset(1, urls[0]), self.asset(2, urls[1])]
+            return (
+                markdown.replace(urls[0], str(assets[0]["markdown_path"]))
+                .replace(urls[1], str(assets[1]["markdown_path"])),
+                assets,
+            )
+
+        cfg = {**self.cfg("off"), "BILIBILI_COOKIES_FILE": str(self.root / "cookies.txt")}
+        with (
+            mock.patch.object(converter, "bilibili_cookie_path", return_value=self.root / "cookies.txt"),
+            mock.patch.object(converter, "ensure_bilibili_cookie_login"),
+            mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
+            mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(converter, "download_markdown_assets", side_effect=fake_download),
+            mock.patch.object(converter, "bilibili_future_warning", return_value=""),
+        ):
+            path, item, skipped = converter.convert_bilibili_opus(
+                "https://www.bilibili.com/opus/123", self.root / "output", "fixture", cfg, {"items": []}, False, True
+            )
+        markdown = path.read_text(encoding="utf-8")
+        self.assertFalse(skipped)
+        self.assertLess(markdown.index("![动态图片 1](assets/post/image-1.png)"), markdown.index("![动态图片 2](assets/post/image-2.png)"))
+        self.assertEqual(item["opus_image_analysis"], "off")
+
+
+class BilibiliMetadataIsolationTests(unittest.TestCase):
+    def test_opus_source_hash_ignores_volatile_api_fields(self):
+        base = {
+            "item": {"statistics": {"likes": 1}},
+            "title": "稳定标题",
+            "author": "作者",
+            "author_mid": "42",
+            "published": "2026-07-21T15:11:00+08:00",
+            "content": "稳定正文",
+            "images": ["https://i.example/image.png?token=one"],
+        }
+        changed = {
+            **base,
+            "item": {"statistics": {"likes": 999}, "render_id": "volatile"},
+            "images": ["https://i.example/image.png?token=two"],
+        }
+        self.assertEqual(
+            converter.bilibili_opus_source_hash(base, "123"),
+            converter.bilibili_opus_source_hash(changed, "123"),
+        )
+        self.assertNotEqual(
+            converter.bilibili_opus_source_hash(base, "123"),
+            converter.bilibili_opus_source_hash({**base, "content": "正文已更新"}, "123"),
+        )
+
+    def test_future_time_validation_uses_explicit_asia_shanghai_timezone(self):
+        now = dt.datetime(2026, 7, 21, 16, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+        self.assertEqual(converter.bilibili_future_warning("2026-07-21 15:11", now=now), "")
+        self.assertEqual(converter.bilibili_future_warning("2026-07-21T07:11:00Z", now=now), "")
+        self.assertIn("明显晚于", converter.bilibili_future_warning("2026-07-21T17:00:00+08:00", now=now))
+        self.assertEqual(converter.bilibili_future_warning("", now=now), "")
+        self.assertEqual(converter.bilibili_future_warning("not-a-time", now=now), "")
+
+    def test_bilibili_model_context_excludes_deterministic_metadata_and_python_restores_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            draft = root / "draft.md"
+            draft.write_text(
+                "---\n"
+                "title: 测试动态\nsource_type: bilibili-opus\n"
+                "source_url: https://www.bilibili.com/opus/123\n"
+                "dynamic_id: 123\nauthor: 作者\nauthor_mid: 42\n"
+                "published: 2026-07-21T15:11:00+08:00\nsource_hash: abcdef\n"
+                "opus_image_analysis: vision\nopus_image_analysis_status: complete\n"
+                "---\n\n# 测试动态\n\n"
+                "## 来源信息\n\n- 转换时间：2026-07-21T18:00:00+08:00\n- SHA256：`abcdef`\n\n"
+                "## 原文抽取\n\n正文明确讨论交易心态。\n\n![动态图片 1](assets/one.png)\n\n"
+                "## 图片分析\n\n### 图片 1\n- 与正文相关性：低\n- 图表/画面信息：粉丝互动榜\n",
+                encoding="utf-8",
+            )
+            cfg = {
+                **organizer.DEFAULTS,
+                "INDEX_DIR": str(root / "index"),
+                "QWEN_ORGANIZE_COOLDOWN_DELAY": "0",
+                "A_SHARE_TERMS_ENABLED": "false",
+            }
+            captured = []
+
+            def fake_model(_cfg, messages):
+                captured.append(messages)
+                return "## 速读摘要\n\n正文讨论交易心态；粉丝互动榜与交易观点低相关。"
+
+            with mock.patch.object(organizer, "call_chat_completion", side_effect=fake_model):
+                output, _item = organizer.organize_file(draft, root / "output", cfg, omit_draft_path=True)
+            prompt = json.dumps(captured, ensure_ascii=False)
+            for excluded in (
+                "https://www.bilibili.com/opus/123",
+                "author_mid",
+                "2026-07-21T15:11:00+08:00",
+                "abcdef",
+                "转换时间",
+            ):
+                self.assertNotIn(excluded, prompt)
+            self.assertIn("正文明确讨论交易心态", prompt)
+            self.assertIn("粉丝互动榜", prompt)
+            self.assertIn("不要重新判断", prompt)
+
+            final = output.read_text(encoding="utf-8")
+            final_meta, _final_body = organizer.parse_frontmatter(final)
+            self.assertEqual(final_meta["published"], "2026-07-21T15:11:00+08:00")
+            self.assertEqual(final_meta["source_url"], "https://www.bilibili.com/opus/123")
+            self.assertIn("- 发布时间：2026-07-21T15:11:00+08:00", final)
+            self.assertNotIn("未来预设", final)
+            self.assertTrue(organizer.organized_note_complete(output, "bilibili-opus", "vision", "abcdef"))
+
+            failed = final.replace("opus_image_analysis_status: complete", "opus_image_analysis_status: failed")
+            output.write_text(failed, encoding="utf-8")
+            self.assertFalse(organizer.organized_note_complete(output, "bilibili-opus", "vision", "abcdef"))
+
+
 class IntegrityTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -307,6 +595,19 @@ class IntegrityTests(unittest.TestCase):
         path = self.fixture()
         req = worker.TaskRequest(task="web-url", output_dir=str(self.root))
         self.assertEqual(worker.validate_markdown_output(path, req), [])
+
+    def test_identical_staged_assets_are_reused_without_touching_complete_output(self):
+        staged = self.root / "staged" / "assets" / "post"
+        output = self.root / "output" / "assets" / "post"
+        staged.mkdir(parents=True)
+        output.mkdir(parents=True)
+        source = staged / "image.png"
+        target = output / "image.png"
+        source.write_bytes(b"same-image")
+        target.write_bytes(b"same-image")
+        old_mtime = target.stat().st_mtime_ns
+        worker.promote_staged_assets(self.root / "staged", self.root / "output")
+        self.assertEqual(target.stat().st_mtime_ns, old_mtime)
 
     def test_image_paths_with_parentheses_pass_integrity_check(self):
         asset_dir = self.root / "assets" / "BILI-OPUS-7.8(复盘)_1222699793902469157"
