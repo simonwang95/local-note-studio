@@ -22,7 +22,7 @@ The product is local-first. Source files, generated Markdown, indexes, cookies, 
 - No bundled local LLM runtime; LLM and multimodal OCR remain OpenAI-compatible API configuration.
 - Do not place mutable runtimes or large ASR model files directly inside the signed `.app`; manage them as versioned Application Support resources.
 - No cloud sync or account system.
-- No full task database until the task contract stabilizes.
+- The GUI keeps its compatible localStorage history. Agent/CLI/MCP runs additionally use the stable, versioned SQLite automation history under Application Support; do not create a second business execution system around it.
 - No macOS signing/notarization work before the local workflow is useful.
 
 ## Architecture Contract
@@ -36,6 +36,8 @@ Tauri UI
 ```
 
 The frontend should stay focused on task selection, settings, validation, and logs. The Rust layer should stay a thin process bridge. The Python worker owns task mapping, environment loading, dependency checks, and calling migrated scripts.
+
+Agent CLI and stdio MCP are restricted adapters into the same Worker. They may enforce Profile permissions, locking, audit, protocol, and result contracts, but must not copy acquisition, transcription, organization, Manifest, recovery, or integrity logic.
 
 ## Local Configuration
 

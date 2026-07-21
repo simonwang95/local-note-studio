@@ -943,7 +943,15 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): 
       activeHistoryEntry.status = "completed";
       activeHistoryEntry.outputs = taskResult?.outputs ?? [];
     }
-    setState(dryRun ? "预览完成" : "任务完成");
+    setState(
+      dryRun
+        ? "预览完成"
+        : taskResult?.status === "partial_failed"
+          ? "部分完成"
+          : taskResult?.status === "no_changes"
+            ? "无新增内容"
+            : "任务完成",
+    );
   } catch (error) {
     const message = errorMessage(error);
     if (message.startsWith("Task cancelled.")) {

@@ -18,8 +18,21 @@ def main() -> int:
     targets = set(bundle.get("targets", []))
     if not {"app", "dmg"}.issubset(targets):
         errors.append("Tauri bundle targets must include app and dmg")
+    if not str(bundle.get("macOS", {}).get("signingIdentity") or "").strip():
+        errors.append("macOS bundles must configure a signing identity so app resources are sealed")
     resources = bundle.get("resources", [])
-    if "../worker/local_note_studio_worker.py" not in resources or "../worker/scripts/*.py" not in resources:
+    required_resources = {
+        "../worker/local_note_studio_worker.py",
+        "../worker/automation_core.py",
+        "../worker/automation_profiles.py",
+        "../worker/local_notes_agent.py",
+        "../worker/local_notes_mcp.py",
+        "../worker/automation-profiles.example.json",
+        "../worker/scripts/*.py",
+        "../scripts/local-notes-agent",
+        "../scripts/local-notes-mcp",
+    }
+    if not required_resources.issubset(resources):
         errors.append("worker resources are not bundled")
     for forbidden in ["env.local", "indexes", "__pycache__"]:
         if any(forbidden in resource for resource in resources):

@@ -12,6 +12,22 @@ The app uses a Tauri desktop shell, a thin Rust process bridge, and a packaged P
 - Task history and recovery, deletable separate recent lists for task output directories and input sources, structured output actions, progress/cancellation, incognito mode, and editable/batch Manifest state.
 - App-managed Python 3.11 runtime with locked packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`/`ffprobe`, and Pandoc.
 - Advanced existing-Conda backend for development or users who already maintain a compatible environment.
+- Profile-restricted Agent CLI and stdio MCP tools for incremental UP video/opus sync, single URL/file ingestion, failed-item retry, environment checks, and persistent status queries.
+- Worker-wide cross-process task locking, versioned structured results, and redacted SQLite automation history shared by GUI, CLI, Agent, and MCP entry points.
+
+## Agent automation
+
+Automation uses the existing Worker and processing scripts; it does not duplicate Bilibili download, ASR, Qwen, Manifest, recovery, or integrity logic. Copy and customize [`worker/automation-profiles.example.json`](worker/automation-profiles.example.json) under `~/Library/Application Support/Local Note Studio/config/automation-profiles.json`, then validate without writing:
+
+```bash
+scripts/local-notes-agent profiles
+scripts/local-notes-agent env-check --profile qingfeng
+scripts/local-notes-agent sync-up --profile qingfeng --dry-run
+```
+
+OpenHanako's official app can launch `scripts/local-notes-mcp` as a local stdio Connector. Import [`docs/openhanako-mcp.example.json`](docs/openhanako-mcp.example.json) after replacing the placeholder absolute paths. Do not put API keys or Cookie values in the Connector or Profile; secrets remain in the existing protected Local Note Studio configuration.
+
+See [Agent automation](docs/agent-automation.md) for Profile precedence, allowlists, commands, MCP tool side effects, result/error schema, global locking, incremental rules, history storage, and controlled validation.
 
 ## Install a test build
 

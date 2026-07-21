@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "profiles": [
+    {
+      "id": "qingfeng",
+      "enabled": false,
+      "up_mid": "1420210197",
+      "content_types": ["opus", "video"],
+      "output_dir": "/Users/xxx/Files/Data/Notes/Finance/青枫浦上Q",
+      "allowed_output_roots": ["/Users/xxx/Files/Data/Notes"],
+      "allowed_input_roots": ["/Users/xxx/Files/Data/Inbox"],
+      "allowed_domains": ["bilibili.com", "mp.weixin.qq.com"],
+      "stock_terms": true,
+      "overwrite_outputs": false,
+      "cooldown_delay": 60,
+      "limit": 0,
+      "max_limit": 500,
+      "subtitle_strategy": "yt-dlp",
+      "lock_timeout_seconds": 0,
+      "execution_timeout_seconds": 21600,
+      "runtime_backend": "managed",
+      "extract_keyframes": false,
+      "dialogue_detection": false,
+      "keep_original_subtitles": true
+    }
+  ]
+}

@@ -5,6 +5,7 @@ target/
 src-tauri/target/
 src-tauri/gen/
 worker/env.local
+worker/automation-profiles.json
 worker/cache/
 worker/indexes/
 worker/notes/

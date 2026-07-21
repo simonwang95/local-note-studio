@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-07-21
+
+- Completed T-113 Agent automation without creating a parallel processing system: the restricted Agent CLI and stdio MCP adapter validate named Profiles, then invoke the existing Worker through stdin so Bilibili acquisition, ASR, Qwen organization, Manifest/recovery, and output integrity remain single-sourced.
+- Added a Worker-wide macOS advisory lock inherited by business subprocesses, fail-fast/configurable wait behavior, redacted lock metadata, hard execution deadlines, signal-driven process cleanup, and read-only status access. GUI requests now use stdin instead of exposing complete request JSON/API keys in process arguments.
+- Added Schema 1.0 results and stable errors for success, no changes, partial failure, failure, cancellation, and timeout; redacted SQLite history persists run/request/result/retry/version data across Agent, MCP, CLI, GUI, and restarts while preserving existing frontend localStorage history.
+- Added paginated UP video discovery with BVID de-duplication, per-item completion only after output integrity succeeds, missing-output recovery, partial batch continuation, failed-item-only retry, and unified `bilibili-up-sync` reuse of the existing UP-opus and single-video paths.
+- Added seven MCP tools, side-effect annotations, strict JSON-RPC stdout, clean EOF/signal shutdown, fixed launchers, a non-secret Profile example, and a current OpenHanako stdio Connector import example with a long-call timeout. No OpenHanako, Stocks, or real note project was modified.
+- Expanded automated coverage to Profile precedence/validation, path and URL escapes, secret redaction and stdin process arguments, actual cross-process lock competition/SIGKILL recovery, BVID pagination/de-duplication, failure/retry Manifest behavior, result schemas, MCP stdout, and OpenHanako configuration. Source version advanced to `0.1.17`; the optimized arm64 DMG was built with a complete ad-hoc app signature, mounted and verified, with SHA-256 `0441e21b87093cb63dce09dd0d3f8e82eebb3b1a2425cf90b3995ec3664fcf0d`.
+
 ## 2026-07-16
 
 - Fixed local video/audio reruns so an existing Markdown matched by the no-overwrite policy is excluded from every later summary, proofreading, frontmatter, keyframe, and Manifest post-processing stage instead of being modified after ASR was skipped.

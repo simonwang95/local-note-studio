@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "local-note-studio": {
+      "name": "Local Note Studio",
+      "description": "Incremental, profile-restricted local note ingestion",
+      "transport": "stdio",
+      "command": "/absolute/path/to/local-note-studio/scripts/local-notes-mcp",
+      "args": [],
+      "cwd": "/absolute/path/to/local-note-studio",
+      "timeout": 21600,
+      "autoStart": true
+    }
+  }
+}

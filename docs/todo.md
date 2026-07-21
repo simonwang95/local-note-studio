@@ -1,6 +1,6 @@
 # Local Note Studio 待办清单
 
-更新时间：2026-07-07
+更新时间：2026-07-21
 
 本文档是项目待办事项的唯一维护入口。`docs/progress.md` 记录已经完成的能力，`docs/development-plan.md` 只描述阶段方向，不再分别维护重复清单。
 
@@ -15,6 +15,7 @@
 - 托管环境安装对 Python 运行时/工具下载、PyPI/TLS 和 Hugging Face 模型网络失败增加自动重试和明确诊断；运行时下载优先 HTTP/1.1，锁定依赖版本不放宽，特殊网络可用 `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL`、`LOCAL_NOTE_STUDIO_PIP_INDEX_URL`、`LOCAL_NOTE_STUDIO_HF_ENDPOINT` 或 `LOCAL_NOTE_STUDIO_PANDOC_URL` / `LOCAL_NOTE_STUDIO_FFMPEG_URL` / `LOCAL_NOTE_STUDIO_FFPROBE_URL` 指定可访问镜像；Pandoc 下载失败只标记 EPUB 组件待修复，不阻断其他托管任务。
 - 托管 B站 ASR 内层脚本会复用外层托管 Python，依赖检查对 `mlx-whisper` 使用真实 import，避免状态页显示 OK 但实际转录被本机 Conda、`.venv` 或 PATH 影响。
 - 任务页分别保存最近使用的“本次输出目录”和“输入源 URL/文件/目录”，两个列表互不覆盖，可在界面删除当前记录或清空列表，仅保存在本机 UI `localStorage`；隐身模式不会新增最近记录。
+- 已提供命名 Profile、受限 Agent CLI、跨进程全局锁、SQLite 审计、UP 主视频/动态增量同步和 stdio MCP；OpenHanako 正式 APP 可作为本地 Connector 调用，而无需修改其源码或应用包。
 - 转换草稿使用系统临时目录，正式目录只接收 Qwen 整理后的 Markdown 和图片资产；需要保留原文的任务会在笔记末尾附完整原文。
 - P0 稳定性与可验证性、P1 日常使用体验均已完成开发；托管运行环境与安装包仍处于开发侧完成、未做干净 Mac 独立验收状态。
 
@@ -180,6 +181,17 @@
 - 校验 Tab：依赖检查、处理记录/文件状态和运行时诊断。
 - 1180×760 默认窗口下日志/输出检查器始终可见，内容区独立滚动。
 - 切换 Tab 不重建运行任务，不丢失输入焦点、进度、日志和结果选择。
+
+### T-113 Agent 自动化与 stdio MCP
+
+状态：已完成（2026-07-21）。新增受限命名 Profile、Agent CLI、Worker 级跨进程锁、Schema 1.0 结果与错误码、脱敏 SQLite 共享历史、UP 主 BVID 分页及视频/动态统一增量同步、失败重试和 stdio MCP；桌面请求改用 stdin，OpenHanako 当前公开 stdio Connector 字段已有配置示例和协议回归。
+
+- Agent 只能触发 Profile 白名单中的 UP、域名、输入根和输出根，不接受自由命令、秘密或任意 Worker 参数。
+- 完整任务及子进程共享 macOS 文件锁，异常退出自动恢复；只读状态不被长任务锁住。
+- 成功、无新增、部分失败、完全失败、取消和超时使用稳定结构化结果；历史跨进程和重启持久化。
+- UP 视频只有在转写、Qwen 整理和完整性校验后才标为完成，BVID 去重、失败状态和重试均有本地 fixture/mock 测试。
+- MCP stdout 仅包含 JSON-RPC，写工具声明非破坏性和幂等副作用；连接停止会清理 Worker 进程组。
+- 完整配置、安全边界、工具、Schema、错误码和 OpenHanako 步骤见 [`agent-automation.md`](agent-automation.md)。
 
 ## P2：扩展能力
 

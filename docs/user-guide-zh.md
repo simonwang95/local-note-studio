@@ -2,6 +2,8 @@
 
 这份文档面向 Local Note Studio 的日常使用。目标是先把 Mac 桌面应用跑起来，再用它检查环境、预览命令、执行笔记整理任务。
 
+需要让 OpenHanako 正式 APP 或其他本地 Agent 增量整理指定 UP 主时，请使用受限的命名 Profile 和 stdio MCP，不要让 Agent 操作 GUI、自由拼 Worker 参数或接触 Cookie/API Key。完整步骤见 [`agent-automation.md`](agent-automation.md)，可导入的 OpenHanako 示例见 [`openhanako-mcp.example.json`](openhanako-mcp.example.json)。
+
 ## 1. 先分清三种启动方式
 
 ### 推荐给其他 Mac 测试：DMG 安装包

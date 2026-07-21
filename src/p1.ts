@@ -14,10 +14,29 @@ export type TaskHistoryEntry = {
 };
 
 export type TaskResult = {
+  schema_version?: string;
+  run_id?: string;
+  caller?: string;
   task: string;
   status: string;
+  started_at?: string;
+  finished_at?: string;
+  source_ref?: string;
   outputs: string[];
   output_dir: string;
+  counts?: {
+    discovered: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    failed: number;
+  };
+  deliveries?: Array<Record<string, unknown>>;
+  manifest_path?: string;
+  warnings?: string[];
+  details?: Record<string, unknown>;
+  error?: { error_code: string; message: string } | null;
+  retryable?: boolean;
 };
 
 export type ProgressEvent = {

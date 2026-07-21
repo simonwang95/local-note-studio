@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import shutil
 import sys
@@ -201,11 +202,12 @@ class RequestAndCommandContractTests(unittest.TestCase):
             (profile / "Network").mkdir(parents=True)
             (profile / "Network" / "Cookies").touch()
             request = json.dumps({"task": "refresh-bilibili-cookies", "browser_profile": str(profile)})
-            with mock.patch.object(worker, "run_command", return_value="refreshed\n"):
-                with mock.patch.object(worker, "output_snapshot", side_effect=AssertionError("unexpected output scan")):
-                    with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-                        self.assertEqual(worker.main(["--request-json", request]), 0)
-                        self.assertEqual(stdout.getvalue(), "refreshed\n")
+            with mock.patch.dict(os.environ, {"LOCAL_NOTE_STUDIO_STATE_DIR": str(pathlib.Path(temp_dir) / "state")}):
+                with mock.patch.object(worker, "run_command", return_value="refreshed\n"):
+                    with mock.patch.object(worker, "output_snapshot", side_effect=AssertionError("unexpected output scan")):
+                        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                            self.assertEqual(worker.main(["--request-json", request]), 0)
+                            self.assertTrue(stdout.getvalue().startswith("refreshed\nTASK_RESULT_JSON:"))
 
     def test_p1_request_mapping_and_task_overrides(self):
         req = worker.TaskRequest.from_mapping({

@@ -16,11 +16,19 @@ Tauri UI
   -> worker/local_note_studio_worker.py
   -> worker/scripts/*
   -> Markdown output directory
+
+OpenHanako / local Agent
+  -> scripts/local-notes-mcp or scripts/local-notes-agent
+  -> validated named Profile + stdin request
+  -> worker/local_note_studio_worker.py
+  -> the same worker/scripts/* business path
 ```
 
 The desktop app should not embed business logic for transcription, conversion, or prompting. It sends a structured task request to the worker and streams or displays logs.
 
 Worker executions are started in their own process group on Unix-like systems. Cancelling a task or exiting the app terminates that group so helper tools launched by the Python worker, such as `ffmpeg` or `yt-dlp`, do not remain as orphaned background processes.
+
+All mutating Worker entry points also acquire one macOS advisory file lock under Application Support. The lock descriptor is inherited by the active business subprocess, so a parent crash cannot allow a competing GUI/CLI/MCP task to enter while that subprocess is still alive. Read-only checks and status queries do not acquire the write lock.
 
 ## Distribution Runtime Boundary
 
@@ -72,6 +80,8 @@ The worker accepts either CLI flags or a JSON request. Normal processing tasks u
 }
 ```
 
+Automation requests prefer `--request-stdin`; the legacy `--request-json` and direct CLI flags remain compatible. The Tauri bridge also uses stdin so API keys are not exposed in process arguments. Automation-only request metadata includes `caller`, `profile_id`, `run_id`, `retry_of`, `content_types`, `lock_timeout_seconds`, and `execution_timeout_seconds`.
+
 The worker also supports an environment-check request:
 
 ```json
@@ -105,6 +115,8 @@ Output discovery is restricted to processing tasks with a non-empty output direc
 | `web-url` | `worker/scripts/convert_sources_to_md.py --url`, then `worker/scripts/qwen_organize_notes.py --source` |
 | `bilibili-opus` | `worker/scripts/convert_sources_to_md.py --url`, then `worker/scripts/qwen_organize_notes.py --source` |
 | `bilibili-up-opus` | `worker/scripts/convert_sources_to_md.py --bilibili-up-opus`, then batched `worker/scripts/qwen_organize_notes.py --source` |
+| `bilibili-up-video` | paginated BVID discovery, then the existing `bilibili-url` mapping per incomplete item |
+| `bilibili-up-sync` | the existing `bilibili-up-opus` plus `bilibili-up-video`, with one lock/result/audit summary |
 | `source-file` | `worker/scripts/convert_sources_to_md.py --source`, then `worker/scripts/qwen_organize_notes.py --source` |
 | `ai-chat` | `worker/scripts/convert_sources_to_md.py --source`, then `worker/scripts/qwen_organize_notes.py --source` |
 | `paper-quickread` | `worker/scripts/quick_read_pdf.py --source` |
@@ -113,12 +125,10 @@ Output discovery is restricted to processing tasks with a non-empty output direc
 
 `output_filename` is optional and only intended for single-output tasks. It cannot contain path separators. Directory batch video jobs intentionally reject it to prevent multiple sources writing to the same Markdown file.
 
-## Later Hardening
+## Automation State
 
-- Store task history in SQLite.
-- Add retry and partial-recovery controls; cancellation, process-group cleanup, and streaming logs are already implemented.
-- Add output-integrity checks and surface manifest/index state.
-- Optionally add Bilibili QR login while keeping Chrome Profile refresh available.
-- Complete the app-managed runtime lifecycle before release packaging, signing, and notarization.
+`state/automation-history.sqlite3` stores redacted, versioned cross-process task history. `state/up-sync/<mid>.json` stores per-content completion/failure state, and `state/global-task.*` stores the active advisory lock metadata. Existing frontend localStorage history remains compatible and is not migrated yet. See [`agent-automation.md`](agent-automation.md) for the complete contracts.
+
+Remaining release hardening is limited to the existing clean-Mac, signing, and notarization gates plus optional future Bilibili QR login.
 
 See [`docs/todo.md`](todo.md) for the prioritized backlog and acceptance criteria.

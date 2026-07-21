@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -119,7 +119,7 @@ fn terminate_child(child: &mut Child) -> Result<(), String> {
         let _ = Command::new("kill")
             .args(["-TERM", &process_group])
             .status();
-        for _ in 0..20 {
+        for _ in 0..60 {
             if child.try_wait().map_err(|err| err.to_string())?.is_some() {
                 return Ok(());
             }
@@ -152,12 +152,21 @@ fn run_worker_blocking(
     let mut command = Command::new(python);
     configure_worker_command(&app, &mut command, &request)?;
     configure_child_lifecycle(&mut command);
-    let output = command
+    let mut child = command
         .arg(worker)
-        .arg("--request-json")
-        .arg(request)
-        .output()
+        .arg("--request-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| err.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "worker stdin is unavailable".to_string())?
+        .write_all(request.as_bytes())
+        .map_err(|err| err.to_string())?;
+    let output = child.wait_with_output().map_err(|err| err.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = format!("{}{}", stdout, stderr);
@@ -195,11 +204,18 @@ fn run_worker_streaming(
     configure_child_lifecycle(&mut command);
     let mut child = command
         .arg(worker)
-        .arg("--request-json")
-        .arg(request)
+        .arg("--request-stdin")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+        .map_err(|err| err.to_string())?;
+
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "worker stdin is unavailable".to_string())?
+        .write_all(request.as_bytes())
         .map_err(|err| err.to_string())?;
 
     let stdout = child.stdout.take();
@@ -357,6 +373,7 @@ fn configure_worker_command(
     command
         .env("LOCAL_NOTE_STUDIO_APP_DATA_DIR", &root)
         .env("LOCAL_NOTE_STUDIO_STATE_DIR", &state_dir)
+        .env("LOCAL_NOTE_STUDIO_CALLER", "gui")
         .env("INDEX_DIR", &index_dir)
         .env("BILIBILI_STATE_DIR", index_dir.join("bilibili-state"))
         .env("OCR_CHECKPOINT_DIR", state_dir.join("ocr-checkpoints"));

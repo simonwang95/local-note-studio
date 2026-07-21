@@ -15,6 +15,12 @@ The desktop UI persists these options locally and sends them in the worker reque
 
 Only options relevant to the selected task are shown in the UI. Task-level options override the matching `worker/env.local` default for that run without editing the file.
 
+## Agent Automation
+
+Agents should not call the free-form Worker CLI. Use `scripts/local-notes-agent` or `scripts/local-notes-mcp` with an enabled named Profile. High-level commands cover UP video/opus sync, one allowed URL, one allowed file/directory, failed-item retry, environment checks, Profile listing and persistent status.
+
+`bilibili-up-video` accepts a numeric UID or UP-space URL, discovers pages by BVID, and reuses the single-video path. `bilibili-up-sync` combines it with the existing `bilibili-up-opus` path. `favorite_limit`/Profile `limit` is the safe per-run candidate cap; `0` means all incomplete items. See [`agent-automation.md`](agent-automation.md) for exact permissions, incremental states and JSON contracts.
+
 ## Bilibili Single URL
 
 Use this for one video URL. By default, the worker prioritizes `yt-dlp`-confirmed subtitles, then ASR. Web-player subtitles can be selected explicitly from the desktop UI.

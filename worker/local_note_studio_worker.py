@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import http.cookiejar
@@ -13,14 +14,32 @@ import pathlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, replace
 from typing import Any
+
+_WORKER_MODULE_DIR = pathlib.Path(__file__).resolve().parent
+if str(_WORKER_MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(_WORKER_MODULE_DIR))
+
+from automation_core import (
+    AutomationError,
+    TaskResult,
+    audited_task,
+    classify_error,
+    new_run_id,
+    redact_text,
+    stable_source_ref,
+    state_dir as automation_state_dir,
+    utc_now,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -65,6 +84,10 @@ ASR_MODEL_HINT = "Choose an existing Whisper model directory in the app Configur
 @dataclass
 class TaskRequest:
     task: str
+    caller: str = ""
+    profile_id: str = ""
+    run_id: str = ""
+    retry_of: str = ""
     source: str = ""
     output_dir: str = ""
     output_filename: str = ""
@@ -105,12 +128,19 @@ class TaskRequest:
     manifest_status: str = ""
     manifest_index: int = -1
     manifest_indexes: tuple[int, ...] = ()
+    content_types: tuple[str, ...] = ()
+    lock_timeout_seconds: int = 0
+    execution_timeout_seconds: int = 0
     dry_run: bool = False
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "TaskRequest":
         return cls(
             task=str(data.get("task") or ""),
+            caller=str(data.get("caller") or ""),
+            profile_id=str(data.get("profile_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            retry_of=str(data.get("retry_of") or ""),
             source=str(data.get("source") or ""),
             output_dir=str(data.get("output_dir") or ""),
             output_filename=str(data.get("output_filename") or ""),
@@ -151,6 +181,9 @@ class TaskRequest:
             manifest_status=str(data.get("manifest_status") or ""),
             manifest_index=parse_int(data.get("manifest_index"), -1),
             manifest_indexes=parse_int_tuple(data.get("manifest_indexes")),
+            content_types=tuple(str(item) for item in data.get("content_types", []) if str(item) in {"opus", "video"}),
+            lock_timeout_seconds=max(0, parse_int(data.get("lock_timeout_seconds"), 0)),
+            execution_timeout_seconds=max(0, parse_int(data.get("execution_timeout_seconds"), 0)),
             dry_run=bool(data.get("dry_run")),
         )
 
@@ -650,6 +683,7 @@ def tool_cmd(req: TaskRequest, tool: str, *args: str) -> list[str]:
 
 
 def probe(command: list[str], env: dict[str, str], timeout: int = 20) -> tuple[bool, str]:
+    lock_fd = parse_int(os.environ.get("LOCAL_NOTE_STUDIO_LOCK_FD"), -1)
     try:
         result = subprocess.run(
             command,
@@ -660,6 +694,7 @@ def probe(command: list[str], env: dict[str, str], timeout: int = 20) -> tuple[b
             stderr=subprocess.STDOUT,
             check=False,
             timeout=timeout,
+            pass_fds=(lock_fd,) if lock_fd >= 0 else (),
         )
     except FileNotFoundError as exc:
         return False, str(exc)
@@ -1079,6 +1114,363 @@ def command_for(req: TaskRequest) -> list[str]:
     raise ValueError(f"unsupported task: {req.task}")
 
 
+def bilibili_up_mid(source: str) -> str:
+    value = str(source or "").strip()
+    if value.isdigit():
+        return value
+    match = re.search(r"space\.bilibili\.com/(\d+)", value)
+    if match:
+        return match.group(1)
+    raise ValueError("UP source must be a numeric UID or a space.bilibili.com URL")
+
+
+def _discover_bilibili_up_videos_api(req: TaskRequest, page_size: int = 50) -> list[dict[str, Any]]:
+    """Discover all published videos page by page; processing limits are applied later."""
+    mid = bilibili_up_mid(req.source)
+    page = 1
+    discovered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while True:
+        query = urllib.parse.urlencode(
+            {"mid": mid, "pn": page, "ps": max(1, min(50, page_size)), "order": "pubdate", "platform": "web"}
+        )
+        payload = bilibili_json(req, f"https://api.bilibili.com/x/space/wbi/arc/search?{query}")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        listing = data.get("list") if isinstance(data.get("list"), dict) else {}
+        videos = listing.get("vlist") if isinstance(listing.get("vlist"), list) else []
+        for raw in videos:
+            if not isinstance(raw, dict):
+                continue
+            bvid = str(raw.get("bvid") or "").strip()
+            if not re.fullmatch(r"BV[0-9A-Za-z]+", bvid) or bvid in seen:
+                continue
+            seen.add(bvid)
+            created = parse_int(raw.get("created"), 0)
+            discovered.append(
+                {
+                    "bvid": bvid,
+                    "title": str(raw.get("title") or "").strip(),
+                    "source_url": f"https://www.bilibili.com/video/{bvid}/",
+                    "author_mid": mid,
+                    "published": dt.datetime.fromtimestamp(created, dt.timezone.utc).isoformat(timespec="seconds") if created else "",
+                    "source_hash": hashlib.sha256(
+                        json.dumps(
+                            {"bvid": bvid, "title": str(raw.get("title") or ""), "created": created},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        page_info = data.get("page") if isinstance(data.get("page"), dict) else {}
+        total = parse_int(page_info.get("count"), len(discovered))
+        size = max(1, parse_int(page_info.get("ps"), page_size))
+        if not videos or len(discovered) >= total or page * size >= total:
+            break
+        page += 1
+        if page > 10000:
+            raise RuntimeError("Bilibili video pagination exceeded the safety limit")
+    return discovered
+
+
+def _discover_bilibili_up_videos_ytdlp(req: TaskRequest) -> list[dict[str, Any]]:
+    mid = bilibili_up_mid(req.source)
+    env = build_env(req)
+    arguments = [
+        "--flat-playlist",
+        "--dump-json",
+        "--ignore-errors",
+        "--no-warnings",
+    ]
+    cookie_path = str(env.get("BILIBILI_COOKIES_FILE") or env.get("BILI_COOKIE_FILE") or "").strip()
+    if cookie_path:
+        arguments.extend(["--cookies", cookie_path])
+    arguments.append(f"https://space.bilibili.com/{mid}/video")
+    command = tool_cmd(req, "yt-dlp", *arguments)
+    lock_fd = parse_int(os.environ.get("LOCAL_NOTE_STUDIO_LOCK_FD"), -1)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(WORKER_DIR),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=req.timeout_seconds or 300,
+            check=False,
+            pass_fds=(lock_fd,) if lock_fd >= 0 else (),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"yt-dlp UP video discovery failed: {redact_text(str(exc))}") from exc
+    discovered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in completed.stdout.splitlines():
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            continue
+        bvid = str(raw.get("bvid") or raw.get("id") or "").strip()
+        match = re.search(r"BV[0-9A-Za-z]+", bvid)
+        if not match:
+            match = re.search(r"BV[0-9A-Za-z]+", str(raw.get("url") or raw.get("webpage_url") or ""))
+        if not match or match.group(0) in seen:
+            continue
+        bvid = match.group(0)
+        seen.add(bvid)
+        created = parse_int(raw.get("timestamp"), 0)
+        title = str(raw.get("title") or "").strip()
+        discovered.append(
+            {
+                "bvid": bvid,
+                "title": title,
+                "source_url": f"https://www.bilibili.com/video/{bvid}/",
+                "author_mid": mid,
+                "published": dt.datetime.fromtimestamp(created, dt.timezone.utc).isoformat(timespec="seconds") if created else "",
+                "source_hash": hashlib.sha256(
+                    json.dumps({"bvid": bvid, "title": title, "created": created}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    if completed.returncode != 0 and not discovered:
+        detail = redact_text(completed.stderr.strip() or "yt-dlp returned no videos")
+        raise RuntimeError(f"yt-dlp UP video discovery failed ({completed.returncode}): {detail}")
+    return discovered
+
+
+def discover_bilibili_up_videos(req: TaskRequest, page_size: int = 50) -> list[dict[str, Any]]:
+    try:
+        return _discover_bilibili_up_videos_api(req, page_size=page_size)
+    except RuntimeError as api_error:
+        print(f"[发现 WARN] B站空间分页 API 不可用，回退到 yt-dlp：{redact_text(str(api_error))}", file=sys.stderr, flush=True)
+        try:
+            fallback = _discover_bilibili_up_videos_ytdlp(req)
+            if not fallback:
+                raise RuntimeError("yt-dlp returned no verifiable BVID entries")
+            return fallback
+        except RuntimeError as fallback_error:
+            code, retryable = classify_error(api_error)
+            if code == "TASK_FAILED":
+                code, retryable = "BILIBILI_DISCOVERY_FAILED", True
+            raise AutomationError(
+                f"UP video discovery failed via API and yt-dlp: {redact_text(str(api_error))}; {redact_text(str(fallback_error))}",
+                code,
+                retryable,
+            ) from fallback_error
+
+
+def up_sync_manifest_path(mid: str) -> pathlib.Path:
+    return automation_state_dir() / "up-sync" / f"{mid}.json"
+
+
+def load_up_sync_manifest(mid: str) -> dict[str, Any]:
+    path = up_sync_manifest_path(mid)
+    if not path.exists():
+        return {"schema_version": "1.0", "up_mid": mid, "items": []}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"UP sync manifest is invalid: {exc}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise RuntimeError("UP sync manifest must contain an items list")
+    return payload
+
+
+def save_up_sync_manifest(path: pathlib.Path, manifest: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    manifest["updated_at"] = utc_now()
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp.chmod(0o600)
+    os.replace(temp, path)
+
+
+def find_up_sync_item(manifest: dict[str, Any], bvid: str) -> dict[str, Any] | None:
+    for item in manifest.get("items", []):
+        if isinstance(item, dict) and item.get("bvid") == bvid:
+            return item
+    return None
+
+
+def existing_video_output(env: dict[str, str], bvid: str, req: TaskRequest) -> pathlib.Path | None:
+    index_root = resolve_local_path(env.get("INDEX_DIR") or str(WORKER_DIR / "indexes"))
+    path = index_root / "video-manifest.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for item in reversed(payload.get("items", [])):
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source_url") or item.get("source_path") or "")
+        if bvid.lower() not in source.lower():
+            continue
+        raw_output = str(item.get("output_path") or item.get("organized_output") or "")
+        if not raw_output:
+            continue
+        output = resolve_local_path(raw_output)
+        if output.is_file() and not validate_markdown_output(output, replace(req, task="bilibili-url")):
+            return output
+    return None
+
+
+def run_bilibili_up_videos(req: TaskRequest, env: dict[str, str], result: TaskResult) -> None:
+    mid = bilibili_up_mid(req.source)
+    manifest_path = up_sync_manifest_path(mid)
+    manifest = load_up_sync_manifest(mid)
+    discovered = discover_bilibili_up_videos(req)
+    result.manifest_path = str(manifest_path)
+    result.counts["discovered"] += len(discovered)
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for video in discovered:
+        record = find_up_sync_item(manifest, video["bvid"])
+        if record is None:
+            record = {**video, "source_type": "bilibili-video", "status": "discovered", "organized_status": "pending"}
+            manifest.setdefault("items", []).append(record)
+        else:
+            for key in ("title", "source_url", "author_mid", "published", "source_hash"):
+                record[key] = video[key]
+        existing = existing_video_output(env, video["bvid"], req)
+        completed_output = pathlib.Path(str(record.get("output_path") or "")).expanduser()
+        if completed_output.is_file() and not validate_markdown_output(completed_output, replace(req, task="bilibili-url")):
+            existing = completed_output
+        if existing:
+            record.update(
+                status="completed",
+                organized_status="organized",
+                output_path=str(existing),
+                error_code="",
+                error="",
+                completed_at=record.get("completed_at") or utc_now(),
+            )
+            result.counts["skipped"] += 1
+            continue
+        if record.get("status") == "completed":
+            record.update(status="failed", organized_status="failed", error_code="OUTPUT_MISSING", error="completed output is missing")
+        if req.retry_failed:
+            if record.get("status") == "failed":
+                candidates.append((video, record))
+            else:
+                result.counts["skipped"] += 1
+        elif record.get("status") == "failed":
+            result.counts["skipped"] += 1
+        else:
+            candidates.append((video, record))
+    if req.retry_failed:
+        discovered_bvids = {video["bvid"] for video in discovered}
+        for record in manifest.get("items", []):
+            if not isinstance(record, dict) or record.get("status") != "failed":
+                continue
+            bvid = str(record.get("bvid") or "")
+            if bvid in discovered_bvids or not re.fullmatch(r"BV[0-9A-Za-z]+", bvid):
+                continue
+            candidates.append(
+                (
+                    {
+                        "bvid": bvid,
+                        "title": str(record.get("title") or ""),
+                        "source_url": str(record.get("source_url") or f"https://www.bilibili.com/video/{bvid}/"),
+                        "author_mid": str(record.get("author_mid") or mid),
+                        "published": str(record.get("published") or ""),
+                        "source_hash": str(record.get("source_hash") or bvid),
+                    },
+                    record,
+                )
+            )
+    limit = max(0, req.favorite_limit)
+    if limit > 0:
+        deferred = candidates[limit:]
+        candidates = candidates[:limit]
+        result.counts["skipped"] += len(deferred)
+    save_up_sync_manifest(manifest_path, manifest)
+
+    attempted = 0
+    succeeded = 0
+    for index, (video, record) in enumerate(candidates, start=1):
+        attempted += 1
+        item_req = replace(req, task="bilibili-url", source=video["source_url"], output_filename="", retry_failed=False)
+        item_before = output_snapshot(req.output_dir)
+        print(f"[视频 {index}/{len(candidates)}] 开始：{video['bvid']} {video['title']}", flush=True)
+        try:
+            run_command(command_for(item_req), env, item_req.dry_run)
+            validate_task_outputs(item_req, item_before)
+            changed = changed_outputs(req.output_dir, item_before)
+            output = next((path for path in changed if path.suffix.lower() == ".md"), None)
+            output = output or existing_video_output(env, video["bvid"], item_req)
+            if not item_req.dry_run and output is None:
+                raise RuntimeError("输出完整性检查失败：视频任务未产生或找到完整 Markdown 笔记")
+            record.update(
+                status="completed",
+                organized_status="organized",
+                output_path=str(output or ""),
+                error_code="",
+                error="",
+                completed_at=utc_now(),
+            )
+            succeeded += 1
+            print(f"[视频 {index}/{len(candidates)}] 完成：{video['bvid']}", flush=True)
+        except BaseException as exc:
+            code, retryable = classify_error(exc)
+            record.update(
+                status="failed",
+                organized_status="failed",
+                output_path="",
+                error_code=code,
+                error=redact_text(str(exc)),
+                retryable=retryable,
+                failed_at=utc_now(),
+            )
+            result.counts["failed"] += 1
+            print(f"[视频 {index}/{len(candidates)}] 失败 {video['bvid']}：{redact_text(str(exc))}", file=sys.stderr, flush=True)
+        save_up_sync_manifest(manifest_path, manifest)
+        if index < len(candidates) and succeeded > 0 and req.cooldown_delay > 0:
+            print(f"[冷却] 下一条视频前等待 {req.cooldown_delay} 秒。", flush=True)
+            time.sleep(req.cooldown_delay)
+    if attempted and result.counts["failed"] == attempted:
+        raise AutomationError("all UP video items failed; use retry-failed after correcting the cause", "BATCH_ALL_FAILED", True)
+    if result.counts["failed"]:
+        result.status = "partial_failed"
+
+
+def run_bilibili_up_sync(req: TaskRequest, env: dict[str, str], result: TaskResult) -> None:
+    content_types = req.content_types or ("opus", "video")
+    if req.dry_run:
+        mid = bilibili_up_mid(req.source)
+        print(
+            "AUTOMATION_DRY_RUN_JSON:"
+            + json.dumps(
+                {
+                    "task": req.task,
+                    "up_mid": mid,
+                    "content_types": list(content_types),
+                    "output_dir": req.output_dir,
+                    "limit": req.favorite_limit,
+                    "overwrite_outputs": req.overwrite_outputs,
+                },
+                ensure_ascii=False,
+            )
+        )
+        result.warnings.append("dry run: no network, model, manifest, or output writes were performed")
+        result.finish()
+        return
+    before = output_snapshot(req.output_dir)
+    if "opus" in content_types:
+        opus_req = replace(req, task="bilibili-up-opus")
+        opus_before = output_snapshot(req.output_dir)
+        run_convert_and_organize_task(opus_req, env, result)
+        validate_task_outputs(opus_req, opus_before)
+    if "video" in content_types:
+        try:
+            run_bilibili_up_videos(req, env, result)
+        except AutomationError as exc:
+            if exc.error_code != "BATCH_ALL_FAILED" or not changed_outputs(req.output_dir, before):
+                raise
+            result.status = "partial_failed"
+            result.warnings.append("all selected UP video items failed, while other content completed")
+    finalize_success_result(result, req, before, processing_task=True)
+
+
 def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
     if dry_run:
         return render_command(command) + "\n"
@@ -1086,7 +1478,7 @@ def run_command(command: list[str], env: dict[str, str], dry_run: bool) -> str:
     return ""
 
 
-def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
+def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result: TaskResult | None = None) -> str:
     if req.dry_run:
         staged_req = replace(req, output_dir="<temporary-staging-dir>")
         convert_command = command_for(staged_req)
@@ -1129,7 +1521,28 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
         else:
             convert_command = command_for(staged_req)
             print("已创建临时草稿区；整理完成后会自动清理。")
-            output = run_process(convert_command, env)
+            try:
+                output = run_process(convert_command, env)
+            except RuntimeError as exc:
+                match = re.search(r"抓取阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", str(exc))
+                if req.task != "bilibili-up-opus" or result is None or not match or int(match.group(2)) == 0:
+                    raise
+                converted_count, skipped_count, failed_count = (int(value) for value in match.groups())
+                result.counts["discovered"] += converted_count + skipped_count + failed_count
+                result.counts["skipped"] += skipped_count
+                result.counts["failed"] += failed_count
+                result.status = "partial_failed"
+                result.warnings.append("new UP opus items failed while previously complete items were skipped")
+                return ""
+        if result is not None and req.task == "bilibili-up-opus":
+            match = re.search(r"抓取阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", output)
+            if match:
+                converted_count, skipped_count, failed_count = (int(value) for value in match.groups())
+                result.counts["discovered"] += converted_count + skipped_count + failed_count
+                result.counts["skipped"] += skipped_count
+                result.counts["failed"] += failed_count
+                if failed_count and (converted_count or skipped_count):
+                    result.status = "partial_failed"
         if req.task == "bilibili-up-opus" or resumed_recovery:
             converted_paths = [
                 str(path)
@@ -1160,9 +1573,23 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str]) -> str:
             organize_command.extend(["--output-filename", req.output_filename])
         print("")
         print(f"开始 Qwen 整理：共 {len(converted_paths)} 篇，正式输出到 {req.output_dir}")
-        run_process(organize_command, env)
-        promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
-        shutil.rmtree(recovery_dir, ignore_errors=True)
+        organize_before = output_snapshot(req.output_dir)
+        try:
+            run_process(organize_command, env)
+        except RuntimeError as exc:
+            if req.task != "bilibili-up-opus" or not changed_outputs(req.output_dir, organize_before):
+                raise
+            promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
+            match = re.search(r"整理阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", str(exc))
+            failed_count = int(match.group(3)) if match else 1
+            if result is not None:
+                result.counts["failed"] += failed_count
+                result.status = "partial_failed"
+                result.warnings.append("some UP opus items failed during Qwen organization; recovery drafts were retained")
+            print("[部分完成] 已保留成功整理的动态和失败项恢复点；可使用 retry-failed 重试。", file=sys.stderr, flush=True)
+        else:
+            promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
+            shutil.rmtree(recovery_dir, ignore_errors=True)
 
     if req.task in {"bilibili-opus", "bilibili-up-opus"}:
         archive_legacy_bilibili_drafts(pathlib.Path(req.output_dir))
@@ -1548,12 +1975,55 @@ def manifest_status(req: TaskRequest, env: dict[str, str]) -> str:
     return "MANIFEST_STATUS_JSON:" + json.dumps(result, ensure_ascii=False) + "\n"
 
 
-def emit_task_result(req: TaskRequest, before: dict[pathlib.Path, tuple[int, int]]) -> None:
-    if req.dry_run:
-        return
-    outputs = [str(path) for path in changed_outputs(req.output_dir, before)] if req.output_dir else []
-    result = {"task": req.task, "status": "completed", "outputs": outputs, "output_dir": req.output_dir}
-    print("TASK_RESULT_JSON:" + json.dumps(result, ensure_ascii=False))
+def output_delivery(path: pathlib.Path) -> dict[str, Any]:
+    delivery: dict[str, Any] = {"path": str(path)}
+    if path.suffix.lower() != ".md":
+        return delivery
+    try:
+        markdown = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return delivery
+    for key in ("source_type", "source_url", "source_hash", "author_mid", "published", "organized_status", "dynamic_id"):
+        value = markdown_frontmatter_value(markdown, key)
+        if value:
+            delivery[key] = value
+    source_url = str(delivery.get("source_url") or "")
+    match = re.search(r"/video/(BV[0-9A-Za-z]+)", source_url, re.I)
+    if match:
+        delivery["bvid"] = match.group(1)
+    if "organized_status" not in delivery:
+        status = markdown_frontmatter_value(markdown, "status")
+        if status:
+            delivery["organized_status"] = status
+    return delivery
+
+
+def finalize_success_result(
+    result: TaskResult,
+    req: TaskRequest,
+    before: dict[pathlib.Path, tuple[int, int]],
+    processing_task: bool,
+) -> None:
+    outputs = changed_outputs(req.output_dir, before) if req.output_dir else []
+    result.outputs = [str(path) for path in outputs]
+    result.deliveries = [output_delivery(path) for path in outputs]
+    result.counts["created"] += sum(1 for path in outputs if path not in before)
+    result.counts["updated"] += sum(1 for path in outputs if path in before)
+    if processing_task and not outputs and not req.dry_run and result.status == "completed":
+        result.status = "no_changes"
+        result.counts["skipped"] = max(1, result.counts.get("skipped", 0))
+    if result.status == "partial_failed":
+        result.retryable = True
+        if result.error is None:
+            result.error = {
+                "error_code": "PARTIAL_FAILURE",
+                "message": f"{result.counts.get('failed', 0)} item(s) failed; successful items were retained",
+            }
+    result.finish()
+
+
+def emit_task_result(result: TaskResult) -> None:
+    print("TASK_RESULT_JSON:" + json.dumps(result.finish().as_dict(), ensure_ascii=False), flush=True)
 
 
 def find_unescaped(text: str, needle: str, start: int) -> int:
@@ -1677,6 +2147,7 @@ def render_command(command: list[str]) -> str:
 
 
 def run_process(command: list[str], env: dict[str, str]) -> str:
+    lock_fd = parse_int(os.environ.get("LOCAL_NOTE_STUDIO_LOCK_FD"), -1)
     process = subprocess.Popen(
         command,
         cwd=str(WORKER_DIR),
@@ -1685,14 +2156,39 @@ def run_process(command: list[str], env: dict[str, str]) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,
+        pass_fds=(lock_fd,) if lock_fd >= 0 else (),
+        start_new_session=(os.name != "nt"),
     )
     lines: list[str] = []
-    if process.stdout:
-        for line in process.stdout:
-            lines.append(line)
-            sys.stdout.write(line)
-            sys.stdout.flush()
-    returncode = process.wait()
+    try:
+        if process.stdout:
+            for line in process.stdout:
+                line = redact_text(line)
+                lines.append(line)
+                sys.stdout.write(line)
+                sys.stdout.flush()
+        returncode = process.wait()
+    except BaseException:
+        if os.name != "nt":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            process.wait()
+        raise
+    finally:
+        if process.stdout:
+            process.stdout.close()
     output = "".join(lines)
     if returncode != 0:
         raise RuntimeError(f"command failed ({returncode}):\n{render_command(command)}\n\n{output}")
@@ -1717,6 +2213,7 @@ def extract_converted_paths(output: str) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request-json", help="Task request JSON from the desktop app.")
+    parser.add_argument("--request-stdin", action="store_true", help="Read one task request JSON object from stdin.")
     parser.add_argument("--task", help="Task type.")
     parser.add_argument("--source", default="", help="URL or file path.")
     parser.add_argument("--output-dir", default="", help="Markdown output directory.")
@@ -1761,6 +2258,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def request_from_args(args: argparse.Namespace) -> TaskRequest:
+    if args.request_json and args.request_stdin:
+        raise ValueError("--request-json and --request-stdin cannot be used together")
+    if args.request_stdin:
+        payload = sys.stdin.read(2 * 1024 * 1024 + 1)
+        if len(payload) > 2 * 1024 * 1024:
+            raise ValueError("stdin request exceeds 2 MiB")
+        if not payload.strip():
+            raise ValueError("stdin request is empty")
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            raise ValueError("stdin request must be a JSON object")
+        return TaskRequest.from_mapping(data)
     if args.request_json:
         return TaskRequest.from_mapping(json.loads(args.request_json))
     return TaskRequest(
@@ -1802,9 +2311,16 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    req = request_from_args(args)
+READ_ONLY_TASKS = {
+    "env-check",
+    "bilibili-cookie-status",
+    "bilibili-collections",
+    "bilibili-access-check",
+    "manifest-status",
+}
+
+
+def execute_request(req: TaskRequest, result: TaskResult) -> None:
     env = build_env(req)
     if req.cooldown_delay >= 0:
         print(
@@ -1822,42 +2338,155 @@ def main(argv: list[str] | None = None) -> int:
     }:
         print("[隐身模式] 本次任务不会读取或写入 Manifest、关键帧 Manifest 或 B站增量状态。", flush=True)
     if req.task == "env-check":
-        sys.stdout.write(check_environment(req, env))
-        return 0
+        report = redact_text(check_environment(req, env))
+        result.details["environment_report"] = report
+        sys.stdout.write(report)
+        result.finish()
+        return
     if req.task == "bilibili-cookie-status":
         sys.stdout.write(check_bilibili_cookie(req))
-        return 0
+        result.finish()
+        return
     if req.task == "bilibili-collections":
         sys.stdout.write(list_bilibili_collections(req))
-        return 0
+        result.finish()
+        return
     if req.task == "bilibili-access-check":
         sys.stdout.write(check_bilibili_target_access(req))
-        return 0
+        result.finish()
+        return
     if req.task == "manifest-status":
         sys.stdout.write(manifest_status(req, env))
-        return 0
+        result.finish()
+        return
     if req.task == "manifest-update":
+        if req.dry_run:
+            result.details["manifest_update_preview"] = {
+                "path": req.manifest_path,
+                "action": req.manifest_action,
+                "indexes": list(req.manifest_indexes or ((req.manifest_index,) if req.manifest_index >= 0 else ())),
+            }
+            result.warnings.append("dry run: Manifest was not modified")
+            result.finish()
+            return
         sys.stdout.write(update_manifest_record(req, env))
-        return 0
+        result.finish()
+        return
     if req.task == "refresh-bilibili-cookies":
         sys.stdout.write(run_command(command_for(req), env, req.dry_run))
-        return 0
+        result.finish()
+        return
+    if req.task in {"bilibili-up-video", "bilibili-up-sync"}:
+        scoped_req = replace(req, content_types=("video",)) if req.task == "bilibili-up-video" else req
+        run_bilibili_up_sync(scoped_req, env, result)
+        return
     before = output_snapshot(req.output_dir)
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
-        sys.stdout.write(run_convert_and_organize_task(req, env))
+        sys.stdout.write(run_convert_and_organize_task(req, env, result))
         validate_task_outputs(req, before)
-        emit_task_result(req, before)
-        return 0
+        finalize_success_result(result, req, before, processing_task=True)
+        return
     command = command_for(req)
     sys.stdout.write(run_command(command, env, req.dry_run))
     validate_task_outputs(req, before)
-    emit_task_result(req, before)
-    return 0
+    finalize_success_result(result, req, before, processing_task=True)
+
+
+def _cancel_signal(_signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt("task cancelled")
+
+
+def _timeout_signal(_signum: int, _frame: Any) -> None:
+    raise TimeoutError("task execution timeout exceeded")
+
+
+@contextlib.contextmanager
+def execution_deadline(seconds: int):
+    if seconds <= 0 or not hasattr(signal, "setitimer"):
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _timeout_signal)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def main(argv: list[str] | None = None) -> int:
+    req: TaskRequest | None = None
+    result: TaskResult | None = None
+    previous_term = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _cancel_signal)
+    try:
+        args = parse_args(argv)
+        req = request_from_args(args)
+        caller = req.caller.strip() or os.environ.get("LOCAL_NOTE_STUDIO_CALLER", "").strip() or "cli"
+        req = replace(req, caller=caller, run_id=req.run_id.strip() or new_run_id())
+        result = TaskResult(
+            run_id=req.run_id,
+            caller=caller,
+            task=req.task or "unknown",
+            status="completed",
+            started_at=utc_now(),
+            source_ref=stable_source_ref(req.source),
+            output_dir=req.output_dir,
+        )
+        mutating = req.task not in READ_ONLY_TASKS and not req.dry_run
+        if mutating:
+            try:
+                with audited_task(
+                    result,
+                    req,
+                    profile_id=req.profile_id,
+                    retry_of=req.retry_of or None,
+                    lock_timeout_seconds=req.lock_timeout_seconds,
+                    use_lock=True,
+                ):
+                    with execution_deadline(req.execution_timeout_seconds):
+                        execute_request(req, result)
+            except BaseException as exc:
+                if result.error is None:
+                    code, retryable = classify_error(exc)
+                    result.status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+                    result.counts["failed"] = max(1, result.counts.get("failed", 0))
+                    result.error = {"error_code": code, "message": redact_text(str(exc))}
+                    result.retryable = retryable
+        else:
+            try:
+                with execution_deadline(req.execution_timeout_seconds):
+                    execute_request(req, result)
+            except BaseException as exc:
+                code, retryable = classify_error(exc)
+                result.status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+                result.counts["failed"] = 1
+                result.error = {"error_code": code, "message": redact_text(str(exc))}
+                result.retryable = retryable
+        emit_task_result(result)
+        return 0 if result.status in {"completed", "no_changes", "partial_failed"} else 1
+    except BaseException as exc:
+        if result is None:
+            code, retryable = classify_error(exc)
+            now = utc_now()
+            result = TaskResult(
+                run_id=(req.run_id if req else "") or new_run_id(),
+                caller=(req.caller if req else "") or "cli",
+                task=(req.task if req else "") or "unknown",
+                status="cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed",
+                started_at=now,
+                source_ref=stable_source_ref(req.source if req else ""),
+                output_dir=req.output_dir if req else "",
+                error={"error_code": code, "message": redact_text(str(exc))},
+                retryable=retryable,
+            )
+            result.counts["failed"] = 1
+        emit_task_result(result)
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())

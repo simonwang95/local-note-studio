@@ -31,6 +31,10 @@ OBSIDIAN_VAULT_DIR="/Users/xxx/Notes"
 
 `worker/env.local` is ignored by git and can contain real user paths. `worker/env.example` should keep only portable defaults or anonymized placeholders.
 
+Agent automation Profiles are non-secret and live under `~/Library/Application Support/Local Note Studio/config/automation-profiles.json`. Start from `worker/automation-profiles.example.json`; do not add API keys, Cookie content, Chrome Profiles or arbitrary executable arguments. The Agent request may override only its explicit source, bounded limit and dry-run flag. Profile values override ordinary Worker defaults, while secrets continue to come only from protected local configuration.
+
+Automation state is stored under `~/Library/Application Support/Local Note Studio/state/`: `global-task.*` for the active cross-process lock, `automation-history.sqlite3` for redacted audit history, and `up-sync/` for per-UP incremental status. `LOCAL_NOTE_STUDIO_STATE_DIR` and `LOCAL_NOTE_STUDIO_PROFILES_FILE` are intended for isolated development/tests.
+
 ## Required Tools
 
 The selected environment should provide:

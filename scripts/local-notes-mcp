@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+managed_python="$HOME/Library/Application Support/Local Note Studio/runtime/current/bin/python3"
+if [ -x "$managed_python" ]; then
+  exec "$managed_python" "$project_dir/worker/local_notes_mcp.py"
+fi
+exec python3 "$project_dir/worker/local_notes_mcp.py"

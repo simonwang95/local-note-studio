@@ -16,7 +16,7 @@ The package is not completely self-contained:
 - The app bundle does not embed ASR model weights, but managed “安装/修复” downloads the default MLX Whisper model into Application Support together with the runtime. Pandoc is installed during “安装/修复” rather than on first EPUB export.
 - In managed mode, nested Bilibili ASR scripts are pinned to the app-managed Python executable; dependency checks use real `mlx_whisper` imports rather than package metadata probes.
 - Pandoc is best-effort during managed install/repair because it is only required for EPUB export. If the GitHub/CDN route fails, initialization continues for video, document, OCR, Cookie and ASR workflows; status will remain “需要修复” until Pandoc is installed.
-- Internal DMGs are currently unsigned and unnotarized. Give the tester the SHA-256 checksum through a separate trusted channel. After copying the app to `/Applications`, try Control-click → Open first. If Gatekeeper still blocks a package whose checksum they have verified, they may run `xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"` for this internal build only. Public distribution must use Developer ID signing and notarization instead.
+- Internal apps use a complete ad-hoc signature and the DMGs are not Developer ID signed or notarized. Give the tester the SHA-256 checksum through a separate trusted channel. After copying the app to `/Applications`, try Control-click → Open first. If Gatekeeper still blocks a package whose checksum they have verified, they may run `xattr -dr com.apple.quarantine "/Applications/Local Note Studio.app"` for this internal build only. Public distribution must use Developer ID signing and notarization instead.
 
 Recommended handoff steps:
 
@@ -30,18 +30,22 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
-## Current internal test build (2026-07-16)
+## Current internal test build (2026-07-21)
 
-- Version: `0.1.16`
+The latest verified internal handoff artifact is:
+
+- Version: `0.1.17`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
-- Artifact: `Local Note Studio_0.1.16_aarch64.dmg`
-- Size: `3,456,899 bytes`
-- SHA-256: `b1cc38d850ea214302d50fbcd3d4da1eeeb9beae75e6c50ef44be0c2a50ef487`
+- Artifact: `Local Note Studio_0.1.17_aarch64.dmg`
+- Size: `3,454,029 bytes`
+- SHA-256: `0441e21b87093cb63dce09dd0d3f8e82eebb3b1a2425cf90b3995ec3664fcf0d`
 - Build type: optimized release
-- Signature: ad-hoc/linker-signed only; no Developer ID and no notarization
-- Verification: `npm run release:check` and `hdiutil verify` passed; the app contains the arm64 executable, worker entry point, locked requirements, scripts, and stock-code reference resource.
+- Signature: complete ad-hoc app signature with hardened runtime and sealed resources; no Developer ID and no notarization
+- Verification: `npm run release:check`, `hdiutil verify`, and strict deep `codesign` verification against the app mounted from the DMG passed. The mounted app reports version `0.1.17`, contains the arm64 executable, Worker/Agent/MCP entry points, locked requirements, scripts and stock-code reference resource, and contains no `env.local`.
 
 This record identifies the current internal artifact only. Rebuilds may produce a different checksum; update this section before handing off a newer DMG.
+
+Spotlight may also index `src-tauri/target/release` and `src-tauri/target/debug`. These are release/debug build products, while `/Applications/Local Note Studio.app` is the installed copy; they are not separate data installations and share Application Support state. Normal build/test/start commands must not delete either target directory automatically. Clean them manually only after resolving and confirming the exact project path.
 
 ## Build gate
 
