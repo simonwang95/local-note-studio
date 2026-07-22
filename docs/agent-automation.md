@@ -1,6 +1,6 @@
 # Agent 自动化
 
-Local Note Studio 0.1.17 提供受限 Agent CLI 和本地 stdio MCP Server。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
+Local Note Studio 0.1.18 提供受限 Agent CLI 和本地 stdio MCP Server。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
 
 ## 安全边界
 
@@ -38,6 +38,7 @@ Local Note Studio 0.1.17 提供受限 Agent CLI 和本地 stdio MCP Server。Ope
 | `max_limit` | Agent 显式 `--limit` 的硬上限 |
 | `overwrite_outputs` | 默认应保持 `false` |
 | `opus_image_analysis` | `off`、`ocr` 或 `vision`；旧 Profile 缺省为 `off` |
+| `timeout_seconds` | 显式设置时同时覆盖单次图片、网页、PDF、Quick Read 和正式 Qwen 整理超时；不改变图片输出 token 上限 |
 | `lock_timeout_seconds` | `0` 为锁冲突立即失败；正数为最长等待时间 |
 | `execution_timeout_seconds` | 整个任务的硬超时，`0` 表示不设置 |
 
@@ -49,9 +50,13 @@ Local Note Studio 0.1.17 提供受限 Agent CLI 和本地 stdio MCP Server。Ope
 - `ocr`：按原顺序提取直接可见文字，模糊字符标记待核验，不做扩展推断；
 - `vision`：结合正文识别可核验文字、表格、图形、K线、排行榜或截图，并标注相关性、有限整理和不确定项。财经 Profile 推荐使用此模式。
 
-分析只读取已经下载到本地的附件，不重复请求图片。成功结果按图片 SHA-256、模式和模型缓存在 `state/opus-image-analysis-cache/`；命中缓存、`off` 和未进入真实模型调用的项目不会触发冷却。单条动态最多分析 12 张图片，超过部分保留原图并写 warning，避免无上限模型调用。模型失败也会保留正文、原始图片引用和“图片分析失败/待重试”占位，结果合同的 `warnings` 与 `details.opus_image_analysis` 会返回脱敏统计；完整成功的幂等重跑不会覆盖笔记或重复调用模型。
+分析只读取已经下载到本地的附件，不重复请求图片。单次 OCR/vision 请求显式发送 `max_tokens`，默认 `4096`、硬上限 `8192`；单次图片超时默认 `300` 秒。它们不继承 `SUMMARY_MAX_TOKENS=80000`、Quick Read 或长文/PDF 预算。Profile 的 `timeout_seconds` 显式设置时会覆盖图片与现有 Qwen 超时，但 token 上限保持独立。
 
-B站正文送入正式 Qwen 整理前会剥离来源 URL、作者/MID、动态 ID、发布时间、转换路径和 SHA256，只保留原文抽取、图片分析与来源类型说明。frontmatter 和“来源追溯”由 Python 确定性生成。发布时间使用 `Asia/Shanghai` 解析，允许 5 分钟时钟偏差；只有程序确认明显晚于当前时间时才产生 warning，模型不得自行生成“时间戳待核验”或“未来预设”。
+成功缓存使用 Schema 2.0，并校验图片 SHA-256、模式、模型、规则版本以及正文/可信时间上下文哈希；新规则会自动使用新的缓存文件名，旧缓存保留但不命中。`finish_reason=length`、空 `content`、推理耗尽而没有最终正文、非法 JSON、HTTP 超时和临时服务错误均转为可重试失败，不写成功缓存。失败时正文、已下载图片和原始引用仍保留，并写“图片分析失败/待重试”；已有完整笔记不会被失败重试覆盖。命中缓存、`off` 和未进入真实模型调用的项目不会触发冷却。单条动态最多分析 12 张图片，超过部分保留原图并写 warning。
+
+B站正文送入正式 Qwen 整理前会剥离来源 URL、作者/MID、动态 ID、发布时间、转换路径和 SHA256，只保留原文抽取、图片分析与来源类型说明。frontmatter 和“来源追溯”由 Python 确定性生成。视觉提示词单独获得可信只读的动态发布时间、当前日期和 `Asia/Shanghai` 时区；图片中的日期只能作为直接可见文字原样记录，发布前一晚属于正常情况。只有 Python 明确产生 `time_warning` 时才能加入时间异常；模型不得依靠知识截止时间、历史印象或市场语境输出“应为2024年”“未来预设”“时间戳错误”或“年份疑似笔误”。正式整理阶段具有相同提示规则，并只对 Qwen 整理区做程序化防幻觉校验，不删除原文明确讨论的时间矛盾。
+
+A股确定性证券参考表只用于校验，不授权 Qwen 为原文没有代码的股票补代码。写文件前会检查 Qwen 新增的 6 位代码：原文没有该代码时从整理区移除；原文已有代码时按证券参考表确定性纠正 `.SH`/`.SZ` 后缀。原文抽取保持不变，文件末尾的“A股术语校验”表仍由 Python 生成。
 
 ## Agent CLI
 
@@ -140,7 +145,7 @@ SQLite 使用 WAL 与完整同步，保存脱敏请求、状态、统计、输�
 
 `status` 可为 `completed`、`no_changes`、`partial_failed`、`failed`、`cancelled` 或 `timeout`；异常强制终止且来不及返回结果的历史记录会在下次查询时恢复为 `interrupted`。`deliveries` 在可用时包含笔记路径、`source_type`、`source_url`、`source_hash`、BVID/动态 ID、`author_mid`、`published` 和 `organized_status`，供下游读取；Local Note Studio 不执行股票观点提取或数据库写入。
 
-`env-check` 会在 `details.environment_report` 返回脱敏后的运行时检查报告；B站图文任务还可在 `details.opus_image_analysis` 返回模式、图片数、真实模型调用、缓存命中、失败和安全上限统计。图片分析 warning 不含图片内容、Cookie、API Key 或服务端秘密。Profile、状态或历史读取本身失败时也返回上述合同，而不是未结构化的 traceback。
+`env-check` 会在 `details.environment_report` 返回脱敏后的运行时检查报告；B站图文任务还可在 `details.opus_image_analysis` 返回模式、图片数、`finish_reason`、数值型 `completion_tokens`、`max_tokens`、`timeout_seconds`、真实模型调用、缓存命中、失败和安全上限统计。Cookie、API Key、浏览器 Profile 和图片 base64 字段从结果/历史合同中直接省略，warning 也不含 reasoning 或完整服务端错误正文。Profile、状态或历史读取本身失败时仍返回上述合同，而不是未结构化的 traceback。
 
 稳定错误码包括：`INVALID_REQUEST`、`PROFILE_INVALID`、`PROFILE_NOT_FOUND`、`PATH_NOT_ALLOWED`、`URL_NOT_ALLOWED`、`TASK_LOCKED`、`TASK_TIMEOUT`、`TASK_CANCELLED`、`TASK_INTERRUPTED`、`PARTIAL_FAILURE`、`BILIBILI_AUTH_INVALID`、`BILIBILI_RATE_LIMITED`、`BILIBILI_DISCOVERY_FAILED`、`BILIBILI_SUBTITLE_UNAVAILABLE`、`BILIBILI_DOWNLOAD_FAILED`、`ASR_FAILED`、`LLM_FAILED`、`OUTPUT_INTEGRITY_FAILED`、`OUTPUT_MISSING`、`SOURCE_ACCESS_DENIED`、`SOURCE_NOT_FOUND`、`BATCH_ALL_FAILED`、`STATE_STORAGE_ERROR`、`WORKER_CONTRACT_ERROR`、`UNSUPPORTED_REQUEST` 和兜底 `TASK_FAILED`。是否适合重试由 `retryable` 明确给出，无需解析中文日志。
 
@@ -180,9 +185,9 @@ Spotlight 可能同时显示三个 Local Note Studio：`/Applications` 是正式
 
 ## 0.1.17 本机验收记录
 
-2026-07-21 在开发机先完成了不访问真实B站、不调用真实 LLM、不写正式笔记的初步验收；随后通过与 OpenHanako 相同的 stdio MCP 协议补充了两条真实图文动态测试，真实输出仍限制在 `/private/tmp/local-note-opus-vision.MBrmE8`，没有写正式笔记目录。
+2026-07-21 在开发机先完成了不访问真实B站、不调用真实 LLM、不写正式笔记的初步验收；随后用与 OpenHanako 相同的 stdio MCP 协议进行了两条真实图文动态测试，真实输出限制在 `/private/tmp/local-note-opus-vision.MBrmE8`，没有写正式笔记目录。后续复核发现视觉 token 失控、图片日期幻觉和股票代码冲突，因此下列内容只能作为当时的阶段性记录，不能再解读为 `0.1.17` 真实视觉验收通过。
 
-### 已通过
+### 当时已通过的静态或阶段性检查
 
 - `/Applications/Local Note Studio.app` 的 Bundle 版本为 `0.1.17`，Bundle ID 为 `studio.local-note`；
 - `codesign --verify --deep --strict` 通过；
@@ -196,8 +201,8 @@ Spotlight 可能同时显示三个 Local Note Studio：`/Applications` 是正式
 - dry-run 没有生成笔记、UP Manifest 或任务历史条目；
 - OpenHanako 模拟客户端通过 `local_notes_sync_up(profile=qingfeng_test, limit=1)` 读取正式 Application Support Cookie，真实抓取动态 `1227413653675835411`，调用本地 Qwen，并在隔离目录生成 1 篇 Markdown 和 2 张图片；MCP 返回 `completed`、`created=1`、`failed=0`、`isError=false`；
 - 对同一 Profile 立即重跑后返回 `no_changes`、`created=0`、`skipped=1`，未重复调用 Qwen；`local_notes_get_status` 能读回审计记录，返回合同不含 API Key 或 Cookie；
-- 修复后用 `vision` 重新验收动态 `1227413653675835411`：两张粉丝观看/互动榜均标为与交易观点低相关，不生成财经扩展；frontmatter 与来源追溯的发布时间均为 `2026-07-21T15:11:51+08:00`，没有“未来预设”。即时重跑命中 2 张图片缓存，图片模型和正式 Qwen 调用均为 0，返回 `no_changes`；
-- 单条验收青枫浦上Q动态 `1215072468872462337`：一张“72家澄清公告”行业表被标为高相关，PCB/电子布、玻璃基板、MLCC、半导体/存储、光通信等明确分组进入正式笔记，颜色量化标准和公告细节保留为待核验。即时重跑命中 1 张图片缓存、模型调用为 0、资产复用 1，返回 `no_changes`；
+- 动态 `1227413653675835411` 的旧缓存结果曾显示两张图片低相关并在重跑时返回 `no_changes`；但全新缓存复测时第二张简单互动榜持续推理超过 8 分钟，LM Studio 已生成约 `28,314` tokens 仍未结束，因此旧缓存重跑不能作为成功证据；
+- 动态 `1215072468872462337` 的旧结果曾识别“72家澄清公告”分组；但正式笔记同时出现了“应为2024年”的无依据年份纠正和错误 `.SH` 后缀，故内容验收并未通过；
 - 两条验收后的 `local_notes_get_status` 返回完整审计记录和 `lock: null`；请求历史中的 API Key、Cookie 和浏览器 Profile 均为空，MCP stdout 仍只含 JSON-RPC 协议消息；
 - 修复后的 `Local Note Studio_0.1.17_aarch64.dmg` 已完成 `hdiutil verify`，并对只读挂载后的 `.app` 执行严格深度签名、arm64 架构、版本、内置 Worker 脚本和无 `env.local` 检查；
 - 用绝对路径启动正式安装包后创建一个主窗口，空闲状态没有遗留 Worker/MCP 子进程。
@@ -222,4 +227,15 @@ Spotlight 可能同时显示三个 Local Note Studio：`/Applications` 是正式
 - App-managed runtime 的安装/修复和无 Conda 运行；
 - 正式青枫笔记目录的 `limit=1` 试运行与格式验收。
 
-下一轮应继续使用隔离输出目录完成一条短视频及 ASR 回退，再在 OpenHanako 正式 APP 中手工导入 Connector 并调用；只有视频幂等、失败恢复和正式客户端调用通过后，才配置正式笔记目录或定时任务。
+### 0.1.17 最终结论
+
+`Local Note Studio_0.1.17_aarch64.dmg`（SHA-256 `4934f073cb386eb632d34c97717c3a341146d07db8659e5cfdf5004144d164e4`）只保留为问题基线，不应安装或用于正式自动化。失控任务最终通过终止 MCP 取消；审计、锁释放和完整进程组清理正常。
+
+## 0.1.18 全新缓存验收记录
+
+2026-07-22 使用全新的 `/private/tmp/local-note-opus-018.T5FQEw` output、state、indexes、Profile 和图片缓存，通过 OpenHanako-compatible stdio MCP 完成真实验收。正式 Application Support 只读复用 Cookie 和模型配置；没有修改 OpenHanako、Stocks、正式青枫笔记目录、认证数据或 `/Applications` 安装版。
+
+- 低相关动态 `1227413653675835411` 首跑 87 秒：2 张图均完成并标为低相关，`model_calls=2`、`failed=0`、`finish_reason=stop`、合计 `completion_tokens=3178`、单次 `max_tokens=4096`、超时 `300` 秒；没有基于粉丝榜图片扩展金融结论，发布时间保持 `2026-07-21T15:11:51+08:00`。立即复跑 2 秒，返回 `no_changes`、`cache_hits=2`、`model_calls=0`。
+- 财经动态 `1215072468872462337` 首跑 134 秒：1 张图标为高相关，`model_calls=1`、`failed=0`、`finish_reason=stop`、`completion_tokens=2056`、`max_tokens=4096`、超时 `300` 秒；“72家澄清公告”的可核验分组进入笔记，颜色与个别名称继续标为待核验，图片可见日期保持“2026年6月17日晚间”，发布时间为 `2026-06-18T09:01:45+08:00`。中材科技、山东墨龙、通鼎互联、中核科技分别校正为 `002080.SZ`、`002490.SZ`、`002491.SZ`、`000777.SZ`，没有伪造的 `.SH` 版本。立即复跑 1 秒，返回 `no_changes`、`cache_hits=1`、`model_calls=0`。
+- `local_notes_get_status` 返回完整历史和 `lock=null`；最新合同保留数值型 token/timeout/cache/model-call 诊断，同时完全省略 API Key、Cookie、浏览器 Profile 和图片 base64 字段。MCP EOF 后没有遗留 MCP、Worker、转换或整理进程。
+- Node.js `20.20.2`、course-whisper Python `3.11.15` 下前端构建/兼容检查、94 项 Python 和 10 项 Rust 测试通过。`0.1.18` DMG 的产物路径、大小、SHA-256 和只读挂载验证见 [`release-macos.md`](release-macos.md)。

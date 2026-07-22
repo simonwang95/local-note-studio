@@ -94,7 +94,16 @@ The long-task “model cooldown” field is an explicit per-run override. A blan
 
 For image OCR and scanned-PDF OCR, the app now prefers the configured multimodal Qwen/OpenAI-compatible model. Local OCR tools are only fallbacks when a vision-capable model is unavailable.
 
-Bilibili opus attachment analysis is a separate Profile option, `opus_image_analysis`, with `off`, `ocr`, and `vision` modes. It does not change `ENABLE_OCR`, which continues to serve direct image sources and sparse/scanned PDFs. Finance Profiles should normally choose `vision`; each uncached attachment can consume one multimodal request, up to 12 images per post. OCR/vision failures retain the downloaded image and post body for a safe retry.
+Bilibili opus attachment analysis is a separate Profile option, `opus_image_analysis`, with `off`, `ocr`, and `vision` modes. It does not change `ENABLE_OCR`, which continues to serve direct image sources and sparse/scanned PDFs. Finance Profiles should normally choose `vision`; each uncached attachment can consume one multimodal request, up to 12 images per post.
+
+Attachment OCR/vision has independent request limits:
+
+```bash
+OPUS_IMAGE_ANALYSIS_MAX_TOKENS="4096"
+OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS="300"
+```
+
+The output budget is always sent as `max_tokens`, is hard-capped at `8192`, and never inherits `SUMMARY_MAX_TOKENS`, `QWEN_QUICKREAD_MAX_TOKENS`, or PDF/long-document budgets. An explicit Profile `timeout_seconds` overrides the image timeout and the existing webpage/PDF/Quick Read/organize timeouts for that run, but it does not change the image token budget. Schema/rules-versioned successful results are cached by image, mode, model, and read-only post/time context. Truncated, empty, invalid-JSON, timed-out, cancelled, or temporary-error results are not cached. Failures retain the downloaded image, original body, and a retry placeholder; a failed retry cannot overwrite an existing complete note.
 
 ## Bilibili Cookie
 

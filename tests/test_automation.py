@@ -174,8 +174,9 @@ class LockAndHistoryTests(unittest.TestCase):
             serialized = json.dumps(store.list(), ensure_ascii=False)
             self.assertNotIn("top-secret", serialized)
             self.assertNotIn("cookie-secret", serialized)
-            self.assertIn("<redacted>", serialized)
-            self.assertEqual(store.list()[0]["worker_version"], "0.1.17")
+            self.assertNotIn("api_key", serialized)
+            self.assertNotIn("cookies", serialized)
+            self.assertEqual(store.list()[0]["worker_version"], "0.1.18")
 
     def test_redaction_covers_provider_error_key_format(self):
         message = "Incorrect API key provided: sk-live-secret123456 url=https://example.com/?signature=signed-value"
@@ -484,7 +485,7 @@ class ContractAndMcpTests(unittest.TestCase):
         self.assertNotIn("super-secret", result.details["environment_report"])
         self.assertNotIn("super-secret", stdout.getvalue())
 
-    def test_opus_image_analysis_summary_enters_redacted_result_contract(self):
+    def test_opus_image_analysis_summary_enters_safe_result_contract(self):
         result = core.TaskResult("vision", "mcp", "bilibili-opus", "completed", core.utc_now())
         output = "OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:" + json.dumps(
             {
@@ -495,6 +496,10 @@ class ContractAndMcpTests(unittest.TestCase):
                 "model_calls": 0,
                 "failed": 1,
                 "limited": 0,
+                "finish_reason": "length",
+                "completion_tokens": 4096,
+                "max_tokens": 4096,
+                "timeout_seconds": 300,
                 "warnings": ["图片 2 分析失败，API_KEY=super-secret"],
                 "last_model_call_epoch": 0,
                 "cooldown_delay": 60,
@@ -505,9 +510,26 @@ class ContractAndMcpTests(unittest.TestCase):
         serialized = json.dumps(result.as_dict(), ensure_ascii=False)
         self.assertEqual(remaining, 0)
         self.assertEqual(result.details["opus_image_analysis"]["cache_hits"], 1)
+        self.assertEqual(result.details["opus_image_analysis"]["finish_reason"], "length")
+        self.assertEqual(result.details["opus_image_analysis"]["completion_tokens"], 4096)
+        self.assertEqual(result.details["opus_image_analysis"]["max_tokens"], 4096)
+        self.assertEqual(result.details["opus_image_analysis"]["timeout_seconds"], 300)
         self.assertIn("<redacted>", serialized)
         self.assertNotIn("super-secret", serialized)
         self.assertNotIn("last_model_call_epoch", serialized)
+
+    def test_contract_omits_credentials_and_preserves_numeric_token_diagnostics(self):
+        clean = core.sanitize_mapping(
+            {
+                "api_key": "super-secret",
+                "cookies": "SESSDATA=cookie-secret",
+                "browser_profile": "/Users/example/Chrome/Profile 1",
+                "image_base64": "data:image/png;base64,secret-pixels",
+                "completion_tokens": 2056,
+                "max_tokens": 4096,
+            }
+        )
+        self.assertEqual(clean, {"completion_tokens": 2056, "max_tokens": 4096})
 
     def test_agent_worker_command_never_contains_request_or_secret(self):
         contract = {

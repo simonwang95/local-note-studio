@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from stock_reference import build_stock_reference_prompt, build_stock_validation_section
+from stock_reference import build_stock_reference_prompt, build_stock_validation_section, sanitize_model_stock_codes
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -344,6 +344,29 @@ def model_body_for_source(body: str, source_type: str) -> str:
     return selected or body
 
 
+def source_explicitly_discusses_time_conflict(body: str) -> bool:
+    original = h2_section(body, "原文抽取")
+    return any(
+        marker in original
+        for marker in ("时间矛盾", "时间戳错误", "年份错误", "年份笔误", "未来预设", "日期错误")
+    )
+
+
+def sanitize_bilibili_time_hallucinations(
+    organized_body: str,
+    source_body: str,
+    python_time_warning: bool,
+) -> str:
+    """Neutralize unsupported model corrections without altering the preserved source section."""
+    if python_time_warning or source_explicitly_discusses_time_conflict(source_body):
+        return organized_body
+    replacement = "图片日期按直接可见文字原样记录，不做年份纠正"
+    sanitized = re.sub(r"(?:疑似错误[，,：:]?\s*)?应为\s*2024\s*年", replacement, organized_body)
+    for marker in ("未来预设", "时间戳错误", "年份疑似笔误"):
+        sanitized = sanitized.replace(marker, replacement)
+    return normalize_markdown(sanitized)
+
+
 def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: int, source_type: str, cfg: dict[str, str]) -> str:
     system = (
         "你是本地知识库整理助手。你负责把源文件转换草稿整理成 Obsidian 兼容 Markdown。"
@@ -351,6 +374,8 @@ def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: 
         "遇到 PDF 公式、表格、符号缺损时，用 `[公式待核验]`、`[表格待核验]`、`[符号待核验]` 标注。"
         "程序解析的来源 URL、作者、MID、动态 ID、发布时间和哈希属于确定性元数据，不要重新判断其真伪或合理性。"
         "不要因为缺少当前时间而生成‘时间戳待核验’或‘未来预设’；只有正文明确讨论时间矛盾时才记录该观点。"
+        "图片中可见的日期只能按图片文字原样记录；不得依靠知识截止时间、历史印象或市场语境纠正年份，"
+        "不得输出‘应为2024年’、‘时间戳错误’、‘年份疑似笔误’或同义猜测。"
     )
     pdf_translation_requirement = ""
     if source_type == "pdf":
@@ -391,6 +416,7 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
         "你是本地知识库总编。请把多个分块整理综合成一篇不重复、层次清晰、"
         "适合 Obsidian 长期保存的正式 Markdown 笔记。不要编造来源中没有的信息。"
         "程序确定的来源元数据不在你的判断范围内；不要生成无依据的时间戳待核验或未来预设。"
+        "图片中可见的日期必须保持原样，不得根据历史印象纠正年份或生成新的时间异常判断。"
     )
     pdf_translation_requirement = ""
     if source_type == "pdf":
@@ -625,6 +651,14 @@ def organize_file(
     organized_body = merge_duplicate_h2_sections(
         normalize_markdown(synthesize_chunks(title, model_source_ref, chunk_notes, cfg, source_type))
     )
+    stock_terms_enabled = str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true"
+    if source_type == "bilibili-opus":
+        organized_body = sanitize_bilibili_time_hallucinations(
+            organized_body,
+            body,
+            str(meta.get("time_warning") or "").strip().lower() == "true",
+        )
+    organized_body = sanitize_model_stock_codes(organized_body, body, stock_terms_enabled)
     output_path = planned_output or build_output_path(
         output_dir,
         title,
@@ -648,7 +682,15 @@ def organize_file(
     }
     if not omit_draft_path:
         organized_meta["draft_path"] = rel(draft_path)
-    for key in ("dynamic_id", "author", "author_mid", "published", "opus_image_analysis", "opus_image_analysis_status"):
+    for key in (
+        "dynamic_id",
+        "author",
+        "author_mid",
+        "published",
+        "opus_image_analysis",
+        "opus_image_analysis_status",
+        "time_warning",
+    ):
         if meta.get(key) not in (None, ""):
             organized_meta[key] = meta[key]
     source_trace_lines = [
@@ -674,7 +716,10 @@ def organize_file(
     image_analysis = image_analysis_source_section(body, source_type)
     if image_analysis:
         output_parts.append(image_analysis)
-    stock_validation = build_stock_validation_section("\n\n".join(part for part in [organized_body, body] if part), str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true")
+    stock_validation = build_stock_validation_section(
+        "\n\n".join(part for part in [organized_body, body] if part),
+        stock_terms_enabled,
+    )
     if stock_validation:
         output_parts.append(stock_validation)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -763,6 +808,23 @@ def main() -> int:
                 output_dir, title, source_type, args.output_filename, str(meta.get("dynamic_id") or "")
             )
             manifest_item = find_manifest_item(manifest, draft_path)
+            incoming_image_status = str(meta.get("opus_image_analysis_status") or "")
+            if (
+                planned_output.exists()
+                and source_type == "bilibili-opus"
+                and incoming_image_status in {"failed", "partial"}
+                and organized_note_complete(
+                    planned_output,
+                    source_type,
+                    str(meta.get("opus_image_analysis") or ""),
+                )
+            ):
+                skipped += 1
+                print(
+                    f"{progress_label} 图片分析未完整完成，保留已有完整笔记并等待安全重试：{planned_output.name}",
+                    flush=True,
+                )
+                continue
             if planned_output.exists() and not args.overwrite:
                 if organized_note_complete(
                     planned_output,

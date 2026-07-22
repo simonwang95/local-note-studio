@@ -296,6 +296,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["QWEN_PDF_POLISH_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
         env["QWEN_QUICKREAD_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
         env["QWEN_ORGANIZE_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
+        env["OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
     if req.retry_count > 0:
         env["QWEN_QUICKREAD_MAX_RETRIES"] = str(req.retry_count)
         env["QWEN_ORGANIZE_MAX_RETRIES"] = str(req.retry_count)
@@ -2269,6 +2270,14 @@ def record_opus_image_analysis_summaries(
     if not summaries:
         return 0.0
     modes = sorted({str(item.get("mode") or "off") for item in summaries})
+    finish_reasons: list[str] = []
+    for item in summaries:
+        raw = item.get("finish_reason")
+        values = raw if isinstance(raw, list) else [raw]
+        for value in values:
+            label = str(value or "").strip()
+            if label and label not in finish_reasons:
+                finish_reasons.append(label)
     details = {
         "mode": modes[0] if len(modes) == 1 else modes,
         "posts": len(summaries),
@@ -2278,6 +2287,10 @@ def record_opus_image_analysis_summaries(
         "model_calls": sum(max(0, parse_int(item.get("model_calls"), 0)) for item in summaries),
         "failed": sum(max(0, parse_int(item.get("failed"), 0)) for item in summaries),
         "limited": sum(max(0, parse_int(item.get("limited"), 0)) for item in summaries),
+        "finish_reason": finish_reasons[0] if len(finish_reasons) == 1 else finish_reasons,
+        "completion_tokens": sum(max(0, parse_int(item.get("completion_tokens"), 0)) for item in summaries),
+        "max_tokens": max(max(0, parse_int(item.get("max_tokens"), 0)) for item in summaries),
+        "timeout_seconds": max(max(0, parse_int(item.get("timeout_seconds"), 0)) for item in summaries),
     }
     if result is not None:
         result.details["opus_image_analysis"] = details

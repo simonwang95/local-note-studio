@@ -22,7 +22,7 @@ from typing import Any, Iterator
 
 
 RESULT_SCHEMA_VERSION = "1.0"
-WORKER_VERSION = "0.1.17"
+WORKER_VERSION = "0.1.18"
 PROFILE_SCHEMA_VERSION = "1.0"
 RULES_VERSION = "1.0"
 SECRET_KEYS = {
@@ -33,6 +33,16 @@ SECRET_KEYS = {
     "token",
     "password",
     "secret",
+}
+PUBLIC_NUMERIC_DIAGNOSTIC_KEYS = {
+    "completion_tokens",
+    "max_tokens",
+}
+OMITTED_CONTRACT_KEYS = {
+    "base64",
+    "browser_profile",
+    "image_base64",
+    "image_data",
 }
 
 
@@ -98,13 +108,13 @@ def sanitize_mapping(value: Any) -> Any:
         for raw_key, item in value.items():
             key = str(raw_key)
             lowered = key.lower()
-            if any(secret in lowered for secret in SECRET_KEYS):
-                if lowered in {"cookies", "cookie_file", "cookies_file"} and item:
-                    clean[key] = "<configured>"
-                else:
-                    clean[key] = "<redacted>" if item else ""
-            else:
-                clean[key] = sanitize_mapping(item)
+            if lowered in PUBLIC_NUMERIC_DIAGNOSTIC_KEYS:
+                if isinstance(item, (int, float)) and not isinstance(item, bool):
+                    clean[key] = item
+                continue
+            if lowered in OMITTED_CONTRACT_KEYS or any(secret in lowered for secret in SECRET_KEYS):
+                continue
+            clean[key] = sanitize_mapping(item)
         return clean
     if isinstance(value, (list, tuple)):
         return [sanitize_mapping(item) for item in value]

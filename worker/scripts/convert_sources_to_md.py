@@ -29,6 +29,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -67,6 +68,10 @@ PPTX_NS = {
 
 IMAGE_SOURCE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".bmp", ".tif", ".tiff", ".gif"}
 
+OPUS_IMAGE_CACHE_SCHEMA_VERSION = "2.0"
+OPUS_IMAGE_ANALYSIS_RULES_VERSION = "2026-07-21.1"
+OPUS_IMAGE_ANALYSIS_MAX_TOKENS_HARD_CAP = 8192
+
 
 DEFAULTS = {
     "NOTES_DIR": "notes",
@@ -95,6 +100,8 @@ DEFAULTS = {
     "OPUS_IMAGE_ANALYSIS_CACHE_DIR": "",
     "OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY": "",
     "OPUS_IMAGE_ANALYSIS_MAX_IMAGES": "12",
+    "OPUS_IMAGE_ANALYSIS_MAX_TOKENS": "4096",
+    "OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS": "300",
     "BILIBILI_TIMEZONE": "Asia/Shanghai",
     "BILIBILI_FUTURE_SKEW_SECONDS": "300",
     "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
@@ -359,7 +366,20 @@ def read_text_with_fallback(path: pathlib.Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, Any]]) -> str:
+@dataclass(frozen=True)
+class ChatCompletionResult:
+    content: str
+    finish_reason: str
+    completion_tokens: int
+
+
+def _chat_completion(
+    cfg: dict[str, str],
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
+    timeout_seconds: int | None = None,
+) -> ChatCompletionResult:
     api_base = cfg["DEFAULT_LLM_API_BASE"].rstrip("/")
     url = f"{api_base}/chat/completions"
     payload = {
@@ -367,13 +387,15 @@ def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, Any]]) ->
         "messages": messages,
         "temperature": 0.1,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     api_key = cfg.get("DEFAULT_LLM_API_KEY", "")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    timeout = int(cfg["QWEN_PDF_POLISH_TIMEOUT_SECONDS"])
+    timeout = timeout_seconds if timeout_seconds is not None else int(cfg["QWEN_PDF_POLISH_TIMEOUT_SECONDS"])
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -384,9 +406,35 @@ def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, Any]]) ->
         raise RuntimeError(f"LLM connection failed: {exc.reason}") from exc
 
     try:
-        return str(data["choices"][0]["message"]["content"]).strip()
+        choice = data["choices"][0]
+        message = choice["message"]
+        raw_content = message.get("content")
+        content = raw_content if isinstance(raw_content, str) else ""
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
+        return ChatCompletionResult(
+            content=content.strip(),
+            finish_reason=str(choice.get("finish_reason") or "").strip(),
+            completion_tokens=completion_tokens,
+        )
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"unexpected LLM response: {data}") from exc
+        raise RuntimeError("unexpected LLM response contract") from exc
+
+
+def call_chat_completion(
+    cfg: dict[str, str],
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
+    timeout_seconds: int | None = None,
+) -> str:
+    """Compatibility wrapper for existing PDF/web/image OCR callers."""
+    return _chat_completion(
+        cfg,
+        messages,
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+    ).content
 
 
 def image_to_data_url(path: pathlib.Path) -> str:
@@ -432,9 +480,21 @@ _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC: float | None = None
 
 
 class OpusImageAnalysisError(RuntimeError):
-    def __init__(self, model_called: bool):
+    def __init__(
+        self,
+        model_called: bool,
+        *,
+        finish_reason: str = "",
+        completion_tokens: int = 0,
+        max_tokens: int = 0,
+        timeout_seconds: int = 0,
+    ):
         super().__init__("Bilibili opus image analysis failed")
         self.model_called = model_called
+        self.finish_reason = finish_reason
+        self.completion_tokens = max(0, completion_tokens)
+        self.max_tokens = max(0, max_tokens)
+        self.timeout_seconds = max(0, timeout_seconds)
 
 
 def normalize_opus_image_analysis_mode(value: Any) -> str:
@@ -442,6 +502,40 @@ def normalize_opus_image_analysis_mode(value: Any) -> str:
     if mode not in {"off", "ocr", "vision"}:
         raise ValueError("OPUS_IMAGE_ANALYSIS must be off, ocr, or vision")
     return mode
+
+
+def opus_image_analysis_max_tokens(cfg: dict[str, str]) -> int:
+    try:
+        configured = int(str(cfg.get("OPUS_IMAGE_ANALYSIS_MAX_TOKENS") or "4096").strip())
+    except ValueError:
+        configured = 4096
+    return max(1, min(OPUS_IMAGE_ANALYSIS_MAX_TOKENS_HARD_CAP, configured))
+
+
+def opus_image_analysis_timeout_seconds(cfg: dict[str, str]) -> int:
+    try:
+        configured = int(str(cfg.get("OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS") or "300").strip())
+    except ValueError:
+        configured = 300
+    return max(1, min(86400, configured))
+
+
+def opus_image_analysis_context_hash(
+    opus_content: str,
+    published: str,
+    timezone_name: str,
+    current_date: str,
+    time_warning: str,
+) -> str:
+    context = {
+        "opus_content": opus_content,
+        "published": published,
+        "timezone": timezone_name,
+        "current_date": current_date,
+        "time_warning": bool(time_warning),
+    }
+    encoded = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(encoded)
 
 
 def opus_image_analysis_cache_dir(cfg: dict[str, str]) -> pathlib.Path:
@@ -455,23 +549,31 @@ def opus_image_analysis_cache_dir(cfg: dict[str, str]) -> pathlib.Path:
     return (index_dir if index_dir.is_absolute() else ROOT / index_dir).resolve() / "opus-image-analysis-cache"
 
 
-def opus_image_cache_path(cfg: dict[str, str], image_hash: str, mode: str) -> pathlib.Path:
+def opus_image_cache_path(
+    cfg: dict[str, str], image_hash: str, mode: str, context_hash: str = ""
+) -> pathlib.Path:
     model_hash = sha256_bytes(str(cfg.get("DEFAULT_LLM_MODEL") or "").encode("utf-8"))[:12]
-    return opus_image_analysis_cache_dir(cfg) / f"{image_hash}.{mode}.{model_hash}.json"
+    rules_hash = sha256_bytes(OPUS_IMAGE_ANALYSIS_RULES_VERSION.encode("utf-8"))[:12]
+    context_label = (context_hash or "no-context")[:12]
+    return opus_image_analysis_cache_dir(cfg) / f"{image_hash}.{mode}.{model_hash}.{rules_hash}.{context_label}.json"
 
 
-def load_opus_image_analysis_cache(cfg: dict[str, str], image_hash: str, mode: str) -> dict[str, str] | None:
-    path = opus_image_cache_path(cfg, image_hash, mode)
+def load_opus_image_analysis_cache(
+    cfg: dict[str, str], image_hash: str, mode: str, context_hash: str = ""
+) -> dict[str, str] | None:
+    path = opus_image_cache_path(cfg, image_hash, mode, context_hash)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != "1.0"
+        or payload.get("schema_version") != OPUS_IMAGE_CACHE_SCHEMA_VERSION
+        or payload.get("rules_version") != OPUS_IMAGE_ANALYSIS_RULES_VERSION
         or payload.get("image_sha256") != image_hash
         or payload.get("mode") != mode
         or payload.get("model") != cfg.get("DEFAULT_LLM_MODEL")
+        or payload.get("context_hash") != context_hash
         or not isinstance(payload.get("result"), dict)
     ):
         return None
@@ -479,15 +581,17 @@ def load_opus_image_analysis_cache(cfg: dict[str, str], image_hash: str, mode: s
 
 
 def save_opus_image_analysis_cache(
-    cfg: dict[str, str], image_hash: str, mode: str, result: dict[str, str]
+    cfg: dict[str, str], image_hash: str, mode: str, context_hash: str, result: dict[str, str]
 ) -> None:
-    path = opus_image_cache_path(cfg, image_hash, mode)
+    path = opus_image_cache_path(cfg, image_hash, mode, context_hash)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = {
-        "schema_version": "1.0",
+        "schema_version": OPUS_IMAGE_CACHE_SCHEMA_VERSION,
+        "rules_version": OPUS_IMAGE_ANALYSIS_RULES_VERSION,
         "image_sha256": image_hash,
         "mode": mode,
         "model": str(cfg.get("DEFAULT_LLM_MODEL") or ""),
+        "context_hash": context_hash,
         "result": result,
     }
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -516,29 +620,20 @@ def _model_json_object(content: str) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except ValueError:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if not match:
-            return {}
-        try:
-            payload = json.loads(match.group(0))
-        except ValueError:
-            return {}
+        return {}
     return payload if isinstance(payload, dict) else {}
 
 
 def _vision_result(content: str) -> dict[str, str]:
     payload = _model_json_object(content)
     if not payload:
-        return {
-            "relevance": "中",
-            "visible_text": "[模型未返回结构化文字，待核验]",
-            "visual_information": clean_qwen_markdown(content) or "[待核验]",
-            "contextual_summary": "仅保留模型返回的可见画面描述，未形成扩展结论。",
-            "uncertainties": "模型返回格式不完整，需人工复核。",
-        }
+        raise ValueError("image analysis returned invalid JSON")
+    required = {"relevance", "visible_text", "visual_information", "contextual_summary", "uncertainties"}
+    if not required.issubset(payload):
+        raise ValueError("image analysis JSON is missing required fields")
     relevance = str(payload.get("relevance") or "中").strip()
     if relevance not in {"高", "中", "低"}:
-        relevance = "中"
+        raise ValueError("image analysis JSON has invalid relevance")
     result = {
         "relevance": relevance,
         "visible_text": clean_text(str(payload.get("visible_text") or "未识别到明确文字")),
@@ -557,22 +652,47 @@ def analyze_opus_image(
     mode: str,
     opus_content: str,
     cfg: dict[str, str],
-) -> tuple[dict[str, str], bool, bool, float]:
-    """Return (result, cache_hit, real_model_call, call_finished_epoch)."""
+    *,
+    published: str = "",
+    timezone_name: str = "Asia/Shanghai",
+    current_date: str = "",
+    time_warning: str = "",
+) -> tuple[dict[str, str], bool, bool, float, dict[str, Any]]:
+    """Return result plus cache/call state and non-sensitive completion diagnostics."""
     global _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC
-    cached = load_opus_image_analysis_cache(cfg, image_hash, mode)
+    context_hash = opus_image_analysis_context_hash(
+        opus_content, published, timezone_name, current_date, time_warning
+    )
+    max_tokens = opus_image_analysis_max_tokens(cfg)
+    timeout_seconds = opus_image_analysis_timeout_seconds(cfg)
+    cached = load_opus_image_analysis_cache(cfg, image_hash, mode, context_hash)
     if cached is not None:
-        return cached, True, False, 0.0
+        return cached, True, False, 0.0, {
+            "finish_reason": "cache",
+            "completion_tokens": 0,
+            "max_tokens": max_tokens,
+            "timeout_seconds": timeout_seconds,
+        }
+    time_context = f"""可信只读时间上下文（由程序提供）：
+- 动态发布时间：{published or '未知'}
+- 当前日期：{current_date or '未知'}
+- 时区：{timezone_name}
+- Python time_warning：{'是；只可记录程序给出的时间异常' if time_warning else '否；禁止增加任何时间异常判断'}
+
+时间规则：程序提供的动态发布时间是可信元数据。图片中清晰可见的日期只能按“图片直接可见文字”原样记录；不得依靠模型知识截止时间、历史印象或常规市场语境纠正年份。图片日期比动态发布时间早一天属于正常情况。除非 Python time_warning 为“是”，禁止输出“应为2024年”“未来预设”“时间戳错误”“年份疑似笔误”或同义纠正。"""
     if mode == "ocr":
         prompt = (
             "请只提取图片中直接可见的文字，尽量保持原始阅读顺序。不要总结、推断或补写；"
-            "无法确认的字符用 [待核验]。只输出提取文字。"
+            "无法确认的字符用 [待核验]。日期和年份必须按图片可见文字原样抄录，不得纠正。只输出提取文字。\n\n"
+            + time_context
         )
     else:
         prompt = f"""请分析一张 B站图文动态附件，并只返回一个 JSON 对象。
 
 动态正文（仅用于判断相关性）：
 {opus_content}
+
+{time_context}
 
 JSON 字段必须为：
 - relevance: 只能是“高”“中”“低”；
@@ -592,14 +712,41 @@ JSON 字段必须为：
         }
     ]
     _wait_before_opus_image_model_call(cfg)
+    completion: ChatCompletionResult | None = None
     try:
         try:
-            content = call_chat_completion(cfg, messages)
+            completion = _chat_completion(
+                cfg,
+                messages,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+            )
         except Exception as exc:
-            raise OpusImageAnalysisError(True) from exc
+            reason_text = str(getattr(exc, "reason", "") or exc).lower()
+            failure_reason = "timeout" if isinstance(exc, TimeoutError) or "timed out" in reason_text or "timeout" in reason_text else "error"
+            raise OpusImageAnalysisError(
+                True,
+                finish_reason=failure_reason,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+            ) from exc
     finally:
         _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC = time.monotonic()
         call_finished_epoch = time.time()
+    finish_reason = completion.finish_reason or "unknown"
+    diagnostics = {
+        "finish_reason": finish_reason,
+        "completion_tokens": completion.completion_tokens,
+        "max_tokens": max_tokens,
+        "timeout_seconds": timeout_seconds,
+    }
+    if finish_reason == "length":
+        raise OpusImageAnalysisError(True, **diagnostics)
+    if finish_reason not in {"stop", "unknown", "eos_token"}:
+        raise OpusImageAnalysisError(True, **diagnostics)
+    content = completion.content
+    if not content:
+        raise OpusImageAnalysisError(True, **diagnostics)
     try:
         if mode == "ocr":
             result = {
@@ -611,10 +758,10 @@ JSON 字段必须为：
             }
         else:
             result = _vision_result(content)
-        save_opus_image_analysis_cache(cfg, image_hash, mode, result)
+        save_opus_image_analysis_cache(cfg, image_hash, mode, context_hash, result)
     except Exception as exc:
-        raise OpusImageAnalysisError(True) from exc
-    return result, False, True, call_finished_epoch
+        raise OpusImageAnalysisError(True, **diagnostics) from exc
+    return result, False, True, call_finished_epoch, diagnostics
 
 
 def _analysis_value(value: Any) -> str:
@@ -626,10 +773,16 @@ def build_opus_image_analysis(
     assets: list[dict[str, Any]],
     opus_content: str,
     cfg: dict[str, str],
+    *,
+    published: str = "",
+    timezone_name: str = "Asia/Shanghai",
+    current_date: str = "",
+    time_warning: str = "",
 ) -> tuple[str, dict[str, Any]]:
     mode = normalize_opus_image_analysis_mode(cfg.get("OPUS_IMAGE_ANALYSIS"))
     summary: dict[str, Any] = {
         "schema_version": "1.0",
+        "rules_version": OPUS_IMAGE_ANALYSIS_RULES_VERSION,
         "mode": mode,
         "image_count": len(image_urls),
         "analyzed": 0,
@@ -637,6 +790,10 @@ def build_opus_image_analysis(
         "model_calls": 0,
         "failed": 0,
         "limited": 0,
+        "finish_reason": [],
+        "completion_tokens": 0,
+        "max_tokens": opus_image_analysis_max_tokens(cfg),
+        "timeout_seconds": opus_image_analysis_timeout_seconds(cfg),
         "status": "off" if mode == "off" else "complete",
         "warnings": [],
         "last_model_call_epoch": 0.0,
@@ -679,12 +836,24 @@ def build_opus_image_analysis(
             sections.extend(["- 分析状态：图片分析失败/待重试", "- 不确定项：本地附件不完整。"])
             continue
         try:
-            result, cache_hit, model_called, finished_epoch = analyze_opus_image(
-                local_path, image_hash, mode, opus_content, cfg
+            result, cache_hit, model_called, finished_epoch, diagnostics = analyze_opus_image(
+                local_path,
+                image_hash,
+                mode,
+                opus_content,
+                cfg,
+                published=published,
+                timezone_name=timezone_name,
+                current_date=current_date,
+                time_warning=time_warning,
             )
             summary["analyzed"] += 1
             summary["cache_hits"] += int(cache_hit)
             summary["model_calls"] += int(model_called)
+            summary["completion_tokens"] += max(0, int(diagnostics.get("completion_tokens") or 0))
+            finish_reason = str(diagnostics.get("finish_reason") or "")
+            if finish_reason and finish_reason not in summary["finish_reason"]:
+                summary["finish_reason"].append(finish_reason)
             summary["last_model_call_epoch"] = max(summary["last_model_call_epoch"], finished_epoch)
             sections.extend(
                 [
@@ -699,6 +868,10 @@ def build_opus_image_analysis(
         except Exception as exc:
             model_called = bool(getattr(exc, "model_called", False))
             summary["model_calls"] += int(model_called)
+            summary["completion_tokens"] += max(0, int(getattr(exc, "completion_tokens", 0) or 0))
+            finish_reason = str(getattr(exc, "finish_reason", "") or "error")
+            if finish_reason not in summary["finish_reason"]:
+                summary["finish_reason"].append(finish_reason)
             if model_called:
                 summary["last_model_call_epoch"] = max(summary["last_model_call_epoch"], time.time())
             summary["failed"] += 1
@@ -708,6 +881,8 @@ def build_opus_image_analysis(
 
     if summary["failed"]:
         summary["status"] = "failed" if summary["analyzed"] == 0 else "partial"
+    if len(summary["finish_reason"]) == 1:
+        summary["finish_reason"] = summary["finish_reason"][0]
     return "\n".join(sections).strip(), summary
 
 
@@ -1916,11 +2091,22 @@ def convert_bilibili_opus(
     if downloaded_assets:
         first_asset = pathlib.Path(str(downloaded_assets[0]["path"]))
         asset_dir = first_asset.parent.as_posix()
-    image_analysis, analysis_summary = build_opus_image_analysis(parsed["images"], assets, parsed["content"], cfg)
+    timezone_name = str(cfg.get("BILIBILI_TIMEZONE") or "Asia/Shanghai")
     time_warning = bilibili_future_warning(
         parsed["published"],
-        timezone_name=str(cfg.get("BILIBILI_TIMEZONE") or "Asia/Shanghai"),
+        timezone_name=timezone_name,
         allowed_skew_seconds=int(cfg.get("BILIBILI_FUTURE_SKEW_SECONDS") or 300),
+    )
+    current_date = dt.datetime.now(timezone_for(timezone_name)).date().isoformat()
+    image_analysis, analysis_summary = build_opus_image_analysis(
+        parsed["images"],
+        assets,
+        parsed["content"],
+        cfg,
+        published=parsed["published"],
+        timezone_name=timezone_name,
+        current_date=current_date,
+        time_warning=time_warning,
     )
     if time_warning:
         analysis_summary["warnings"].append(time_warning)
@@ -1947,6 +2133,7 @@ def convert_bilibili_opus(
         "asset_failed": len(failed_assets),
         "opus_image_analysis": analysis_summary["mode"],
         "opus_image_analysis_status": analysis_summary["status"],
+        "time_warning": bool(time_warning),
     }
     markdown = [
         frontmatter(meta),
@@ -1993,6 +2180,10 @@ def convert_bilibili_opus(
         "opus_image_analysis_status": analysis_summary["status"],
         "opus_image_analysis_model_calls": analysis_summary["model_calls"],
         "opus_image_analysis_cache_hits": analysis_summary["cache_hits"],
+        "opus_image_analysis_finish_reason": analysis_summary["finish_reason"],
+        "opus_image_analysis_completion_tokens": analysis_summary["completion_tokens"],
+        "opus_image_analysis_max_tokens": analysis_summary["max_tokens"],
+        "opus_image_analysis_timeout_seconds": analysis_summary["timeout_seconds"],
         "warnings": analysis_summary["warnings"],
         "error": "",
     }

@@ -30,9 +30,23 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
-## Current internal test build (2026-07-21)
+## 0.1.18 internal Apple Silicon artifact (2026-07-22)
 
-The latest verified internal handoff artifact is:
+- Version: `0.1.18`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.18_aarch64.dmg`
+- Size: `3,464,315 bytes`
+- SHA-256: `cc15118bb6a0d9e502df5386d7b412e25cca30e69824737e6c96cef2336fc31f`
+- Build type: optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+`hdiutil verify` passed. The DMG was then mounted read-only into a dedicated `/private/tmp` directory; `codesign --verify --deep --strict` passed against the mounted app, its executable reported Mach-O 64-bit `arm64`, and both `CFBundleShortVersionString` and `CFBundleVersion` reported `0.1.18`. The mounted resources contain Worker/Agent/MCP entry points, locked requirements, the stock-code reference resource, cache Schema 2.0/rules-version validation, the `4096`/`8192` image token budget, `300`-second timeout, deterministic time/stock guards, and Worker version `0.1.18`; no `env.local` is present.
+
+Before packaging, both designated opuses passed fresh-cache OpenHanako-compatible stdio MCP acceptance and immediate zero-model-call cache reruns in an isolated `/private/tmp` state/output tree. The final source checks passed with Node.js `20.20.2`, course-whisper Python `3.11.15`, 94 Python tests, and 10 Rust tests. This artifact was not installed and did not replace the current `/Applications` copy. Developer ID signing, notarization, Intel/universal packaging, a clean-Mac managed-runtime matrix, and formal OpenHanako UI import remain separate release gates.
+
+## Superseded 0.1.17 problem baseline (2026-07-21)
+
+The following artifact passed static package checks but later failed fresh-cache real visual acceptance. Do not install it or use it for formal automation:
 
 - Version: `0.1.17`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
@@ -41,9 +55,9 @@ The latest verified internal handoff artifact is:
 - SHA-256: `4934f073cb386eb632d34c97717c3a341146d07db8659e5cfdf5004144d164e4`
 - Build type: optimized release
 - Signature: complete ad-hoc app signature with hardened runtime and sealed resources; no Developer ID and no notarization
-- Verification: `npm run release:check`, `hdiutil verify`, and strict deep `codesign` verification against the app mounted from the DMG passed. The mounted app reports version `0.1.17`, contains the arm64 executable, Worker/Agent/MCP entry points, locked requirements, Bilibili opus image-analysis/time-metadata fixes, scripts and stock-code reference resource, and contains no `env.local`.
+- Static verification: `npm run release:check`, `hdiutil verify`, and strict deep `codesign` verification against the app mounted from the DMG passed. The mounted app reports version `0.1.17`, contains the arm64 executable, Worker/Agent/MCP entry points, locked requirements, scripts and stock-code reference resource, and contains no `env.local`.
 
-This record identifies the current internal artifact only. Rebuilds may produce a different checksum; update this section before handing off a newer DMG.
+Fresh-cache runtime failure: one simple interaction-ranking image continued for more than eight minutes and about 28,314 generated tokens because the request had no `max_tokens`; other outputs contained an unsupported “应为2024年” correction and wrong A-share exchange suffixes. Cancellation and cleanup succeeded, but the content/performance acceptance did not. The verified `0.1.18` replacement is recorded above; retain this entry only as the problem baseline.
 
 Spotlight may also index `src-tauri/target/release` and `src-tauri/target/debug`. These are release/debug build products, while `/Applications/Local Note Studio.app` is the installed copy; they are not separate data installations and share Application Support state. Normal build/test/start commands must not delete either target directory automatically. Clean them manually only after resolving and confirming the exact project path.
 
