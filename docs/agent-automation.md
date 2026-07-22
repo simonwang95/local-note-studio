@@ -1,6 +1,6 @@
 # Agent 自动化
 
-Local Note Studio 0.1.18 提供受限 Agent CLI 和本地 stdio MCP Server。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
+Local Note Studio 0.1.19 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
 
 ## 安全边界
 
@@ -70,6 +70,7 @@ scripts/local-notes-agent sync-up --profile qingfeng --limit 1
 scripts/local-notes-agent ingest-url --profile qingfeng --url "https://www.bilibili.com/video/BVxxxx/"
 scripts/local-notes-agent ingest-file --profile qingfeng --file "/allowed/inbox/document.pdf"
 scripts/local-notes-agent retry-failed --profile qingfeng
+scripts/local-notes-agent rebuild-index --profile qingfeng
 scripts/local-notes-agent status --limit 20
 scripts/local-notes-agent status --run-id "UUID"
 ```
@@ -149,13 +150,101 @@ SQLite 使用 WAL 与完整同步，保存脱敏请求、状态、统计、输�
 
 稳定错误码包括：`INVALID_REQUEST`、`PROFILE_INVALID`、`PROFILE_NOT_FOUND`、`PATH_NOT_ALLOWED`、`URL_NOT_ALLOWED`、`TASK_LOCKED`、`TASK_TIMEOUT`、`TASK_CANCELLED`、`TASK_INTERRUPTED`、`PARTIAL_FAILURE`、`BILIBILI_AUTH_INVALID`、`BILIBILI_RATE_LIMITED`、`BILIBILI_DISCOVERY_FAILED`、`BILIBILI_SUBTITLE_UNAVAILABLE`、`BILIBILI_DOWNLOAD_FAILED`、`ASR_FAILED`、`LLM_FAILED`、`OUTPUT_INTEGRITY_FAILED`、`OUTPUT_MISSING`、`SOURCE_ACCESS_DENIED`、`SOURCE_NOT_FOUND`、`BATCH_ALL_FAILED`、`STATE_STORAGE_ERROR`、`WORKER_CONTRACT_ERROR`、`UNSUPPORTED_REQUEST` 和兜底 `TASK_FAILED`。是否适合重试由 `retryable` 明确给出，无需解析中文日志。
 
+## 已有笔记只读检索
+
+0.1.19 在原有七个工具之外增加四个只读工具，底层只处理所有已启用 Profile 的正式 Markdown 输出：
+
+- `local_notes_search(query, author?, date_range?, limit?)`：NFKC 规范化、英文大小写不敏感的确定性关键词检索；
+- `local_notes_get(path_or_id, offset?, max_chars?, section?)`：按稳定 `note_id` 或已索引路径读取元数据、章节清单和受限正文；
+- `local_notes_list_recent(author?, content_type?, days?, limit?)`：只用可信 `published` 列出近期笔记；
+- `local_notes_get_viewpoints(symbol_or_topic, as_of_date, limit?)`：只返回截止历史日期的直接证据并作确定性候选分组，不在服务端总结观点或生成投资建议。
+
+四个工具均声明 `readOnlyHint=true`、`destructiveHint=false`、`idempotentHint=true`、`openWorldHint=false`。查询进程不会访问网络、LM Studio、Shell、Stocks MCP 或 MySQL，也不会写笔记、Manifest、SQLite 自动化历史、全局锁、缓存或索引。空结果是 `status=completed` 且返回数为 0。
+
+### 显式建索引与原子恢复
+
+首次检索前运行：
+
+```bash
+scripts/local-notes-agent rebuild-index --profile qingfeng
+```
+
+默认输出位于：
+
+```text
+~/Library/Application Support/Local Note Studio/state/indexes/note-indexes/<profile_id>/note-index.json
+~/Library/Application Support/Local Note Studio/state/indexes/note-indexes/<profile_id>/asset-index.json
+```
+
+开发或验收可用 `INDEX_DIR` 或 `LOCAL_NOTES_READ_INDEX_DIR` 指向 `/private/tmp`。索引通过同目录临时文件、`fsync` 和 `os.replace` 原子替换；失败不会改写正式笔记。Agent 的 `sync-up`、`retry-failed`、`ingest-url`、`ingest-file` 在非 dry-run 成功或部分成功后刷新对应 Profile 索引；刷新失败只附加 `NOTE_INDEX_REFRESH_FAILED` warning，可稍后显式重建。
+
+查询发现索引缺失、JSON/Schema 损坏或 Markdown 集合的路径、大小、mtime 指纹变化时，分别返回 `NOTE_INDEX_UNAVAILABLE`、`NOTE_INDEX_CORRUPT`、`NOTE_INDEX_STALE`，不会在查询中偷偷重建。修复方式是先确认 Profile 和正式笔记目录，再执行 `rebuild-index`；索引可删除后重建，但不要为此批量改写笔记。
+
+### note-index Schema 2.0
+
+Profile 索引保留旧索引的 `path`、`title`、`type`、`source_type`、`source_path`、`status`、`tags`、`links`、`asset_count`、`modified_at`、`size`，并增加：
+
+```text
+note_id, profile_id, note_path, relative_path, source_url,
+author, author_mid, published, date_source, content_type,
+bvid, avid, dynamic_id, opus_id, model, organize_model,
+organized_status, source_hash, headings, sections,
+missing_metadata, metadata_quality, index_text_available
+```
+
+`note_id` 优先使用 `source_type + BVID/dynamic_id/source_url`，无网络 ID 时使用规范化 `source_path + source_hash`，最后才回退到 Profile 内相对 Markdown 路径。重复来源身份会幂等去重，并优先保留完整正式笔记。PPTX、PDF、网页和本地资料不要求 BVID 或动态 ID，不适用字段为 `null`。
+
+确定性回退规则：
+
+- BVID：frontmatter → `source_url` → 文件名 → `null`；
+- 动态 ID：frontmatter 的 `dynamic_id/opus_id` → `source_url` → 文件名 → `null`；
+- 整理模型：`organize_model` → `model` → `null`；
+- 发布时间：`published` 优先；兼容 `published_at/publish_date/date` 时明确标记 `date_source=frontmatter`。mtime 只保存在 `modified_at`，不会冒充可信发布时间；
+- 缺失字段进入 `missing_metadata` 和 `metadata_quality`，不调用模型、不猜测。
+
+`source_type/content_type` 是可扩展字符串；当前兼容 `video`、`bilibili-video`、`bilibili-opus`、`pptx/presentation`、`pdf`、`webpage`、`wechat-article`、`local-file/local-video` 和 `unknown`。当前只把已经生成的 Markdown 正式笔记作为结果；原始 PPT/PPTX、视频、未整理动态不会直接出现。以后 `ingest-file` 把 PPT 生成 Markdown 后，会沿用同一个 Profile 索引，无需改查询工具。
+
+### 检索、来源层级与时点边界
+
+检索排序固定为标题精确命中最高，其次作者/标签/证券代码或来源 ID、小标题、正文；同分按 `published` 降序和 `note_path` 升序。`date_range` 是闭区间，只接纳 `date_source=published/frontmatter` 的显式日期，不接纳 mtime；无可信发布时间的旧笔记不会混入日期过滤结果。`limit` 默认 20、硬上限 50，查询和返回字符、单文件大小、累计扫描量也有硬限制。
+
+每个 snippet 都携带 `provenance`：
+
+| provenance | 含义 |
+| --- | --- |
+| `source_text` | “原文抽取”等直接来源文本 |
+| `transcript` | 字幕、完整转写或 ASR 文本 |
+| `llm_organized` | “Qwen 整理”及其结构化子章节 |
+| `llm_visual_analysis` | 图片视觉/OCR 分析 |
+| `deterministic_metadata` | Python 生成的来源追溯、来源信息等 |
+| `unknown` | 旧笔记无法可靠判断 |
+
+因此 `Qwen 整理` 片段不会被标成 UP 主原话。`local_notes_get` 默认返回受限正文，长笔记可用 `offset/max_chars` 分页，或用标题/上述 provenance 作为 `section` 读取，并返回 `truncated`、`next_offset` 和行号。
+
+观点检索要求 `as_of_date=YYYY-MM-DD`。可信发布时间晚于该日期的证据严格排除；没有可信发布时间的内容只能进入 `undated_candidates`。候选分组为 `methodology_candidates`、`dated_viewpoints`、`historical_or_stale_candidates`、`undated_candidates`，并返回明确的 `classification_basis`：0–7 天为 recent、8–30 天为 aging、超过 30 天为 historical。历史分组不声称事实或观点已经失效；方法论也不会仅因时间较早被判过期。
+
+### OpenHanako 调用示例
+
+导入 Connector 后可让 HanaAgent 使用以下参数调用：
+
+```json
+{"query":"七轨布林","author":"青枫","date_range":{"start":"2026-01-01","end":"2026-07-22"},"limit":10}
+{"author":"青枫","content_type":"bilibili-opus","days":30}
+{"path_or_id":"note_0123456789abcdef01234567","section":"source_text","max_chars":8000}
+{"symbol_or_topic":"七轨布林","as_of_date":"2026-06-30","limit":20}
+```
+
+`local_notes_get` 的示例 `note_id` 只是占位符，应先从搜索结果复制真实值。检索错误使用稳定错误码：`NOTE_INDEX_UNAVAILABLE`、`NOTE_INDEX_CORRUPT`、`NOTE_INDEX_STALE`、`NOTE_NOT_FOUND`、`NOTE_PATH_NOT_ALLOWED`、`NOTE_READ_FAILED`、`INVALID_QUERY`、`INVALID_DATE_RANGE`、`INPUT_LIMIT_EXCEEDED`。
+
+资料状态需分开理解：已整理 Markdown 才能检索；已发现但未整理、整理失败、以及尚未纳入 Profile 的原始资料都不会出现在检索结果。索引不代表原始资料发现清单。
+
 ## stdio MCP 与 OpenHanako
 
 MCP 固定入口为 `scripts/local-notes-mcp`。stdin/stdout 只传输逐行 JSON-RPC；日志只写 stderr。Server 支持初始化、工具枚举、工具调用、ping 和干净 EOF 退出。OpenHanako 关闭 Connector 时会先关闭 stdin，再升级为 SIGTERM/SIGKILL；Server 在终止信号中会清理正在运行的 Worker 进程组。
 
-工具：
+工具（共 11 个）：
 
-- 只读：`local_notes_env_check`、`local_notes_get_status`、`local_notes_list_profiles`；
+- 只读：`local_notes_env_check`、`local_notes_get_status`、`local_notes_list_profiles`、`local_notes_search`、`local_notes_get`、`local_notes_list_recent`、`local_notes_get_viewpoints`；
 - 写入且幂等：`local_notes_sync_up`、`local_notes_ingest_url`、`local_notes_ingest_file`、`local_notes_retry_failed`。
 
 第一版没有暴露 `local_notes_cancel_run`：当前同步调用期间 Server 不能可靠地并行接收取消请求，因此不会宣称不可靠的取消能力。OpenHanako Connector 自身停止或超时仍会终止完整进程组，最终状态可用 `run_id` 查询。

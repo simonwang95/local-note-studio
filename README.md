@@ -12,7 +12,7 @@ The app uses a Tauri desktop shell, a thin Rust process bridge, and a packaged P
 - Task history and recovery, deletable separate recent lists for task output directories and input sources, structured output actions, progress/cancellation, incognito mode, and editable/batch Manifest state.
 - App-managed Python 3.11 runtime with locked packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`/`ffprobe`, and Pandoc.
 - Advanced existing-Conda backend for development or users who already maintain a compatible environment.
-- Profile-restricted Agent CLI and stdio MCP tools for incremental UP video/opus sync, single URL/file ingestion, failed-item retry, environment checks, and persistent status queries.
+- Profile-restricted Agent CLI and stdio MCP tools for incremental UP video/opus sync, single URL/file ingestion, failed-item retry, environment checks, persistent status queries, and deterministic read-only retrieval over existing Markdown notes.
 - Worker-wide cross-process task locking, versioned structured results, and redacted SQLite automation history shared by GUI, CLI, Agent, and MCP entry points.
 
 ## Agent automation
@@ -23,9 +23,18 @@ Automation uses the existing Worker and processing scripts; it does not duplicat
 scripts/local-notes-agent profiles
 scripts/local-notes-agent env-check --profile qingfeng
 scripts/local-notes-agent sync-up --profile qingfeng --dry-run
+scripts/local-notes-agent rebuild-index --profile qingfeng
 ```
 
 OpenHanako's official app can launch `scripts/local-notes-mcp` as a local stdio Connector. Import [`docs/openhanako-mcp.example.json`](docs/openhanako-mcp.example.json) after replacing the placeholder absolute paths. Do not put API keys or Cookie values in the Connector or Profile; secrets remain in the existing protected Local Note Studio configuration.
+
+The MCP server now exposes 11 tools. The original seven automation tools remain compatible; four additional tools search, read, list recent notes, and retrieve historical viewpoint evidence from enabled Profiles. Those four tools never rebuild an index, acquire the global write lock, write audit history, call a network/LLM/Shell/Stocks/MySQL service, or modify Markdown/Manifest files. Build the Profile index explicitly before first use and again after manual note changes:
+
+```bash
+scripts/local-notes-agent rebuild-index --profile qingfeng
+```
+
+Successful Agent ingestion refreshes that Profile index atomically. A refresh failure is only a warning: the completed note remains intact and the explicit command can recover the index later. See [Agent automation](docs/agent-automation.md#已有笔记只读检索) and the [Chinese user guide](docs/user-guide-zh.md#在-hanaagentopenhanako-中只读检索已有笔记) for the index contract, provenance labels, examples, and recovery steps.
 
 Bilibili opus Profiles can set `"opus_image_analysis": "off" | "ocr" | "vision"`. `off` keeps the download/reference-only behavior, `ocr` extracts visible text without expanded inference, and `vision` relates verifiable text, tables, charts, K-lines, screenshots, and relevance to the post body. Finance-oriented Profiles should normally use `vision`; it costs up to one multimodal model call per uncached attachment. OCR/vision calls use their own `OPUS_IMAGE_ANALYSIS_MAX_TOKENS` (default `4096`, hard-capped at `8192`) and `OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS` (default `300`) instead of inheriting long-document budgets. Successful results are cached by image SHA-256, mode, model, rules version, and read-only post/time context under isolated automation state. Truncated, empty, invalid-JSON, timed-out, or otherwise failed results are never cached; the body and downloaded images remain available for a safe retry.
 

@@ -34,6 +34,7 @@ from automation_profiles import (
     validate_allowed_path,
     validate_allowed_url,
 )
+from local_notes_retrieval import rebuild_index_result, rebuild_profile_index
 
 
 WORKER = pathlib.Path(__file__).with_name("local_note_studio_worker.py")
@@ -355,6 +356,8 @@ def run_agent_action(
         if action == "profiles":
             return profiles_payload(caller=caller)
         profile = require_profile(profile_id)
+        if action == "rebuild-index":
+            return rebuild_index_result(profile, caller=caller)
         request = build_request(action, profile, source=source, limit=limit, dry_run=dry_run, caller=caller)
         if action == "retry-failed" and not dry_run:
             previous = next(
@@ -369,7 +372,22 @@ def run_agent_action(
             )
             if previous:
                 request["retry_of"] = previous["run_id"]
-        return invoke_worker(request)
+        result = invoke_worker(request)
+        if (
+            not dry_run
+            and action in {"sync-up", "retry-failed", "ingest-url", "ingest-file"}
+            and result.get("status") in {"completed", "no_changes", "partial_failed"}
+        ):
+            try:
+                index_detail = rebuild_profile_index(profile)
+                details = result.setdefault("details", {})
+                if isinstance(details, dict):
+                    details["note_index"] = index_detail
+            except BaseException:
+                result.setdefault("warnings", []).append(
+                    "NOTE_INDEX_REFRESH_FAILED: notes were preserved; run rebuild-index explicitly"
+                )
+        return sanitize_mapping(result)
     except BaseException as exc:
         return _fallback_error(request, exc)
 
@@ -377,10 +395,10 @@ def run_agent_action(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("sync-up", "retry-failed", "env-check"):
+    for command in ("sync-up", "retry-failed", "env-check", "rebuild-index"):
         item = subparsers.add_parser(command)
         item.add_argument("--profile", required=True)
-        if command != "env-check":
+        if command in {"sync-up", "retry-failed"}:
             item.add_argument("--limit", type=int)
         item.add_argument("--dry-run", action="store_true")
     for command, source_flag in (("ingest-url", "--url"), ("ingest-file", "--file")):

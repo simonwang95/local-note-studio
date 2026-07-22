@@ -657,6 +657,38 @@ conda run --no-capture-output -n course-whisper \
 
 目录输入默认只扫描当前目录。需要扫描子目录时，勾选“递归扫描目录”。
 
+### 在 HanaAgent/OpenHanako 中只读检索已有笔记
+
+0.1.19 可以让 HanaAgent 读取已经整理完成的 Markdown 笔记，重点适用于青枫笔记，也适用于所有设为 `enabled: true` 的 Profile。它不会直接读取原始 PPT、视频或尚未整理的动态，也不会修改 OpenHanako。
+
+第一次使用前：
+
+1. 确认 `automation-profiles.json` 中的 Profile 已启用，`output_dir` 指向正式笔记目录，且仍位于 `allowed_output_roots`；
+2. 执行 `scripts/local-notes-agent rebuild-index --profile qingfeng`；
+3. 在 OpenHanako 正式 APP 的“设置 → MCP”导入 [`openhanako-mcp.example.json`](openhanako-mcp.example.json)，只替换 command/cwd 的项目绝对路径；
+4. 先搜索主题，再复制结果中的真实 `note_id` 获取正文。
+
+常用问法和对应工具：
+
+- “搜索青枫关于七轨布林的笔记” → `local_notes_search`；
+- “列出青枫最近 30 天的动态笔记” → `local_notes_list_recent`；
+- “读取这篇笔记的 UP 原文部分” → `local_notes_get(section="source_text")`；
+- “只看 2026-06-30 当时已经发布的七轨布林证据” → `local_notes_get_viewpoints(as_of_date="2026-06-30")`。
+
+结果里的 `source_text` 是直接来源文本，`transcript` 是字幕/转写，`llm_organized` 是 Qwen 整理，`llm_visual_analysis` 是图片视觉/OCR 分析，`deterministic_metadata` 是程序生成的来源追溯。HanaAgent 应依据这些标签区分“UP 主原话”和“模型整理”，不能把 Qwen 片段当成原话。
+
+四个检索工具严格只读：不会调用网络、LM Studio、Shell、Stocks MCP 或 MySQL，也不会写笔记、Manifest、任务历史、全局锁或索引。检索结果为空不是故障。
+
+如果返回：
+
+- `NOTE_INDEX_UNAVAILABLE`：索引尚未建立；
+- `NOTE_INDEX_CORRUPT`：索引 JSON 或 Schema 损坏；
+- `NOTE_INDEX_STALE`：正式 Markdown 在索引之后发生了增删改。
+
+以上三种情况都先确认 Profile 和正式目录，再重新运行显式 `rebuild-index`。查询不会自动重建。成功采集/整理后会自动刷新对应 Profile；即使刷新失败，正式笔记仍会保留，warning 会提示稍后重建。
+
+完整字段、排序、分页、历史时点和故障恢复规则见 [`agent-automation.md`](agent-automation.md#已有笔记只读检索)。
+
 ## 6. 常见问题
 
 ### 点“检查依赖”提示浏览器预览

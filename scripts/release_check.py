@@ -27,6 +27,7 @@ def main() -> int:
         "../worker/automation_profiles.py",
         "../worker/local_notes_agent.py",
         "../worker/local_notes_mcp.py",
+        "../worker/local_notes_retrieval.py",
         "../worker/automation-profiles.example.json",
         "../worker/scripts/*.py",
         "../scripts/local-notes-agent",

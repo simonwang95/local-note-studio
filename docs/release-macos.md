@@ -30,6 +30,22 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.19 internal Apple Silicon artifact (2026-07-22)
+
+- Version: `0.1.19`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.19_aarch64.dmg`
+- Size: `3,480,916 bytes`
+- SHA-256: `22937bb46f8bc8a5ee91bda30b2244d1e4d79c816b7a72bc76af50be7ace0996`
+- Build type: optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+`hdiutil verify` passed. The DMG was mounted read-only under `/private/tmp`; strict deep `codesign` verification passed against the mounted app, its executable reported Mach-O 64-bit `arm64`, and both bundle versions reported `0.1.19`. The mounted retrieval module matched the source SHA-256, while `.env.local`, Python bytecode, and scanned credential patterns were absent.
+
+This release adds the versioned Profile-scoped read-only note index and four retrieval tools, bringing the stdio MCP surface to 11 tools. A real Qingfeng acceptance run read 186 existing Markdown files into 185 deduplicated index entries in isolated `/private/tmp` state. Search, recent-list, exact note retrieval, provenance-labelled excerpts, and `as_of` viewpoint evidence grouping passed; future evidence was excluded. Query-side comparisons confirmed that the formal notes, Manifest/history/lock sentinels, and note/asset indexes remained byte- and timestamp-identical. The acceptance did not modify OpenHanako, Stocks, or the formal Qingfeng note directory.
+
+The final release check passed the frontend build/compatibility gate, 111 Python tests, 10 Rust tests, and the packaging consistency audit with Node.js `20.20.2` and course-whisper Python `3.11.15`. This artifact was not installed and did not replace the current `/Applications` copy. Developer ID signing, notarization, Intel/universal packaging, a clean-Mac managed-runtime matrix, and formal OpenHanako UI import remain separate release gates.
+
 ## 0.1.18 internal Apple Silicon artifact (2026-07-22)
 
 - Version: `0.1.18`

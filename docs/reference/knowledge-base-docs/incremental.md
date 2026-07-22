@@ -48,14 +48,36 @@ indexes/source-manifest.json
 - 正式整理笔记默认不覆盖，建议生成新版本或标记待审。
 - manifest 更新 hash 和状态。
 
-## 索引扩展
+## Profile 只读检索索引
 
-后续可以增加：
+`scripts/build_note_index.py` 仍兼容原有 `--notes-dir/--index-dir` 用法；Agent 检索使用 Profile 级 Schema 2.0：
 
-- `indexes/note-index.json`：记录每篇笔记的标题、标签、来源、更新时间。
-- `indexes/asset-index.json`：记录图片、截图、附件引用和缺失状态。
+```bash
+scripts/local-notes-agent rebuild-index --profile qingfeng
+# 等价的底层入口：
+python3 worker/scripts/build_note_index.py --profile qingfeng
+```
 
-当前已提供 `scripts/build_note_index.py` 生成 `note-index.json` 和 `asset-index.json`。
+默认文件：
+
+```text
+indexes/note-indexes/<profile_id>/note-index.json
+indexes/note-indexes/<profile_id>/asset-index.json
+```
+
+索引保留旧字段并增加稳定 `note_id`、Profile/真实 Markdown 路径、来源 URL/ID/hash、作者和发布时间、整理模型/状态、章节 provenance、缺失元数据与质量信息。BVID、动态 ID、模型和发布时间按确定性回退；缺失值为 `null`，不会调用模型补齐。mtime 只用于 `modified_at` 和过期指纹，不冒充可信发布时间。
+
+每次重建扫描的只是 Profile `output_dir` 内且仍通过 `allowed_output_roots` 校验的 Markdown。符号链接逃逸和 `.obsidian` 内容不进入索引。稳定来源身份重复时会幂等去重并优先保留完整正式笔记；PPTX/PDF/网页等没有 BVID 或动态 ID 的资料使用 `source_path/source_hash` 身份。
+
+写入采用临时文件、`fsync` 和 `os.replace`。查询只校验 Schema 与路径/大小/mtime 集合指纹，不写任何文件，也不会自动修复：
+
+- 索引缺失：`NOTE_INDEX_UNAVAILABLE`；
+- JSON/Schema 损坏：`NOTE_INDEX_CORRUPT`；
+- Markdown 集合变化：`NOTE_INDEX_STALE`。
+
+三种情况均通过显式 `rebuild-index` 恢复。采集/整理成功后会刷新所属 Profile；刷新失败仅产生 warning，不回滚或破坏已完成笔记。
+
+索引状态与原始资料状态不同：只有已生成的 Markdown 可检索；已发现但未整理、整理失败、以及尚未纳入 Profile 的原始资料都不在检索结果中。
 
 ## 视频 manifest
 

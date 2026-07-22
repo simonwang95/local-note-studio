@@ -2,7 +2,7 @@
   "mcpServers": {
     "local-note-studio": {
       "name": "Local Note Studio",
-      "description": "Incremental, profile-restricted local note ingestion",
+      "description": "Profile-restricted note ingestion and deterministic read-only Markdown retrieval",
       "transport": "stdio",
       "command": "/absolute/path/to/local-note-studio/scripts/local-notes-mcp",
       "args": [],

@@ -9,10 +9,17 @@ import json
 import os
 import pathlib
 import re
+import sys
+import tempfile
 from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from automation_profiles import require_profile
+from local_notes_retrieval import rebuild_profile_index
 
 DEFAULTS = {
     "NOTES_DIR": "notes",
@@ -51,6 +58,25 @@ def rel(path: pathlib.Path) -> str:
 
 def now_iso() -> str:
     return dt.datetime.now().replace(microsecond=0).isoformat()
+
+
+def atomic_json(path: pathlib.Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
@@ -155,8 +181,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--notes-dir", default=cfg["NOTES_DIR"], help="notes directory to scan")
     parser.add_argument("--index-dir", default=cfg["INDEX_DIR"], help="directory for JSON indexes")
+    parser.add_argument("--profile", help="enabled Profile ID; writes the versioned Profile read index")
     parser.add_argument("--check", action="store_true", help="exit non-zero when missing assets exist")
     args = parser.parse_args()
+
+    if args.profile:
+        result = rebuild_profile_index(require_profile(args.profile))
+        print(
+            f"profile={result['profile_id']} notes={result['note_count']} "
+            f"deduplicated={result['deduplicated_count']} assets={result['asset_count']} "
+            f"missing={result['missing_asset_count']}"
+        )
+        print(f"note_index={result['index_path']}")
+        print(f"asset_index={result['asset_index_path']}")
+        return 1 if args.check and result["missing_asset_count"] else 0
 
     notes_dir = (ROOT / args.notes_dir).resolve()
     index_dir = (ROOT / args.index_dir).resolve()
@@ -167,35 +205,26 @@ def main() -> int:
 
     notes, assets = build_indexes(notes_dir)
     missing = [item for item in assets if not item["exists"]]
-    index_dir.mkdir(parents=True, exist_ok=True)
-    note_index_path.write_text(
-        json.dumps(
-            {
-                "generated_at": now_iso(),
-                "notes_dir": rel(notes_dir),
-                "note_count": len(notes),
-                "notes": notes,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    atomic_json(
+        note_index_path,
+        {
+            "schema_version": "1.0",
+            "generated_at": now_iso(),
+            "notes_dir": rel(notes_dir),
+            "note_count": len(notes),
+            "notes": notes,
+        },
     )
-    asset_index_path.write_text(
-        json.dumps(
-            {
-                "generated_at": now_iso(),
-                "notes_dir": rel(notes_dir),
-                "asset_count": len(assets),
-                "missing_count": len(missing),
-                "assets": assets,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    atomic_json(
+        asset_index_path,
+        {
+            "schema_version": "1.0",
+            "generated_at": now_iso(),
+            "notes_dir": rel(notes_dir),
+            "asset_count": len(assets),
+            "missing_count": len(missing),
+            "assets": assets,
+        },
     )
     print(f"notes={len(notes)} assets={len(assets)} missing={len(missing)}")
     print(f"note_index={rel(note_index_path)}")
