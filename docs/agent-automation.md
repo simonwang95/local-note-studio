@@ -52,9 +52,9 @@ Local Note Studio 0.1.18 提供受限 Agent CLI 和本地 stdio MCP Server。Ope
 
 分析只读取已经下载到本地的附件，不重复请求图片。单次 OCR/vision 请求显式发送 `max_tokens`，默认 `4096`、硬上限 `8192`；单次图片超时默认 `300` 秒。它们不继承 `SUMMARY_MAX_TOKENS=80000`、Quick Read 或长文/PDF 预算。Profile 的 `timeout_seconds` 显式设置时会覆盖图片与现有 Qwen 超时，但 token 上限保持独立。
 
-成功缓存使用 Schema 2.0，并校验图片 SHA-256、模式、模型、规则版本以及正文/可信时间上下文哈希；新规则会自动使用新的缓存文件名，旧缓存保留但不命中。`finish_reason=length`、空 `content`、推理耗尽而没有最终正文、非法 JSON、HTTP 超时和临时服务错误均转为可重试失败，不写成功缓存。失败时正文、已下载图片和原始引用仍保留，并写“图片分析失败/待重试”；已有完整笔记不会被失败重试覆盖。命中缓存、`off` 和未进入真实模型调用的项目不会触发冷却。单条动态最多分析 12 张图片，超过部分保留原图并写 warning。
+成功缓存使用 Schema 2.0，并校验图片 SHA-256、模式、模型、规则版本以及正文/可信时间上下文哈希；新规则会自动使用新的缓存文件名，旧缓存保留但不命中。`finish_reason=length`、空 `content` 或非法 JSON 会在同一任务中自动重试一次，重试前仍执行统一模型冷却；单张图片最多两次调用，每次独立保持 `max_tokens=4096` 和 `timeout=300`，第二次失败后不会继续调用。HTTP 超时和临时服务错误仍转为可追溯的可重试失败，但不会在图片链路内无限重试。所有失败结果都不写成功缓存。失败时正文、已下载图片和原始引用仍保留，并写“图片分析失败/待重试”；已有完整笔记不会被失败重试覆盖。命中缓存、`off` 和未进入真实模型调用的项目不会触发冷却。单条动态最多分析 12 张图片，超过部分保留原图并写 warning。
 
-B站正文送入正式 Qwen 整理前会剥离来源 URL、作者/MID、动态 ID、发布时间、转换路径和 SHA256，只保留原文抽取、图片分析与来源类型说明。frontmatter 和“来源追溯”由 Python 确定性生成。视觉提示词单独获得可信只读的动态发布时间、当前日期和 `Asia/Shanghai` 时区；图片中的日期只能作为直接可见文字原样记录，发布前一晚属于正常情况。只有 Python 明确产生 `time_warning` 时才能加入时间异常；模型不得依靠知识截止时间、历史印象或市场语境输出“应为2024年”“未来预设”“时间戳错误”或“年份疑似笔误”。正式整理阶段具有相同提示规则，并只对 Qwen 整理区做程序化防幻觉校验，不删除原文明确讨论的时间矛盾。
+B站正文送入正式 Qwen 整理前会剥离来源 URL、作者/MID、动态 ID、发布时间、转换路径和 SHA256，只保留原文抽取、图片分析与来源类型说明。frontmatter 和“来源追溯”由 Python 确定性生成。视觉提示词单独获得可信只读的动态发布时间、当前日期和 `Asia/Shanghai` 时区；图片中的日期只能作为直接可见文字原样记录，发布前一晚属于正常情况。只有 Python 明确产生 `time_warning` 时才能加入时间异常；模型不得依靠知识截止时间、历史印象或市场语境输出“应为2024年”“未来预设”“时间戳错误”或“年份疑似笔误”。正式整理阶段具有相同提示规则，并不得为来源中没有的机构、人名或术语添加英文名、缩写或别名；例如来源只有“沃什”时不能自行补为 `Waller`，无法确认时保留原文并标记待核验。程序化防幻觉校验只处理 Qwen 整理区，不删除原文明确讨论的时间矛盾。
 
 A股确定性证券参考表只用于校验，不授权 Qwen 为原文没有代码的股票补代码。写文件前会检查 Qwen 新增的 6 位代码：原文没有该代码时从整理区移除；原文已有代码时按证券参考表确定性纠正 `.SH`/`.SZ` 后缀。原文抽取保持不变，文件末尾的“A股术语校验”表仍由 Python 生成。
 
@@ -145,7 +145,7 @@ SQLite 使用 WAL 与完整同步，保存脱敏请求、状态、统计、输�
 
 `status` 可为 `completed`、`no_changes`、`partial_failed`、`failed`、`cancelled` 或 `timeout`；异常强制终止且来不及返回结果的历史记录会在下次查询时恢复为 `interrupted`。`deliveries` 在可用时包含笔记路径、`source_type`、`source_url`、`source_hash`、BVID/动态 ID、`author_mid`、`published` 和 `organized_status`，供下游读取；Local Note Studio 不执行股票观点提取或数据库写入。
 
-`env-check` 会在 `details.environment_report` 返回脱敏后的运行时检查报告；B站图文任务还可在 `details.opus_image_analysis` 返回模式、图片数、`finish_reason`、数值型 `completion_tokens`、`max_tokens`、`timeout_seconds`、真实模型调用、缓存命中、失败和安全上限统计。Cookie、API Key、浏览器 Profile 和图片 base64 字段从结果/历史合同中直接省略，warning 也不含 reasoning 或完整服务端错误正文。Profile、状态或历史读取本身失败时仍返回上述合同，而不是未结构化的 traceback。
+`env-check` 会在 `details.environment_report` 返回脱敏后的运行时检查报告，并与真实任务共用 request → environment → 内置 LM Studio 默认值的有效 LLM 配置解析；内置默认 key 只报告为 `set`。B站图文任务还可在 `details.opus_image_analysis` 返回模式、图片数、`finish_reason`、数值型 `completion_tokens`、`max_tokens`、`timeout_seconds`、`retry_count`、真实模型调用、缓存命中、失败和安全上限统计。Cookie、API Key、浏览器 Profile 和图片 base64 字段从结果/历史合同中直接省略，warning 也不含 reasoning 或完整服务端错误正文。Profile、状态或历史读取本身失败时仍返回上述合同，而不是未结构化的 traceback。
 
 稳定错误码包括：`INVALID_REQUEST`、`PROFILE_INVALID`、`PROFILE_NOT_FOUND`、`PATH_NOT_ALLOWED`、`URL_NOT_ALLOWED`、`TASK_LOCKED`、`TASK_TIMEOUT`、`TASK_CANCELLED`、`TASK_INTERRUPTED`、`PARTIAL_FAILURE`、`BILIBILI_AUTH_INVALID`、`BILIBILI_RATE_LIMITED`、`BILIBILI_DISCOVERY_FAILED`、`BILIBILI_SUBTITLE_UNAVAILABLE`、`BILIBILI_DOWNLOAD_FAILED`、`ASR_FAILED`、`LLM_FAILED`、`OUTPUT_INTEGRITY_FAILED`、`OUTPUT_MISSING`、`SOURCE_ACCESS_DENIED`、`SOURCE_NOT_FOUND`、`BATCH_ALL_FAILED`、`STATE_STORAGE_ERROR`、`WORKER_CONTRACT_ERROR`、`UNSUPPORTED_REQUEST` 和兜底 `TASK_FAILED`。是否适合重试由 `retryable` 明确给出，无需解析中文日志。
 
@@ -231,11 +231,13 @@ Spotlight 可能同时显示三个 Local Note Studio：`/Applications` 是正式
 
 `Local Note Studio_0.1.17_aarch64.dmg`（SHA-256 `4934f073cb386eb632d34c97717c3a341146d07db8659e5cfdf5004144d164e4`）只保留为问题基线，不应安装或用于正式自动化。失控任务最终通过终止 MCP 取消；审计、锁释放和完整进程组清理正常。
 
-## 0.1.18 全新缓存验收记录
+## 0.1.18 最终小修复与全新缓存复验
 
-2026-07-22 使用全新的 `/private/tmp/local-note-opus-018.T5FQEw` output、state、indexes、Profile 和图片缓存，通过 OpenHanako-compatible stdio MCP 完成真实验收。正式 Application Support 只读复用 Cookie 和模型配置；没有修改 OpenHanako、Stocks、正式青枫笔记目录、认证数据或 `/Applications` 安装版。
+2026-07-22 使用新的 `/private/tmp/local-note-opus-018-retry.R6o2TO` output、state、Profile 和图片缓存，通过 OpenHanako-compatible stdio MCP 重新验收。正式 Application Support 只读复用 Cookie；所有笔记、审计和缓存输出都限制在 `/private/tmp`。没有修改 OpenHanako、Stocks、正式青枫笔记目录、认证数据或 `/Applications` 安装版。
 
-- 低相关动态 `1227413653675835411` 首跑 87 秒：2 张图均完成并标为低相关，`model_calls=2`、`failed=0`、`finish_reason=stop`、合计 `completion_tokens=3178`、单次 `max_tokens=4096`、超时 `300` 秒；没有基于粉丝榜图片扩展金融结论，发布时间保持 `2026-07-21T15:11:51+08:00`。立即复跑 2 秒，返回 `no_changes`、`cache_hits=2`、`model_calls=0`。
-- 财经动态 `1215072468872462337` 首跑 134 秒：1 张图标为高相关，`model_calls=1`、`failed=0`、`finish_reason=stop`、`completion_tokens=2056`、`max_tokens=4096`、超时 `300` 秒；“72家澄清公告”的可核验分组进入笔记，颜色与个别名称继续标为待核验，图片可见日期保持“2026年6月17日晚间”，发布时间为 `2026-06-18T09:01:45+08:00`。中材科技、山东墨龙、通鼎互联、中核科技分别校正为 `002080.SZ`、`002490.SZ`、`002491.SZ`、`000777.SZ`，没有伪造的 `.SH` 版本。立即复跑 1 秒，返回 `no_changes`、`cache_hits=1`、`model_calls=0`。
-- `local_notes_get_status` 返回完整历史和 `lock=null`；最新合同保留数值型 token/timeout/cache/model-call 诊断，同时完全省略 API Key、Cookie、浏览器 Profile 和图片 base64 字段。MCP EOF 后没有遗留 MCP、Worker、转换或整理进程。
-- Node.js `20.20.2`、course-whisper Python `3.11.15` 下前端构建/兼容检查、94 项 Python 和 10 项 Rust 测试通过。`0.1.18` DMG 的产物路径、大小、SHA-256 和只读挂载验证见 [`release-macos.md`](release-macos.md)。
+- 低相关动态 `1227413653675835411` 首跑 213 秒：2 张图均完成并标为低相关，`model_calls=2`、`failed=0`、`finish_reason=stop`、合计 `completion_tokens=3185`、单次 `max_tokens=4096`、超时 `300` 秒，且相邻图片调用及图片到整理之间均执行 60 秒冷却；没有基于粉丝榜图片扩展金融结论，发布时间保持 `2026-07-21T15:11:51+08:00`。立即复跑 2 秒，返回 `no_changes`、`cache_hits=2`、`model_calls=0`。
+- 财经动态 `1215072468872462337` 首跑 188 秒：1 张图标为高相关，`model_calls=1`、`failed=0`、`finish_reason=stop`、`completion_tokens=1561`、`max_tokens=4096`、超时 `300` 秒；“72家澄清公告”的可核验分组进入笔记，图片可见日期保持“2026年6月17日晚间”，发布时间为 `2026-06-18T09:01:45+08:00`。中材科技、山东墨龙、通鼎互联、中核科技分别为 `002080.SZ`、`002490.SZ`、`002491.SZ`、`000777.SZ`，不存在对应错误 `.SH`；来源中的“沃什”没有被补成 `Waller`。立即复跑 1 秒，返回 `no_changes`、`cache_hits=1`、`model_calls=0`。
+- 确定性回归覆盖 `finish_reason=length`、空内容和无效 JSON：同一图片在同一任务中最多调用两次；第二次成功会写出包含正文、附件和完整图片分析的笔记，第二次仍失败会写出正文、附件和“图片分析失败/待重试”占位符，失败缓存目录保持为空。两次调用各自仍为 `max_tokens=4096`、`timeout=300`，重试前走统一 60 秒 cooldown。
+- 用包含真实字段 `output_path`、`organized_status`、`organized_output_path` 的隔离 Manifest 验证 `local_notes_get_status`：两个正式输出均存在而 staging 草稿不存在时，返回 `completed=2`、`missing_output=0`、`lock=null`。历史合同保留数值型 retry/token/timeout/cache/model-call 诊断，同时省略 API Key、Cookie、浏览器 Profile 和图片 base64。
+- 从最终 DMG 的只读挂载资源直接运行 Agent `env-check`，未显式传入 LLM 配置时，内置 LM Studio base、key、model 三项均显示 `[OK]`；key 只显示为 `set`，没有进入日志或合同。MCP EOF 后停止了本次临时启动的 LM Studio API，且没有遗留 MCP、Worker、转换或整理进程。
+- Node.js `20.20.2`、course-whisper Python `3.11.15` 下前端构建/兼容检查、102 项 Python 和 10 项 Rust 测试通过。`0.1.18` DMG 的最终路径、大小、SHA-256 和只读挂载验证见 [`release-macos.md`](release-macos.md)。

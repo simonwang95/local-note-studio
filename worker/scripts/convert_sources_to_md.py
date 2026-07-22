@@ -69,7 +69,7 @@ PPTX_NS = {
 IMAGE_SOURCE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".bmp", ".tif", ".tiff", ".gif"}
 
 OPUS_IMAGE_CACHE_SCHEMA_VERSION = "2.0"
-OPUS_IMAGE_ANALYSIS_RULES_VERSION = "2026-07-21.1"
+OPUS_IMAGE_ANALYSIS_RULES_VERSION = "2026-07-22.1"
 OPUS_IMAGE_ANALYSIS_MAX_TOKENS_HARD_CAP = 8192
 
 
@@ -488,13 +488,19 @@ class OpusImageAnalysisError(RuntimeError):
         completion_tokens: int = 0,
         max_tokens: int = 0,
         timeout_seconds: int = 0,
+        model_calls: int = 0,
+        retry_count: int = 0,
+        retry_reasons: list[str] | None = None,
     ):
         super().__init__("Bilibili opus image analysis failed")
-        self.model_called = model_called
+        self.model_calls = max(int(model_called), model_calls)
+        self.model_called = self.model_calls > 0
         self.finish_reason = finish_reason
         self.completion_tokens = max(0, completion_tokens)
         self.max_tokens = max(0, max_tokens)
         self.timeout_seconds = max(0, timeout_seconds)
+        self.retry_count = max(0, retry_count)
+        self.retry_reasons = list(retry_reasons or [])
 
 
 def normalize_opus_image_analysis_mode(value: Any) -> str:
@@ -672,6 +678,9 @@ def analyze_opus_image(
             "completion_tokens": 0,
             "max_tokens": max_tokens,
             "timeout_seconds": timeout_seconds,
+            "model_calls": 0,
+            "retry_count": 0,
+            "retry_reasons": [],
         }
     time_context = f"""可信只读时间上下文（由程序提供）：
 - 动态发布时间：{published or '未知'}
@@ -711,9 +720,14 @@ JSON 字段必须为：
             ],
         }
     ]
-    _wait_before_opus_image_model_call(cfg)
-    completion: ChatCompletionResult | None = None
-    try:
+    completion_tokens = 0
+    model_calls = 0
+    retry_reasons: list[str] = []
+    call_finished_epoch = 0.0
+    for attempt in range(2):
+        _wait_before_opus_image_model_call(cfg)
+        completion: ChatCompletionResult | None = None
+        model_calls += 1
         try:
             completion = _chat_completion(
                 cfg,
@@ -727,41 +741,76 @@ JSON 字段必须为：
             raise OpusImageAnalysisError(
                 True,
                 finish_reason=failure_reason,
+                completion_tokens=completion_tokens,
                 max_tokens=max_tokens,
                 timeout_seconds=timeout_seconds,
+                model_calls=model_calls,
+                retry_count=attempt,
+                retry_reasons=retry_reasons,
             ) from exc
-    finally:
-        _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC = time.monotonic()
-        call_finished_epoch = time.time()
-    finish_reason = completion.finish_reason or "unknown"
-    diagnostics = {
-        "finish_reason": finish_reason,
-        "completion_tokens": completion.completion_tokens,
-        "max_tokens": max_tokens,
-        "timeout_seconds": timeout_seconds,
-    }
-    if finish_reason == "length":
-        raise OpusImageAnalysisError(True, **diagnostics)
-    if finish_reason not in {"stop", "unknown", "eos_token"}:
-        raise OpusImageAnalysisError(True, **diagnostics)
-    content = completion.content
-    if not content:
-        raise OpusImageAnalysisError(True, **diagnostics)
-    try:
-        if mode == "ocr":
-            result = {
-                "relevance": "未评估（OCR 模式）",
-                "visible_text": clean_qwen_markdown(content) or "未识别到明确文字",
-                "visual_information": "OCR 模式只提取可见文字，不做图表或画面推断。",
-                "contextual_summary": "OCR 模式不基于正文扩展推断。",
-                "uncertainties": "模糊字符已标记为 [待核验]。",
-            }
+        finally:
+            _LAST_OPUS_IMAGE_MODEL_CALL_MONOTONIC = time.monotonic()
+            call_finished_epoch = time.time()
+
+        finish_reason = completion.finish_reason or "unknown"
+        completion_tokens += completion.completion_tokens
+        diagnostics = {
+            "finish_reason": finish_reason,
+            "completion_tokens": completion_tokens,
+            "max_tokens": max_tokens,
+            "timeout_seconds": timeout_seconds,
+            "model_calls": model_calls,
+            "retry_count": attempt,
+            "retry_reasons": list(retry_reasons),
+        }
+        retry_reason = ""
+        if finish_reason == "length":
+            retry_reason = "length"
+        elif finish_reason not in {"stop", "unknown", "eos_token"}:
+            raise OpusImageAnalysisError(True, **diagnostics)
+        elif not completion.content:
+            retry_reason = "empty_content"
         else:
-            result = _vision_result(content)
+            try:
+                if mode == "ocr":
+                    result = {
+                        "relevance": "未评估（OCR 模式）",
+                        "visible_text": clean_qwen_markdown(completion.content) or "未识别到明确文字",
+                        "visual_information": "OCR 模式只提取可见文字，不做图表或画面推断。",
+                        "contextual_summary": "OCR 模式不基于正文扩展推断。",
+                        "uncertainties": "模糊字符已标记为 [待核验]。",
+                    }
+                else:
+                    result = _vision_result(completion.content)
+            except (TypeError, ValueError):
+                retry_reason = "invalid_json"
+
+        if retry_reason:
+            retry_reasons.append(retry_reason)
+            diagnostics["retry_reasons"] = list(retry_reasons)
+            if attempt == 0:
+                print(
+                    f"图片分析响应不可用（{retry_reason}），将在模型冷却后自动重试 1/1",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            raise OpusImageAnalysisError(True, **diagnostics)
+
+        diagnostics["retry_reasons"] = list(retry_reasons)
         save_opus_image_analysis_cache(cfg, image_hash, mode, context_hash, result)
-    except Exception as exc:
-        raise OpusImageAnalysisError(True, **diagnostics) from exc
-    return result, False, True, call_finished_epoch, diagnostics
+        return result, False, True, call_finished_epoch, diagnostics
+
+    raise OpusImageAnalysisError(
+        True,
+        finish_reason="error",
+        completion_tokens=completion_tokens,
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+        model_calls=model_calls,
+        retry_count=1,
+        retry_reasons=retry_reasons,
+    )
 
 
 def _analysis_value(value: Any) -> str:
@@ -794,6 +843,8 @@ def build_opus_image_analysis(
         "completion_tokens": 0,
         "max_tokens": opus_image_analysis_max_tokens(cfg),
         "timeout_seconds": opus_image_analysis_timeout_seconds(cfg),
+        "retry_count": 0,
+        "retry_reasons": [],
         "status": "off" if mode == "off" else "complete",
         "warnings": [],
         "last_model_call_epoch": 0.0,
@@ -849,8 +900,12 @@ def build_opus_image_analysis(
             )
             summary["analyzed"] += 1
             summary["cache_hits"] += int(cache_hit)
-            summary["model_calls"] += int(model_called)
+            summary["model_calls"] += max(0, int(diagnostics.get("model_calls") or int(model_called)))
             summary["completion_tokens"] += max(0, int(diagnostics.get("completion_tokens") or 0))
+            summary["retry_count"] += max(0, int(diagnostics.get("retry_count") or 0))
+            for retry_reason in diagnostics.get("retry_reasons") or []:
+                if retry_reason not in summary["retry_reasons"]:
+                    summary["retry_reasons"].append(str(retry_reason))
             finish_reason = str(diagnostics.get("finish_reason") or "")
             if finish_reason and finish_reason not in summary["finish_reason"]:
                 summary["finish_reason"].append(finish_reason)
@@ -867,8 +922,12 @@ def build_opus_image_analysis(
             )
         except Exception as exc:
             model_called = bool(getattr(exc, "model_called", False))
-            summary["model_calls"] += int(model_called)
+            summary["model_calls"] += max(0, int(getattr(exc, "model_calls", int(model_called)) or 0))
             summary["completion_tokens"] += max(0, int(getattr(exc, "completion_tokens", 0) or 0))
+            summary["retry_count"] += max(0, int(getattr(exc, "retry_count", 0) or 0))
+            for retry_reason in getattr(exc, "retry_reasons", []) or []:
+                if retry_reason not in summary["retry_reasons"]:
+                    summary["retry_reasons"].append(str(retry_reason))
             finish_reason = str(getattr(exc, "finish_reason", "") or "error")
             if finish_reason not in summary["finish_reason"]:
                 summary["finish_reason"].append(finish_reason)
@@ -2184,6 +2243,8 @@ def convert_bilibili_opus(
         "opus_image_analysis_completion_tokens": analysis_summary["completion_tokens"],
         "opus_image_analysis_max_tokens": analysis_summary["max_tokens"],
         "opus_image_analysis_timeout_seconds": analysis_summary["timeout_seconds"],
+        "opus_image_analysis_retry_count": analysis_summary["retry_count"],
+        "opus_image_analysis_retry_reasons": analysis_summary["retry_reasons"],
         "warnings": analysis_summary["warnings"],
         "error": "",
     }

@@ -35,14 +35,14 @@ An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a sep
 - Version: `0.1.18`
 - Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
 - Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.18_aarch64.dmg`
-- Size: `3,464,315 bytes`
-- SHA-256: `cc15118bb6a0d9e502df5386d7b412e25cca30e69824737e6c96cef2336fc31f`
+- Size: `3,465,209 bytes`
+- SHA-256: `d7a0b2f8df4e6e5c907f9fbea9e4ea471fd2c87846374f3e180852059c62e2ee`
 - Build type: optimized release
 - Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
 
-`hdiutil verify` passed. The DMG was then mounted read-only into a dedicated `/private/tmp` directory; `codesign --verify --deep --strict` passed against the mounted app, its executable reported Mach-O 64-bit `arm64`, and both `CFBundleShortVersionString` and `CFBundleVersion` reported `0.1.18`. The mounted resources contain Worker/Agent/MCP entry points, locked requirements, the stock-code reference resource, cache Schema 2.0/rules-version validation, the `4096`/`8192` image token budget, `300`-second timeout, deterministic time/stock guards, and Worker version `0.1.18`; no `env.local` is present.
+`hdiutil verify` passed. The DMG was then mounted read-only into a dedicated `/private/tmp` directory; `codesign --verify --deep --strict` passed against the mounted app, its executable reported Mach-O 64-bit `arm64`, and both `CFBundleShortVersionString` and `CFBundleVersion` reported `0.1.18`. The mounted resources contain Worker/Agent/MCP entry points, locked requirements, the stock-code reference resource, cache Schema 2.0/rules-version validation, the bounded one-retry visual path, the per-call `4096` token budget and `300`-second timeout, Manifest `organized_output_path` handling, shared effective LLM defaults, deterministic time/stock guards, and Worker version `0.1.18`; neither `env.local` nor Python bytecode is present.
 
-Before packaging, both designated opuses passed fresh-cache OpenHanako-compatible stdio MCP acceptance and immediate zero-model-call cache reruns in an isolated `/private/tmp` state/output tree. The final source checks passed with Node.js `20.20.2`, course-whisper Python `3.11.15`, 94 Python tests, and 10 Rust tests. This artifact was not installed and did not replace the current `/Applications` copy. Developer ID signing, notarization, Intel/universal packaging, a clean-Mac managed-runtime matrix, and formal OpenHanako UI import remain separate release gates.
+Before packaging, both designated opuses passed fresh-cache OpenHanako-compatible stdio MCP acceptance and immediate zero-model-call cache reruns in `/private/tmp/local-note-opus-018-retry.R6o2TO`. A real-field status fixture returned `missing_output=0`; deterministic retry tests proved both complete-note success and body/attachment/placeholder preservation after retry exhaustion. The Agent from the read-only mounted DMG resolved the built-in LM Studio base/key/model as configured and exposed the key only as `set`. The final source checks passed with Node.js `20.20.2`, course-whisper Python `3.11.15`, 102 Python tests, and 10 Rust tests. This artifact was not installed and did not replace the current `/Applications` copy. Developer ID signing, notarization, Intel/universal packaging, a clean-Mac managed-runtime matrix, and formal OpenHanako UI import remain separate release gates.
 
 ## Superseded 0.1.17 problem baseline (2026-07-21)
 

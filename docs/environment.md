@@ -103,7 +103,7 @@ OPUS_IMAGE_ANALYSIS_MAX_TOKENS="4096"
 OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS="300"
 ```
 
-The output budget is always sent as `max_tokens`, is hard-capped at `8192`, and never inherits `SUMMARY_MAX_TOKENS`, `QWEN_QUICKREAD_MAX_TOKENS`, or PDF/long-document budgets. An explicit Profile `timeout_seconds` overrides the image timeout and the existing webpage/PDF/Quick Read/organize timeouts for that run, but it does not change the image token budget. Schema/rules-versioned successful results are cached by image, mode, model, and read-only post/time context. Truncated, empty, invalid-JSON, timed-out, cancelled, or temporary-error results are not cached. Failures retain the downloaded image, original body, and a retry placeholder; a failed retry cannot overwrite an existing complete note.
+The output budget is always sent as `max_tokens`, is hard-capped at `8192`, and never inherits `SUMMARY_MAX_TOKENS`, `QWEN_QUICKREAD_MAX_TOKENS`, or PDF/long-document budgets. An explicit Profile `timeout_seconds` overrides the image timeout and the existing webpage/PDF/Quick Read/organize timeouts for that run, but it does not change the image token budget. Schema/rules-versioned successful results are cached by image, mode, model, and read-only post/time context. A `length` finish, empty content, or invalid vision JSON is retried exactly once within the same task after the normal model cooldown; both calls keep the same per-call token and timeout limits. Truncated, empty, invalid-JSON, timed-out, cancelled, or temporary-error results are not cached. Retry exhaustion retains the downloaded image, original body, and a traceable placeholder; it cannot trigger a third image call or overwrite an existing complete note.
 
 ## Bilibili Cookie
 

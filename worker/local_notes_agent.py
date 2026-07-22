@@ -282,7 +282,12 @@ def manifest_summary() -> dict[str, Any]:
                     counts["completed"] += 1
                 else:
                     counts["pending"] += 1
-                raw_output = str(item.get("organized_output") or item.get("output_path") or "").strip()
+                raw_output = str(
+                    item.get("organized_output_path")
+                    or item.get("organized_output")
+                    or item.get("output_path")
+                    or ""
+                ).strip()
                 if raw_output and not pathlib.Path(raw_output).expanduser().exists():
                     counts["missing_output"] += 1
             summaries.append({"name": path.name, "status": "ok", "counts": counts})

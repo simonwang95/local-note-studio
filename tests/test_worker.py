@@ -182,6 +182,46 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertNotIn("brew install pandoc", result)
         self.assertNotIn("python3 -m pip install", result)
 
+    def test_env_check_uses_effective_lm_studio_defaults_without_leaking_key(self):
+        req = worker.TaskRequest(task="env-check", runtime_backend="python")
+        with mock.patch.object(worker, "probe", return_value=(True, "ok")):
+            report = worker.check_environment(req, {})
+        self.assertIn(f"[OK] LLM API base - {worker.BUILTIN_LLM_API_BASE}", report)
+        self.assertIn(f"[OK] LLM model - {worker.BUILTIN_LLM_MODEL}", report)
+        self.assertIn("[OK] LLM API key - set", report)
+        self.assertNotIn(worker.BUILTIN_LLM_API_KEY, report)
+        self.assertNotIn("[MISSING] LLM API", report)
+
+        custom_key = "test-secret-key"
+        custom_env = {
+            "DEFAULT_LLM_API_BASE": "http://127.0.0.1:9999/v1",
+            "DEFAULT_LLM_API_KEY": custom_key,
+            "DEFAULT_LLM_MODEL": "fixture-model",
+        }
+        with mock.patch.object(worker, "probe", return_value=(True, "ok")):
+            custom_report = worker.check_environment(req, custom_env)
+        self.assertIn("http://127.0.0.1:9999/v1", custom_report)
+        self.assertIn("fixture-model", custom_report)
+        self.assertNotIn(custom_key, custom_report)
+
+    def test_real_task_environment_uses_same_effective_lm_studio_defaults(self):
+        req = worker.TaskRequest(task="bilibili-opus", runtime_backend="python")
+        with mock.patch.object(worker, "load_env_file", return_value={}), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            env = worker.build_env(req)
+        self.assertEqual(
+            worker.effective_llm_config(req, env),
+            (
+                worker.BUILTIN_LLM_API_BASE,
+                worker.BUILTIN_LLM_API_KEY,
+                worker.BUILTIN_LLM_MODEL,
+            ),
+        )
+        self.assertEqual(env["DEFAULT_LLM_API_BASE"], converter.DEFAULTS["DEFAULT_LLM_API_BASE"])
+        self.assertEqual(env["DEFAULT_LLM_API_KEY"], converter.DEFAULTS["DEFAULT_LLM_API_KEY"])
+        self.assertEqual(env["DEFAULT_LLM_MODEL"], organizer.DEFAULTS["DEFAULT_LLM_MODEL"])
+
     def test_bilibili_access_uses_default_app_cookie_after_refresh(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             cookie_path = pathlib.Path(temp_dir) / "bili_cookies.txt"
@@ -516,7 +556,46 @@ class OpusImageAnalysisTests(unittest.TestCase):
         self.assertNotIn("max_tokens", payload)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 777)
 
-    def test_truncated_empty_reasoning_only_and_invalid_json_are_retryable_and_not_cached(self):
+    def test_length_empty_and_invalid_json_retry_once_then_cache_success(self):
+        valid = json.dumps(
+            {
+                "relevance": "高",
+                "visible_text": "表格",
+                "visual_information": "行业表",
+                "contextual_summary": "补充正文",
+                "uncertainties": "无",
+            },
+            ensure_ascii=False,
+        )
+        cases = (
+            ("length", self.completion(valid, "length", 4096), "length"),
+            ("empty", self.completion("", "stop", 48), "empty_content"),
+            ("invalid-json", self.completion("not-json", "stop", 12), "invalid_json"),
+        )
+        for index, (label, first_completion, retry_reason) in enumerate(cases, 1):
+            with self.subTest(label=label):
+                url = f"https://i.example/{label}.png"
+                success = self.completion(valid, "stop", 31)
+                with mock.patch.object(
+                    converter, "_chat_completion", side_effect=[first_completion, success]
+                ) as model:
+                    section, summary = converter.build_opus_image_analysis(
+                        [url], [self.asset(index, url, label.encode())], "正文", self.cfg("vision")
+                    )
+                self.assertNotIn("图片分析失败/待重试", section)
+                self.assertIn("- 分析状态：完成", section)
+                self.assertEqual(summary["failed"], 0)
+                self.assertEqual(summary["model_calls"], 2)
+                self.assertEqual(summary["retry_count"], 1)
+                self.assertEqual(summary["retry_reasons"], [retry_reason])
+                self.assertEqual(summary["finish_reason"], "stop")
+                self.assertEqual(model.call_count, 2)
+                for call in model.call_args_list:
+                    self.assertEqual(call.kwargs["max_tokens"], 4096)
+                    self.assertEqual(call.kwargs["timeout_seconds"], 300)
+        self.assertEqual(len(list(self.cache.glob("*.json"))), len(cases))
+
+    def test_retryable_vision_failures_retry_only_once_and_never_cache(self):
         valid = json.dumps(
             {
                 "relevance": "高",
@@ -535,15 +614,45 @@ class OpusImageAnalysisTests(unittest.TestCase):
         )
         for index, (label, completion, expected_reason) in enumerate(cases, 1):
             with self.subTest(label=label):
-                url = f"https://i.example/{label}.png"
-                with mock.patch.object(converter, "_chat_completion", return_value=completion):
+                url = f"https://i.example/failed-{label}.png"
+                with mock.patch.object(converter, "_chat_completion", return_value=completion) as model:
                     section, summary = converter.build_opus_image_analysis(
-                        [url], [self.asset(index, url, label.encode())], "正文", self.cfg("vision")
+                        [url], [self.asset(index, url, f"failed-{label}".encode())], "正文", self.cfg("vision")
                     )
                 self.assertIn("图片分析失败/待重试", section)
                 self.assertEqual(summary["failed"], 1)
+                self.assertEqual(summary["model_calls"], 2)
+                self.assertEqual(summary["retry_count"], 1)
                 self.assertEqual(summary["finish_reason"], expected_reason)
+                self.assertEqual(model.call_count, 2)
         self.assertEqual(list(self.cache.glob("*.json")) if self.cache.exists() else [], [])
+
+    def test_automatic_retry_obeys_the_configured_sixty_second_cooldown(self):
+        valid = json.dumps(
+            {
+                "relevance": "高",
+                "visible_text": "表格",
+                "visual_information": "行业表",
+                "contextual_summary": "补充正文",
+                "uncertainties": "无",
+            },
+            ensure_ascii=False,
+        )
+        cfg = {**self.cfg("vision"), "OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY": "60"}
+        first = self.completion(valid, "length", 4096)
+        second = self.completion(valid, "stop", 31)
+        url = "https://i.example/cooldown.png"
+        with mock.patch.object(converter, "_chat_completion", side_effect=[first, second]), mock.patch.object(
+            converter.time, "sleep"
+        ) as sleep:
+            _section, summary = converter.build_opus_image_analysis(
+                [url], [self.asset(9, url, b"cooldown")], "正文", cfg
+            )
+        sleep.assert_called_once()
+        self.assertGreater(sleep.call_args.args[0], 59)
+        self.assertLessEqual(sleep.call_args.args[0], 60)
+        self.assertEqual(summary["model_calls"], 2)
+        self.assertEqual(summary["retry_count"], 1)
 
     def test_cache_rules_version_invalidates_without_deleting_old_entry(self):
         url = "https://i.example/versioned.png"
@@ -606,6 +715,118 @@ class OpusImageAnalysisTests(unittest.TestCase):
         self.assertIn("图片分析失败/待重试", markdown)
         self.assertEqual(item["opus_image_analysis_status"], "failed")
         self.assertEqual(item["opus_image_analysis_model_calls"], 1)
+
+    def test_retry_success_writes_complete_note_and_retry_diagnostics(self):
+        url = "https://i.example/retry-success.png"
+        parsed = {
+            "item": {"id": "retry-success"},
+            "title": "重试成功测试",
+            "author": "作者",
+            "author_mid": "42",
+            "published": "2026-07-21T15:11:51+08:00",
+            "content": "必须保留并完成整理的正文",
+            "images": [url],
+        }
+        asset = self.asset(11, url, b"retry-success")
+        valid = json.dumps(
+            {
+                "relevance": "高",
+                "visible_text": "完整表格",
+                "visual_information": "行业表",
+                "contextual_summary": "补充正文",
+                "uncertainties": "无",
+            },
+            ensure_ascii=False,
+        )
+        cfg = {**self.cfg("vision"), "BILIBILI_COOKIES_FILE": str(self.root / "cookies.txt")}
+        with (
+            mock.patch.object(converter, "bilibili_cookie_path", return_value=self.root / "cookies.txt"),
+            mock.patch.object(converter, "ensure_bilibili_cookie_login"),
+            mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
+            mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(
+                converter,
+                "download_markdown_assets",
+                return_value=(f"必须保留并完成整理的正文\n\n![动态图片 1]({asset['markdown_path']})", [asset]),
+            ),
+            mock.patch.object(
+                converter,
+                "_chat_completion",
+                side_effect=[self.completion(valid, "length", 4096), self.completion(valid, "stop", 33)],
+            ) as model,
+        ):
+            path, item, skipped = converter.convert_bilibili_opus(
+                "https://www.bilibili.com/opus/997",
+                self.root / "retry-success-output",
+                "fixture",
+                cfg,
+                {"items": []},
+                False,
+                True,
+            )
+        markdown = path.read_text(encoding="utf-8")
+        self.assertFalse(skipped)
+        self.assertIn("必须保留并完成整理的正文", markdown)
+        self.assertIn("- 分析状态：完成", markdown)
+        self.assertIn("完整表格", markdown)
+        self.assertNotIn("图片分析失败/待重试", markdown)
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(item["opus_image_analysis_status"], "complete")
+        self.assertEqual(item["opus_image_analysis_model_calls"], 2)
+        self.assertEqual(item["opus_image_analysis_retry_count"], 1)
+        self.assertEqual(item["opus_image_analysis_retry_reasons"], ["length"])
+        self.assertEqual(len(list(self.cache.glob("*.json"))), 1)
+
+    def test_retry_exhaustion_writes_body_attachment_placeholder_without_cache(self):
+        url = "https://i.example/retry-failed.png"
+        parsed = {
+            "item": {"id": "retry-failed"},
+            "title": "重试失败测试",
+            "author": "作者",
+            "author_mid": "42",
+            "published": "2026-07-21T15:11:51+08:00",
+            "content": "重试失败也必须保留的正文",
+            "images": [url],
+        }
+        asset = self.asset(12, url, b"retry-failed")
+        cfg = {**self.cfg("vision"), "BILIBILI_COOKIES_FILE": str(self.root / "cookies.txt")}
+        with (
+            mock.patch.object(converter, "bilibili_cookie_path", return_value=self.root / "cookies.txt"),
+            mock.patch.object(converter, "ensure_bilibili_cookie_login"),
+            mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
+            mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(
+                converter,
+                "download_markdown_assets",
+                return_value=(f"重试失败也必须保留的正文\n\n![动态图片 1]({asset['markdown_path']})", [asset]),
+            ),
+            mock.patch.object(
+                converter,
+                "_chat_completion",
+                return_value=self.completion("not-json", "stop", 12),
+            ) as model,
+        ):
+            path, item, skipped = converter.convert_bilibili_opus(
+                "https://www.bilibili.com/opus/998",
+                self.root / "retry-failed-output",
+                "fixture",
+                cfg,
+                {"items": []},
+                False,
+                True,
+            )
+        markdown = path.read_text(encoding="utf-8")
+        self.assertFalse(skipped)
+        self.assertIn("重试失败也必须保留的正文", markdown)
+        self.assertIn(str(asset["markdown_path"]), markdown)
+        self.assertIn("图片分析失败/待重试", markdown)
+        self.assertIn("不得据此推断图片内容", markdown)
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(item["opus_image_analysis_status"], "failed")
+        self.assertEqual(item["opus_image_analysis_model_calls"], 2)
+        self.assertEqual(item["opus_image_analysis_retry_count"], 1)
+        self.assertEqual(item["opus_image_analysis_retry_reasons"], ["invalid_json"])
+        self.assertEqual(list(self.cache.glob("*.json")) if self.cache.exists() else [], [])
 
     def test_image_analysis_has_a_per_opus_model_call_limit(self):
         urls = [f"https://i.example/{index}.png" for index in range(1, 5)]
@@ -762,6 +983,24 @@ class BilibiliMetadataIsolationTests(unittest.TestCase):
             "应为2024年",
             organizer.sanitize_bilibili_time_hallucinations(model_text, "## 原文抽取\n\n普通正文", True),
         )
+
+    def test_organize_prompts_forbid_unsupported_english_aliases(self):
+        cfg = {**organizer.DEFAULTS, "A_SHARE_TERMS_ENABLED": "false"}
+        with mock.patch.object(organizer, "call_chat_completion", return_value="## 核心观点\n\n保留沃什。") as model:
+            organizer.organize_chunk("标题", "source.md", "来源只写沃什", 1, 1, "bilibili-opus", cfg)
+        chunk_system = model.call_args.args[1][0]["content"]
+        self.assertIn("不得为来源中没有", chunk_system)
+        self.assertIn("沃什", chunk_system)
+        self.assertIn("Waller", chunk_system)
+        self.assertIn("待核验", chunk_system)
+
+        with mock.patch.object(organizer, "call_chat_completion", return_value="## 核心观点\n\n保留沃什。") as model:
+            organizer.synthesize_text("标题", "source.md", "来源只写沃什", cfg, "bilibili-opus")
+        synthesis_system = model.call_args.args[1][0]["content"]
+        self.assertIn("不得为来源中没有", synthesis_system)
+        self.assertIn("沃什", synthesis_system)
+        self.assertIn("Waller", synthesis_system)
+        self.assertIn("待核验", synthesis_system)
 
     def test_model_added_wrong_stock_suffixes_are_removed_and_reference_table_stays_correct(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -464,6 +464,43 @@ class ContractAndMcpTests(unittest.TestCase):
             self.assertEqual(payload["manifest_state"]["index_manifests"][0]["counts"]["completed"], 1)
             self.assertNotIn("private-source", serialized)
 
+    def test_status_prefers_real_organized_output_path_over_deleted_staging_draft(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
+            os.environ,
+            {
+                "LOCAL_NOTE_STUDIO_STATE_DIR": str(pathlib.Path(temp) / "state"),
+                "INDEX_DIR": str(pathlib.Path(temp) / "state" / "indexes"),
+            },
+            clear=False,
+        ):
+            root = pathlib.Path(temp)
+            index = root / "state" / "indexes"
+            index.mkdir(parents=True)
+            organized = root / "formal" / "organized.md"
+            organized.parent.mkdir()
+            organized.write_text("# 正式笔记\n", encoding="utf-8")
+            deleted_staging = root / "staging" / "deleted-draft.md"
+            (index / "source-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "source_url": "https://example.com/private-source",
+                                "status": "converted",
+                                "output_path": str(deleted_staging),
+                                "organized_status": "organized",
+                                "organized_output_path": str(organized),
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = agent.status_payload(caller="mcp")
+            counts = payload["manifest_state"]["index_manifests"][0]["counts"]
+            self.assertEqual(counts["completed"], 1)
+            self.assertEqual(counts["missing_output"], 0)
+
     def test_profile_listing_failure_uses_structured_contract(self):
         with mock.patch.object(agent, "load_profiles", side_effect=core.AutomationError("invalid profiles", "PROFILE_INVALID")):
             result = agent.run_agent_action("profiles")
@@ -500,6 +537,7 @@ class ContractAndMcpTests(unittest.TestCase):
                 "completion_tokens": 4096,
                 "max_tokens": 4096,
                 "timeout_seconds": 300,
+                "retry_count": 1,
                 "warnings": ["图片 2 分析失败，API_KEY=super-secret"],
                 "last_model_call_epoch": 0,
                 "cooldown_delay": 60,
@@ -514,6 +552,7 @@ class ContractAndMcpTests(unittest.TestCase):
         self.assertEqual(result.details["opus_image_analysis"]["completion_tokens"], 4096)
         self.assertEqual(result.details["opus_image_analysis"]["max_tokens"], 4096)
         self.assertEqual(result.details["opus_image_analysis"]["timeout_seconds"], 300)
+        self.assertEqual(result.details["opus_image_analysis"]["retry_count"], 1)
         self.assertIn("<redacted>", serialized)
         self.assertNotIn("super-secret", serialized)
         self.assertNotIn("last_model_call_epoch", serialized)

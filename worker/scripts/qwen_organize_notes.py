@@ -376,6 +376,8 @@ def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: 
         "不要因为缺少当前时间而生成‘时间戳待核验’或‘未来预设’；只有正文明确讨论时间矛盾时才记录该观点。"
         "图片中可见的日期只能按图片文字原样记录；不得依靠知识截止时间、历史印象或市场语境纠正年份，"
         "不得输出‘应为2024年’、‘时间戳错误’、‘年份疑似笔误’或同义猜测。"
+        "不得为来源中没有的机构、人名或专业术语擅自补充英文名、英文缩写或英文别名；"
+        "例如来源只有‘沃什’时不得自行改写或补写为‘Waller’。无法确认时保留原文并标记待核验。"
     )
     pdf_translation_requirement = ""
     if source_type == "pdf":
@@ -417,6 +419,8 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
         "适合 Obsidian 长期保存的正式 Markdown 笔记。不要编造来源中没有的信息。"
         "程序确定的来源元数据不在你的判断范围内；不要生成无依据的时间戳待核验或未来预设。"
         "图片中可见的日期必须保持原样，不得根据历史印象纠正年份或生成新的时间异常判断。"
+        "不得为来源中没有的机构、人名或术语补充英文名、缩写或别名；"
+        "例如来源只有‘沃什’时不得自行改写或补写为‘Waller’。无法确认时保留原文并标记待核验。"
     )
     pdf_translation_requirement = ""
     if source_type == "pdf":

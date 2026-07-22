@@ -78,6 +78,9 @@ OCR_FALLBACK_COMMANDS = {
 }
 
 MANAGED_ASR_MODEL_NAME = "whisper-large-v3-turbo"
+BUILTIN_LLM_API_BASE = "http://127.0.0.1:1234/v1"
+BUILTIN_LLM_API_KEY = "lm-studio"
+BUILTIN_LLM_MODEL = "qwen3.6-35b-a3b-nvfp4"
 ASR_MODEL_HINT = "Choose an existing Whisper model directory in the app Configuration, or run managed Install/Repair to download the default model."
 
 
@@ -233,6 +236,10 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
     env["PYTHONUNBUFFERED"] = "1"
+    effective_api_base, effective_api_key, effective_model = effective_llm_config(req, env)
+    env["DEFAULT_LLM_API_BASE"] = effective_api_base
+    env["DEFAULT_LLM_API_KEY"] = effective_api_key
+    env["DEFAULT_LLM_MODEL"] = effective_model
     app_root = app_data_root()
     if os.environ.get("LOCAL_NOTE_STUDIO_APP_DATA_DIR", "").strip():
         env["CACHE_DIR"] = str(app_root / "cache" / "audio")
@@ -757,8 +764,9 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         lines.append(f"- conda executable: {conda_cmd(req)}")
     else:
         lines.append(f"- Python command: {req.python_bin or 'python3'}")
-    lines.append(f"- LLM API base: {req.api_base or env.get('DEFAULT_LLM_API_BASE', '(not set)')}")
-    lines.append(f"- model: {req.model or env.get('DEFAULT_LLM_MODEL', '(not set)')}")
+    api_base, api_key, model = effective_llm_config(req, env)
+    lines.append(f"- LLM API base: {api_base}")
+    lines.append(f"- model: {model}")
     lines.append("")
 
     required_ok = True
@@ -881,9 +889,6 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
 
     lines.append("")
     lines.append("Configuration checks")
-    api_base = req.api_base or env.get("DEFAULT_LLM_API_BASE", "")
-    api_key = req.api_key or env.get("DEFAULT_LLM_API_KEY", "")
-    model = req.model or env.get("DEFAULT_LLM_MODEL", "")
     for label, value, hint in [
         ("LLM API base", api_base, "Set an OpenAI-compatible API base such as http://127.0.0.1:1234/v1."),
         ("LLM API key", api_key, "Set an API key. LM Studio can use a placeholder such as lm-studio."),
@@ -997,6 +1002,15 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
         lines.append("- brew install ffmpeg")
         lines.append("- brew install pandoc")
     return "\n".join(lines) + "\n"
+
+
+def effective_llm_config(req: TaskRequest, env: dict[str, str]) -> tuple[str, str, str]:
+    """Resolve the same built-in/default/request LLM values used by real worker tasks."""
+    return (
+        (req.api_base or env.get("DEFAULT_LLM_API_BASE") or BUILTIN_LLM_API_BASE).strip(),
+        (req.api_key or env.get("DEFAULT_LLM_API_KEY") or BUILTIN_LLM_API_KEY).strip(),
+        (req.model or env.get("DEFAULT_LLM_MODEL") or BUILTIN_LLM_MODEL).strip(),
+    )
 
 
 def command_for(req: TaskRequest) -> list[str]:
@@ -2291,6 +2305,7 @@ def record_opus_image_analysis_summaries(
         "completion_tokens": sum(max(0, parse_int(item.get("completion_tokens"), 0)) for item in summaries),
         "max_tokens": max(max(0, parse_int(item.get("max_tokens"), 0)) for item in summaries),
         "timeout_seconds": max(max(0, parse_int(item.get("timeout_seconds"), 0)) for item in summaries),
+        "retry_count": sum(max(0, parse_int(item.get("retry_count"), 0)) for item in summaries),
     }
     if result is not None:
         result.details["opus_image_analysis"] = details
