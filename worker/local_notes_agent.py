@@ -31,6 +31,7 @@ from automation_profiles import (
     AutomationProfile,
     load_profiles,
     require_profile,
+    resolve_output_destination,
     validate_allowed_path,
     validate_allowed_url,
 )
@@ -87,6 +88,7 @@ def build_request(
     action: str,
     profile: AutomationProfile,
     source: str = "",
+    destination: str = "",
     limit: int | None = None,
     dry_run: bool = False,
     caller: str = "agent",
@@ -105,6 +107,7 @@ def build_request(
             raise AutomationError("profile does not define up_mid", "PROFILE_INVALID")
         request.update(task="bilibili-up-sync", source=profile.up_mid, retry_failed=True)
     elif action == "ingest-url":
+        request["output_dir"] = str(resolve_output_destination(profile, destination))
         url = validate_allowed_url(source, profile.allowed_domains)
         path = pathlib.PurePosixPath(pathlib.PurePosixPath(url.split("?", 1)[0]).as_posix())
         if "bilibili.com" in url and "/video/" in path.as_posix():
@@ -115,8 +118,11 @@ def build_request(
             task = "web-url"
         request.update(task=task, source=url)
     elif action == "ingest-file":
+        request["output_dir"] = str(resolve_output_destination(profile, destination))
         path = validate_allowed_path(source, profile.allowed_input_roots, "source", must_exist=True)
-        task = "local-video" if path.is_dir() or path.suffix.lower() in MEDIA_EXTENSIONS else "source-file"
+        if not path.is_file():
+            raise AutomationError("source must be one regular file; directory batch ingestion is not allowed", "INVALID_REQUEST")
+        task = "local-video" if path.suffix.lower() in MEDIA_EXTENSIONS else "source-file"
         request.update(task=task, source=str(path))
     elif action == "env-check":
         request.update(task="env-check", source="", output_dir="")
@@ -342,6 +348,7 @@ def run_agent_action(
     action: str,
     profile_id: str = "",
     source: str = "",
+    destination: str = "",
     limit: int | None = None,
     dry_run: bool = False,
     caller: str = "agent",
@@ -358,7 +365,15 @@ def run_agent_action(
         profile = require_profile(profile_id)
         if action == "rebuild-index":
             return rebuild_index_result(profile, caller=caller)
-        request = build_request(action, profile, source=source, limit=limit, dry_run=dry_run, caller=caller)
+        request = build_request(
+            action,
+            profile,
+            source=source,
+            destination=destination,
+            limit=limit,
+            dry_run=dry_run,
+            caller=caller,
+        )
         if action == "retry-failed" and not dry_run:
             previous = next(
                 (
@@ -405,6 +420,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         item = subparsers.add_parser(command)
         item.add_argument("--profile", required=True)
         item.add_argument(source_flag, required=True, dest="source")
+        item.add_argument("--destination", default="", help="Named output destination configured by the selected profile.")
         item.add_argument("--dry-run", action="store_true")
     status = subparsers.add_parser("status")
     status.add_argument("--run-id", default="")
@@ -419,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         args.command,
         profile_id=getattr(args, "profile", ""),
         source=getattr(args, "source", ""),
+        destination=getattr(args, "destination", ""),
         limit=getattr(args, "limit", None),
         dry_run=getattr(args, "dry_run", False),
         caller="agent",

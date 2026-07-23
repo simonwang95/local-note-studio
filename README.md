@@ -26,6 +26,8 @@ scripts/local-notes-agent sync-up --profile qingfeng --dry-run
 scripts/local-notes-agent rebuild-index --profile qingfeng
 ```
 
+Profiles may expose fixed `output_destinations` such as `daily_review -> 日复盘`. Single URL/file ingestion can select one by ID, while arbitrary output paths, parent traversal, and symlink escape remain unavailable to the Agent. New video settings default to omitting the raw-subtitle section after successful organization; structured notes, proofread text, source metadata, and user-owned adjacent `.srt` files are preserved. If model post-processing is incomplete, the generated note temporarily retains its transcript so the same source can safely retry instead of becoming unrecoverable.
+
 OpenHanako's official app can launch `scripts/local-notes-mcp` as a local stdio Connector. Import [`docs/openhanako-mcp.example.json`](docs/openhanako-mcp.example.json) after replacing the placeholder absolute paths. Do not put API keys or Cookie values in the Connector or Profile; secrets remain in the existing protected Local Note Studio configuration.
 
 The MCP server now exposes 11 tools. The original seven automation tools remain compatible; four additional tools search, read, list recent notes, and retrieve historical viewpoint evidence from enabled Profiles. Those four tools never rebuild an index, acquire the global write lock, write audit history, call a network/LLM/Shell/Stocks/MySQL service, or modify Markdown/Manifest files. Build the Profile index explicitly before first use and again after manual note changes:

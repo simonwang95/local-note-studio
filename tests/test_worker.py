@@ -50,6 +50,94 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertTrue(req.retry_failed)
         self.assertFalse(req.keep_original_subtitles)
 
+    def test_raw_subtitles_default_off_and_can_be_explicitly_enabled(self):
+        self.assertFalse(worker.TaskRequest(task="").keep_original_subtitles)
+        self.assertFalse(worker.TaskRequest.from_mapping({}).keep_original_subtitles)
+        default_args = worker.parse_args(["--task", "bilibili-url"])
+        enabled_args = worker.parse_args(["--task", "bilibili-url", "--keep-original-subtitles"])
+        disabled_args = worker.parse_args(["--task", "bilibili-url", "--no-keep-original-subtitles"])
+        self.assertFalse(worker.request_from_args(default_args).keep_original_subtitles)
+        self.assertTrue(worker.request_from_args(enabled_args).keep_original_subtitles)
+        self.assertFalse(worker.request_from_args(disabled_args).keep_original_subtitles)
+        self.assertEqual(runner.DEFAULTS["KEEP_ORIGINAL_SUBTITLES"], "false")
+
+    def test_summary_only_preserves_raw_subtitles_for_retry_when_llm_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "video.md"
+            note.write_text("# 视频\n\n## 原始字幕\n\n不应保留的原始转写\n", encoding="utf-8")
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "set"),
+                mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "generate_summary", side_effect=RuntimeError("fixture failure")),
+            ):
+                result = batch_transcriber.run_summary_only(str(note))
+            self.assertEqual(result, 1)
+            self.assertIn("## 原始字幕", note.read_text(encoding="utf-8"))
+
+    def test_summary_only_removes_raw_subtitles_after_note_is_complete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "video.md"
+            note.write_text("# 视频\n\n## 校对正文\n\n已完成\n\n## 原始字幕\n\n原始转写\n", encoding="utf-8")
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "set"),
+                mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "generate_summary", return_value=False),
+            ):
+                result = batch_transcriber.run_summary_only(str(note))
+            self.assertEqual(result, 0)
+            self.assertNotIn("## 原始字幕", note.read_text(encoding="utf-8"))
+
+    def test_summary_only_preserves_raw_only_legacy_note_without_placeholders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "legacy-video.md"
+            original = "# 视频\n\n## 原始字幕\n\n唯一可恢复的原始转写\n"
+            note.write_text(original, encoding="utf-8")
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "set"),
+                mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "generate_summary", return_value=False),
+            ):
+                result = batch_transcriber.run_summary_only(str(note))
+            self.assertEqual(result, 0)
+            self.assertEqual(note.read_text(encoding="utf-8"), original)
+
+    def test_empty_generated_section_does_not_consume_details_raw_transcript(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "legacy-details-video.md"
+            original = (
+                "# 视频\n\n## 校对正文\n\n---\n\n"
+                "<details>\n<summary>📄 原始字幕</summary>\n\n"
+                "唯一可恢复的原始转写\n\n## 结构化正文\n\n这只是字幕内容\n\n</details>\n"
+            )
+            note.write_text(original, encoding="utf-8")
+            with mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False):
+                removed = batch_transcriber.apply_original_subtitle_preference(str(note))
+            self.assertFalse(removed)
+            self.assertEqual(note.read_text(encoding="utf-8"), original)
+
+    def test_raw_subtitle_removal_preserves_sections_appended_after_transcript(self):
+        fixtures = {
+            "heading": (
+                "# 视频\n\n## 校对正文\n\n已完成\n\n"
+                "## 原始字幕\n\n原始转写\n\n## 我的备注\n\n必须保留\n"
+            ),
+            "details": (
+                "# 视频\n\n## 校对正文\n\n已完成\n\n"
+                "<details>\n<summary>📄 原始字幕</summary>\n\n原始转写\n\n</details>\n\n"
+                "## 我的备注\n\n必须保留\n"
+            ),
+        }
+        for label, original in fixtures.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                note = pathlib.Path(temp_dir) / f"{label}.md"
+                note.write_text(original, encoding="utf-8")
+                with mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False):
+                    removed = batch_transcriber.apply_original_subtitle_preference(str(note))
+                updated = note.read_text(encoding="utf-8")
+                self.assertTrue(removed)
+                self.assertNotIn("原始转写", updated)
+                self.assertIn("## 我的备注\n\n必须保留", updated)
+
     def test_opus_image_analysis_request_reaches_isolated_worker_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
             os.environ, {"LOCAL_NOTE_STUDIO_STATE_DIR": str(pathlib.Path(temp_dir) / "state")}
@@ -1418,6 +1506,39 @@ class BatchAndDiagnosticsTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stream.call_count, 1)
         postprocess.assert_not_called()
+
+    def test_skipped_incomplete_local_file_retries_summary_from_preserved_transcript(self):
+        with tempfile.TemporaryDirectory() as temp:
+            note = pathlib.Path(temp) / "incomplete.md"
+            note.write_text(
+                "# 视频\n\n## 速读摘要\n\n【AI待处理：重试】\n\n"
+                "<details>\n<summary>📄 原始字幕</summary>\n\n可恢复转写\n\n</details>\n",
+                encoding="utf-8",
+            )
+            cfg = {"CONDA_ENV": "", "VIDEO_MANIFEST_ENABLED": "false"}
+            skipped_output = f"SKIPPED_EXISTING_MARKDOWN_PATH:{note}\n"
+            with (
+                mock.patch.object(runner, "project_env", return_value={}),
+                mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
+                mock.patch.object(runner, "python_command", return_value=["python", "summary.py"]),
+                mock.patch.object(runner, "stream_command", side_effect=[(0, skipped_output), (0, "summary ok")]) as stream,
+                mock.patch.object(runner, "postprocess_video_notes") as postprocess,
+            ):
+                code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
+            self.assertEqual(code, 0)
+            self.assertEqual(stream.call_count, 2)
+            self.assertEqual(postprocess.call_count, 2)
+
+    def test_skipped_incomplete_legacy_note_accepts_complete_original_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            note = pathlib.Path(temp) / "legacy-incomplete.md"
+            note.write_text(
+                "# 视频\n\n## 速读摘要\n\n【AI待处理：重试】\n\n"
+                "## 完整原文\n\n可恢复转写\n",
+                encoding="utf-8",
+            )
+            output = f"SKIPPED_EXISTING_MARKDOWN_PATH:{note}\n"
+            self.assertEqual(runner.extract_retryable_existing_markdown_paths(output), [str(note)])
 
     def test_collection_batch_applies_cooldown_only_between_qwen_calls(self):
         with tempfile.TemporaryDirectory() as temp:

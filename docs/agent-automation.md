@@ -1,6 +1,6 @@
 # Agent 自动化
 
-Local Note Studio 0.1.19 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
+Local Note Studio 0.1.20 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
 
 ## 安全边界
 
@@ -32,17 +32,32 @@ Local Note Studio 0.1.19 提供受限 Agent CLI、本地 stdio MCP Server 和已
 | `up_mid` | 纯数字 UID |
 | `content_types` | `opus`、`video` 或两者 |
 | `output_dir` | 绝对路径，必须位于 `allowed_output_roots` |
+| `output_destinations` | 可选命名目标到 `output_dir` 内相对子目录的固定映射；键必须是安全 ID，值不得为绝对路径、`.`、`..` 或符号链接逃逸 |
 | `allowed_input_roots` | `ingest-file` 可读取的绝对根目录 |
 | `allowed_domains` | `ingest-url` 可访问的域名及其子域名 |
 | `limit` | 单次处理上限；`0` 表示所有未完成内容 |
 | `max_limit` | Agent 显式 `--limit` 的硬上限 |
 | `overwrite_outputs` | 默认应保持 `false` |
+| `keep_original_subtitles` | 默认 `false`；关闭时完整整理后的最终笔记不保留“原始字幕”章节，但仍保留整理正文、校对正文和来源元数据；若模型失败或仍有占位符，临时保留转写供安全重试 |
 | `opus_image_analysis` | `off`、`ocr` 或 `vision`；旧 Profile 缺省为 `off` |
 | `timeout_seconds` | 显式设置时同时覆盖单次图片、网页、PDF、Quick Read 和正式 Qwen 整理超时；不改变图片输出 token 上限 |
 | `lock_timeout_seconds` | `0` 为锁冲突立即失败；正数为最长等待时间 |
 | `execution_timeout_seconds` | 整个任务的硬超时，`0` 表示不设置 |
 
-覆盖优先级固定为：Agent 显式的安全参数（目前仅来源、受上限约束的 `limit`、`dry_run`）高于 Profile；Profile 高于普通 Worker 环境默认值；秘密始终只从 `env.local` 或 Application Support auth 读取。Agent 无法显式覆盖运行时、模型、输出根、覆盖策略或秘密。
+覆盖优先级固定为：Agent 显式的安全参数（来源、受上限约束的 `limit`、`dry_run`，以及 Profile 已声明的命名 `destination`）高于 Profile；Profile 高于普通 Worker 环境默认值；秘密始终只从 `env.local` 或 Application Support auth 读取。`destination` 只能引用 `output_destinations` 中的 ID，不能接收文件系统路径；Agent 无法显式覆盖运行时、模型、输出根、覆盖策略或秘密。
+
+例如：
+
+```json
+"output_dir": "/Users/xxx/Files/Data/Notes/Finance/青枫浦上Q",
+"output_destinations": {
+  "daily_review": "日复盘"
+}
+```
+
+此时 `destination=daily_review` 只会写入上述根目录下的 `日复盘`。未知 ID、绝对路径、父目录跳转及符号链接逃逸都会在 Worker 启动前被拒绝。未传 `destination` 时仍使用 Profile 根目录；索引仍按同一个父 Profile 递归刷新，避免子 Profile 重复收录。
+
+`local_notes_ingest_file` 只接收白名单输入根内的一个普通文件，传入目录会被拒绝，避免自然语言误触发整目录批处理。目录批量导入只保留给 GUI 或明确的维护流程。
 
 `opus_image_analysis` 只影响 B站图文附件，不复用也不改变现有 `enable_ocr` 的含义：
 
@@ -69,6 +84,7 @@ scripts/local-notes-agent sync-up --profile qingfeng --dry-run
 scripts/local-notes-agent sync-up --profile qingfeng --limit 1
 scripts/local-notes-agent ingest-url --profile qingfeng --url "https://www.bilibili.com/video/BVxxxx/"
 scripts/local-notes-agent ingest-file --profile qingfeng --file "/allowed/inbox/document.pdf"
+scripts/local-notes-agent ingest-file --profile qingfeng --destination daily_review --file "/allowed/videos/daily.mp4"
 scripts/local-notes-agent retry-failed --profile qingfeng
 scripts/local-notes-agent rebuild-index --profile qingfeng
 scripts/local-notes-agent status --limit 20

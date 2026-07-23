@@ -71,7 +71,7 @@ The worker accepts either CLI flags or a JSON request. Normal processing tasks u
   "subtitle_strategy": "yt-dlp",
   "extract_keyframes": false,
   "dialogue_detection": false,
-  "keep_original_subtitles": true,
+  "keep_original_subtitles": false,
   "recursive_search": false,
   "overwrite_outputs": false,
   "stock_terms": false,

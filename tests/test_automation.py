@@ -71,6 +71,82 @@ class ProfileSafetyTests(unittest.TestCase):
             self.assertEqual(request["caller"], "mcp")
             self.assertNotIn("api_key", request)
             self.assertNotIn("cookies", request)
+            self.assertFalse(profile.keep_original_subtitles)
+
+    def test_named_output_destination_is_bounded_by_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            notes = root / "notes"
+            inbox = root / "inbox"
+            notes.mkdir()
+            inbox.mkdir()
+            source = inbox / "daily.mp4"
+            source.write_bytes(b"video")
+            profile = profiles.AutomationProfile.from_mapping(
+                profile_mapping(root, output_destinations={"daily_review": "日复盘"})
+            )
+
+            default_request = agent.build_request("ingest-file", profile, source=str(source), caller="mcp")
+            routed_request = agent.build_request(
+                "ingest-file",
+                profile,
+                source=str(source),
+                destination="daily_review",
+                caller="mcp",
+            )
+
+            self.assertEqual(default_request["output_dir"], str(notes.resolve()))
+            self.assertEqual(routed_request["output_dir"], str((notes / "日复盘").resolve()))
+            self.assertEqual(profile.public_dict()["output_destinations"], {"daily_review": "日复盘"})
+            with self.assertRaises(core.AutomationError) as context:
+                agent.build_request("ingest-file", profile, source=str(source), destination="unknown", caller="mcp")
+            self.assertEqual(context.exception.error_code, "PATH_NOT_ALLOWED")
+
+    def test_output_destination_rejects_absolute_parent_and_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            notes = root / "notes"
+            outside = root / "outside"
+            notes.mkdir()
+            outside.mkdir()
+            (notes / "escape").symlink_to(outside, target_is_directory=True)
+            for value in ("/tmp/outside", "../outside", "escape", "bad\x00path"):
+                with self.subTest(value=value), self.assertRaises(core.AutomationError):
+                    profiles.AutomationProfile.from_mapping(
+                        profile_mapping(root, output_destinations={"daily_review": value})
+                    )
+
+    def test_output_destination_rejects_empty_dot_and_non_string_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for value in ("", ".", "./foo", "foo/.", "foo//bar", "foo/../bar", [], None):
+                with self.subTest(value=value), self.assertRaises(core.AutomationError) as context:
+                    profiles.AutomationProfile.from_mapping(
+                        profile_mapping(root, output_destinations={"daily_review": value})
+                    )
+                self.assertEqual(context.exception.error_code, "PROFILE_INVALID")
+
+    def test_output_destinations_field_rejects_falsy_non_objects(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for value in ([], "", False, None):
+                with self.subTest(value=value), self.assertRaises(core.AutomationError) as context:
+                    profiles.AutomationProfile.from_mapping(
+                        profile_mapping(root, output_destinations=value)
+                    )
+                self.assertEqual(context.exception.error_code, "PROFILE_INVALID")
+
+    def test_single_file_ingestion_rejects_directory_batch_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            notes = root / "notes"
+            inbox = root / "inbox"
+            notes.mkdir()
+            inbox.mkdir()
+            profile = profiles.AutomationProfile.from_mapping(profile_mapping(root))
+            with self.assertRaises(core.AutomationError) as context:
+                agent.build_request("ingest-file", profile, source=str(inbox), caller="mcp")
+            self.assertEqual(context.exception.error_code, "INVALID_REQUEST")
 
     def test_opus_image_analysis_profile_modes_validate_and_propagate(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -176,7 +252,7 @@ class LockAndHistoryTests(unittest.TestCase):
             self.assertNotIn("cookie-secret", serialized)
             self.assertNotIn("api_key", serialized)
             self.assertNotIn("cookies", serialized)
-            self.assertEqual(store.list()[0]["worker_version"], "0.1.19")
+            self.assertEqual(store.list()[0]["worker_version"], "0.1.20")
 
     def test_redaction_covers_provider_error_key_format(self):
         message = "Incorrect API key provided: sk-live-secret123456 url=https://example.com/?signature=signed-value"
@@ -432,6 +508,25 @@ class ContractAndMcpTests(unittest.TestCase):
         self.assertIn("local_notes_sync_up", names)
         self.assertIn("local_notes_get_status", names)
         self.assertNotIn("local_notes_cancel_run", names)
+        ingest_file = next(item for item in responses[1]["result"]["tools"] if item["name"] == "local_notes_ingest_file")
+        self.assertIn("destination", ingest_file["inputSchema"]["properties"])
+        self.assertNotIn("output_dir", ingest_file["inputSchema"]["properties"])
+        self.assertIn("directories are rejected", ingest_file["description"])
+        self.assertIn("directories are rejected", ingest_file["inputSchema"]["properties"]["path"]["description"])
+        mcp.validate_tool_arguments(
+            "local_notes_ingest_file",
+            {"profile": "fixture", "path": "/allowed/video.mp4", "destination": "daily_review"},
+        )
+        with self.assertRaises(ValueError):
+            mcp.validate_tool_arguments(
+                "local_notes_ingest_file",
+                {"profile": "fixture", "path": "/allowed/video.mp4", "output_dir": "/tmp"},
+            )
+        with self.assertRaises(ValueError):
+            mcp.validate_tool_arguments(
+                "local_notes_ingest_file",
+                {"profile": "fixture", "path": "/allowed/video.mp4", "destination": "../outside"},
+            )
 
     def test_status_reports_manifest_counts_without_source_details(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(

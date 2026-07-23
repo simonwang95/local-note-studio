@@ -30,6 +30,30 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.20 internal Apple Silicon artifact (2026-07-23)
+
+- Version: `0.1.20`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.20_aarch64.dmg`
+- Size: `3,342,737 bytes`
+- SHA-256: `39e8442d6a1610ff0bbe4cda7d94e0a80bfcb02d219c4cd137eba24b3fc9f018`
+- Build type: optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+This release adds Profile-scoped named output destinations, including the formal `daily_review -> 日复盘` mapping. Agent/MCP callers can select only Profile-published IDs; arbitrary `output_dir`, absolute/parent paths, malformed destination values, and symlink escapes are rejected. Single-file ingestion now rejects directories so a natural-language request cannot silently become a batch import.
+
+New settings and automation Profiles default to omitting the raw-subtitle section after a video note is complete. Explicit retention remains available. If model post-processing fails, leaves an AI placeholder, or has no non-empty structured/proofread section, the transcript remains available for a same-source retry. Completion checks stop before the raw transcript, raw-only legacy notes are preserved, and cleanup removes only the transcript block while keeping later H2 user sections. User-owned adjacent subtitle files are never deleted.
+
+The full release check passed the frontend production and compatibility gates, 124 Python tests, 10 Rust tests, and package-consistency audit with Node.js 20 and course-whisper Python 3.11. Strict deep signature verification, arm64 executable inspection, both `0.1.20` bundle versions, exact source-to-bundle hashes for MCP and subtitle safety code, and absence of `env.local`/Python bytecode passed. The final DMG was produced from that verified app through the no-mount sandbox-safe HFS image path and passed `hdiutil verify`. This runner cannot attach disk devices, so the final artifact was not mounted or copied over `/Applications`; those two checks remain manual for this artifact.
+
+A real local-Qwen/HanaAgent route processed one explicitly authorized local video with `profile=qingfeng` and `destination=daily_review`. Run `e79b488e-3cd2-4b5d-b56f-9eb0cf696272` completed with one created note under the formal `日复盘/` directory; the 97,459-byte note contains no AI placeholder or raw-subtitle section, remains linked to the source MP4, and is discoverable through the parent Profile index.
+
+That 46-minute acceptance proves natural-language parameter routing and the Local Note backend delivery, but not a final response in the originating HanaAgent turn: the isolated HanaAgent `0.412.7` session recorded the ingest tool call without a matching tool result/final assistant, while SQLite and the output independently prove completion. The six-hour connector timeout means current evidence does not establish an MCP timeout, model failure, or fixed 20-minute limit. Use a later read-only status query instead of resubmitting; asynchronous submit/status is the recommended long-term contract.
+
+The final bundled MCP passed initialize/list, formal Profile inspection, named-destination dry-run, and directory rejection. Before the final subtitle guard hardening, an installed `0.1.20` build and a fresh local-Qwen CyberQBro session repeated the same natural-language request: it selected only the Profile list and one single-file ingest with `destination=daily_review`; the existing complete note returned `no_changes`, skipped once, did not change the file, and produced a normal final assistant response. The guard hardening changes only post-processing cleanup and is covered by the final 124-test suite.
+
+Developer ID signing, notarization, Intel/universal packaging, the independent clean-Mac matrix, and a formal long-call HanaAgent receipt remain separate release gates.
+
 ## 0.1.19 internal Apple Silicon artifact (2026-07-22)
 
 - Version: `0.1.19`

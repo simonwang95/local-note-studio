@@ -13,12 +13,17 @@ from local_notes_agent import run_agent_action, terminate_active_worker
 from local_notes_retrieval import run_read_action
 
 
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 PROTOCOL_VERSION = "2025-11-25"
 
 
 def tool_definitions() -> list[dict[str, Any]]:
     profile_property = {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$", "description": "Enabled automation profile ID."}
+    destination_property = {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+        "description": "Optional named output destination configured by the selected profile; never a filesystem path.",
+    }
     limit_property = {"type": "integer", "minimum": 0, "description": "Safe item limit; 0 processes all incomplete items within the profile cap."}
     read_limit_property = {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}
     offset_property = {"type": "integer", "minimum": 0, "maximum": 10000000, "default": 0}
@@ -57,6 +62,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "profile": profile_property,
                     "url": {"type": "string", "minLength": 1, "description": "HTTP(S) URL without embedded credentials."},
+                    "destination": destination_property,
                     "dry_run": {"type": "boolean", "default": False},
                 },
                 "required": ["profile", "url"],
@@ -66,12 +72,17 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "local_notes_ingest_file",
-            "description": "Organize one local file or media directory inside an input root allowed by the selected profile. Writes notes, manifests, and audit history.",
+            "description": "Organize one regular local file inside an input root allowed by the selected profile; directories are rejected. Writes notes, manifests, and audit history.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "profile": profile_property,
-                    "path": {"type": "string", "minLength": 1, "description": "Absolute local path inside an allowed input root."},
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Absolute path to one regular file inside an allowed input root; directories are rejected.",
+                    },
+                    "destination": destination_property,
                     "dry_run": {"type": "boolean", "default": False},
                 },
                 "required": ["profile", "path"],
@@ -210,6 +221,7 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         action,
         profile_id=str(arguments.get("profile") or ""),
         source=str(arguments.get(source_key) or "") if source_key else "",
+        destination=str(arguments.get("destination") or ""),
         limit=arguments.get("limit") if action in {"sync-up", "retry-failed"} else None,
         dry_run=bool(arguments.get("dry_run", False)),
         caller="mcp",
@@ -228,8 +240,8 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
     rules = {
         "local_notes_env_check": ({"profile"}, {"profile"}),
         "local_notes_sync_up": ({"profile", "limit", "dry_run"}, {"profile"}),
-        "local_notes_ingest_url": ({"profile", "url", "dry_run"}, {"profile", "url"}),
-        "local_notes_ingest_file": ({"profile", "path", "dry_run"}, {"profile", "path"}),
+        "local_notes_ingest_url": ({"profile", "url", "destination", "dry_run"}, {"profile", "url"}),
+        "local_notes_ingest_file": ({"profile", "path", "destination", "dry_run"}, {"profile", "path"}),
         "local_notes_get_status": ({"run_id", "limit"}, set()),
         "local_notes_retry_failed": ({"profile", "limit", "dry_run"}, {"profile"}),
         "local_notes_list_profiles": (set(), set()),
@@ -245,9 +257,28 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
         raise ValueError(f"unexpected tool arguments: {', '.join(sorted(unknown))}")
     if missing:
         raise ValueError(f"missing tool arguments: {', '.join(sorted(missing))}")
-    for key in ("profile", "url", "path", "run_id", "query", "author", "path_or_id", "section", "content_type", "symbol_or_topic", "as_of_date"):
+    for key in (
+        "profile",
+        "url",
+        "path",
+        "destination",
+        "run_id",
+        "query",
+        "author",
+        "path_or_id",
+        "section",
+        "content_type",
+        "symbol_or_topic",
+        "as_of_date",
+    ):
         if key in arguments and not isinstance(arguments[key], str):
             raise ValueError(f"{key} must be a string")
+    if "destination" in arguments:
+        value = arguments["destination"]
+        if not value or len(value) > 64 or not value[0].islower() or any(
+            char not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for char in value
+        ):
+            raise ValueError("destination must be a configured lowercase identifier")
     for key in ("limit", "offset", "max_chars", "days"):
         if key in arguments and (isinstance(arguments[key], bool) or not isinstance(arguments[key], int)):
             raise ValueError(f"{key} must be an integer")

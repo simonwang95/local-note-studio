@@ -112,7 +112,7 @@ class TaskRequest:
     retry_failed: bool = False
     extract_keyframes: bool = False
     dialogue_detection: bool = False
-    keep_original_subtitles: bool = True
+    keep_original_subtitles: bool = False
     recursive_search: bool = False
     overwrite_outputs: bool = False
     incognito_mode: bool = False
@@ -169,7 +169,7 @@ class TaskRequest:
             retry_failed=parse_bool(data.get("retry_failed")),
             extract_keyframes=parse_bool(data.get("extract_keyframes")),
             dialogue_detection=parse_bool(data.get("dialogue_detection")),
-            keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", True)),
+            keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", False)),
             recursive_search=parse_bool(data.get("recursive_search")),
             overwrite_outputs=parse_bool(data.get("overwrite_outputs")),
             incognito_mode=parse_bool(data.get("incognito_mode")),
@@ -2367,7 +2367,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--retry-failed", action="store_true", help="Retry the failed entries saved by the previous batch.")
     parser.add_argument("--extract-keyframes", action="store_true", help="Extract key frames for Bilibili or local video notes.")
     parser.add_argument("--dialogue-detection", action="store_true", help="Detect dialogue and label speakers in video transcripts.")
-    parser.add_argument("--no-keep-original-subtitles", action="store_true", help="Do not keep the raw subtitle section in video notes.")
+    subtitle_retention = parser.add_mutually_exclusive_group()
+    subtitle_retention.add_argument(
+        "--keep-original-subtitles",
+        dest="keep_original_subtitles",
+        action="store_true",
+        help="Keep the raw subtitle section in video notes.",
+    )
+    subtitle_retention.add_argument(
+        "--no-keep-original-subtitles",
+        dest="keep_original_subtitles",
+        action="store_false",
+        help="Do not keep the raw subtitle section in video notes (the default).",
+    )
+    parser.set_defaults(keep_original_subtitles=False)
     parser.add_argument("--recursive-search", action="store_true", help="Recursively scan local video directories.")
     parser.add_argument("--overwrite-outputs", action="store_true", help="Overwrite existing output files.")
     parser.add_argument("--incognito-mode", action="store_true", help="Do not read or write manifests and incremental state.")
@@ -2427,7 +2440,7 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         retry_failed=args.retry_failed,
         extract_keyframes=args.extract_keyframes,
         dialogue_detection=args.dialogue_detection,
-        keep_original_subtitles=not args.no_keep_original_subtitles,
+        keep_original_subtitles=args.keep_original_subtitles,
         recursive_search=args.recursive_search,
         overwrite_outputs=args.overwrite_outputs,
         incognito_mode=args.incognito_mode,

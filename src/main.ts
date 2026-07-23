@@ -181,7 +181,7 @@ const defaults: SavedSettings = {
   collectionMid: "",
   extractKeyframes: false,
   dialogueDetection: false,
-  keepOriginalSubtitles: true,
+  keepOriginalSubtitles: false,
   recursiveSearch: false,
   overwriteOutputs: false,
   incognitoMode: false,

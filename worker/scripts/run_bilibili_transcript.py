@@ -40,7 +40,7 @@ DEFAULTS = {
     "EXTRACT_KEYFRAMES": "false",
     "KEYFRAME_MAX_COUNT": "4",
     "ENABLE_DIALOGUE_DETECTION": "false",
-    "KEEP_ORIGINAL_SUBTITLES": "true",
+    "KEEP_ORIGINAL_SUBTITLES": "false",
     "OVERWRITE_OUTPUT": "false",
     "BILIBILI_INCREMENTAL_STATE_ENABLED": "true",
     "COOLDOWN_DELAY": "30",
@@ -308,6 +308,36 @@ def extract_markdown_paths(stdout: str) -> list[str]:
     return paths
 
 
+def extract_retryable_existing_markdown_paths(stdout: str) -> list[str]:
+    """Return skipped notes that still contain placeholders and a retry transcript."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    marker = "SKIPPED_EXISTING_MARKDOWN_PATH:"
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(marker):
+            continue
+        path = stripped[len(marker):].strip()
+        if path in seen or not os.path.isfile(path):
+            continue
+        try:
+            content = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        has_pending = "【AI待处理" in content
+        has_transcript = (
+            "<summary>📄 原始字幕</summary>" in content
+            or "<summary>📄 完整原文</summary>" in content
+            or re.search(r"(?m)^##\s+原始字幕\s*$", content) is not None
+            or re.search(r"(?m)^##\s+完整原文\s*$", content) is not None
+        )
+        if not has_pending or not has_transcript:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
 def load_manifest(path: pathlib.Path) -> dict[str, object]:
     if not path.exists():
         return {"items": []}
@@ -560,8 +590,12 @@ def run_url(project_dir: pathlib.Path, cfg: dict[str, str], url: str, dry_run: b
 
     paths = extract_markdown_paths(output)
     if not paths:
-        print("未从输出中识别到 Markdown 路径，跳过 summary-only")
-        return 0
+        paths = extract_retryable_existing_markdown_paths(output)
+        if paths:
+            print(f"检测到已有但未完成的笔记，保留转写并重试 summary-only: {paths[-1]}")
+        else:
+            print("未从输出中识别到 Markdown 路径，跳过 summary-only")
+            return 0
 
     postprocess_video_notes(paths[-1:], cfg)
 
@@ -595,8 +629,12 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
 
     paths = extract_markdown_paths(output)
     if not paths:
-        print("未从输出中识别到 Markdown 路径，跳过 summary-only")
-        return 0
+        paths = extract_retryable_existing_markdown_paths(output)
+        if paths:
+            print(f"检测到已有但未完成的笔记，保留转写并重试 summary-only: {paths[-1]}")
+        else:
+            print("未从输出中识别到 Markdown 路径，跳过 summary-only")
+            return 0
 
     postprocess_video_notes(paths[-1:], cfg)
 

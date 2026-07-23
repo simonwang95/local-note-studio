@@ -7,8 +7,14 @@
       "up_mid": "1420210197",
       "content_types": ["opus", "video"],
       "output_dir": "/Users/xxx/Files/Data/Notes/Finance/青枫浦上Q",
-      "allowed_output_roots": ["/Users/xxx/Files/Data/Notes"],
-      "allowed_input_roots": ["/Users/xxx/Files/Data/Inbox"],
+      "output_destinations": {
+        "daily_review": "日复盘"
+      },
+      "allowed_output_roots": ["/Users/xxx/Files/Data/Notes/Finance/青枫浦上Q"],
+      "allowed_input_roots": [
+        "/Users/xxx/Files/Courses/青枫浦上Q/青枫浦上Q-PPT",
+        "/Users/xxx/Files/Courses/青枫浦上Q/Videos/日复盘"
+      ],
       "allowed_domains": ["bilibili.com", "mp.weixin.qq.com"],
       "stock_terms": true,
       "overwrite_outputs": false,
@@ -22,7 +28,7 @@
       "runtime_backend": "managed",
       "extract_keyframes": false,
       "dialogue_detection": false,
-      "keep_original_subtitles": true
+      "keep_original_subtitles": false
     }
   ]
 }

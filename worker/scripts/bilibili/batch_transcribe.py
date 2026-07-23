@@ -94,7 +94,7 @@ PROOFREAD_DOMAINS = _env.get("PROOFREAD_DOMAINS", "").strip()
 ENABLE_DIALOGUE_DETECTION = _env.get("ENABLE_DIALOGUE_DETECTION", "false").strip().lower() == "true"
 A_SHARE_TERMS_ENABLED = _env.get("A_SHARE_TERMS_ENABLED", "false").strip().lower() == "true"
 KEEP_ORIGINAL_SUBTITLES = (
-    _env.get("KEEP_ORIGINAL_SUBTITLES", _env.get("PRESERVE_ORIGINAL_SUBTITLES", "true"))
+    _env.get("KEEP_ORIGINAL_SUBTITLES", _env.get("PRESERVE_ORIGINAL_SUBTITLES", "false"))
     .strip()
     .lower()
     not in {"0", "false", "no", "off"}
@@ -380,11 +380,13 @@ def transcribe_local_dir(local_dir, recursive=False):
 
 
 def apply_original_subtitle_preference(filepath):
-    """Apply the keep/remove raw subtitle preference even when LLM work is skipped."""
+    """Remove raw subtitles only after all generated-note placeholders are complete."""
     if KEEP_ORIGINAL_SUBTITLES or not os.path.exists(filepath):
         return False
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
+    if not _can_remove_original_subtitles(content):
+        return False
     updated = _remove_original_subtitles_section(content)
     if updated == content:
         return False
@@ -701,17 +703,56 @@ def _extract_transcript_text(content):
 
 
 def _remove_original_subtitles_section(content):
-    """Remove the final raw subtitle section when the user opts out."""
+    """Remove only the raw subtitle block while preserving later user sections."""
     patterns = [
-        r"(?ms)\n---\s*\n<details>\s*<summary>📄\s*原始字幕</summary>\s*.+?\s*</details>\s*$",
-        r"(?ms)\n<details>\s*<summary>📄\s*原始字幕</summary>\s*.+?\s*</details>\s*$",
-        r"(?ms)\n---\s*\n##\s+原始字幕\s*$\n.+\s*$",
-        r"(?ms)\n##\s+原始字幕\s*$\n.+\s*$",
+        r"(?ms)\n---\s*\n<details>\s*<summary>📄\s*原始字幕</summary>\s*.+?\s*</details>[ \t]*\n?",
+        r"(?ms)\n<details>\s*<summary>📄\s*原始字幕</summary>\s*.+?\s*</details>[ \t]*\n?",
+        r"(?ms)\n---\s*\n##\s+原始字幕\s*$\n.*?(?=^##\s+\S.*$|\Z)",
+        r"(?ms)\n##\s+原始字幕\s*$\n.*?(?=^##\s+\S.*$|\Z)",
     ]
     updated = content
     for pattern in patterns:
         updated = re.sub(pattern, "", updated, count=1)
     return updated.rstrip() + "\n" if updated != content else content
+
+
+def _section_has_generated_content(content, section_title):
+    """Return whether a generated template section contains usable content."""
+    heading = re.search(rf"(?m)^##\s+{re.escape(section_title)}\s*$", content)
+    if not heading:
+        return False
+    section_tail = content[heading.end():]
+    next_heading = re.search(r"(?m)^##\s+\S.*$", section_tail)
+    section_body = section_tail[:next_heading.start()] if next_heading else section_tail
+    section_body = re.sub(r"(?m)^\s*---\s*$", "", section_body).strip()
+    if not section_body or any(placeholder in section_body for placeholder in ALL_PLACEHOLDERS):
+        return False
+    return re.search(r"[\w\u4e00-\u9fff]", section_body) is not None
+
+
+def _content_before_raw_transcript(content):
+    """Exclude raw transcript sections from generated-content completion checks."""
+    raw_patterns = [
+        r"(?ms)^<details>\s*<summary>📄\s*(?:原始字幕|完整原文)</summary>",
+        r"(?m)^##\s+(?:原始字幕|完整原文)\s*$",
+    ]
+    starts = [
+        match.start()
+        for pattern in raw_patterns
+        if (match := re.search(pattern, content)) is not None
+    ]
+    return content[:min(starts)] if starts else content
+
+
+def _can_remove_original_subtitles(content):
+    """Require a completed generated body before deleting the retry source."""
+    if any(placeholder in content for placeholder in ALL_PLACEHOLDERS):
+        return False
+    generated_content = _content_before_raw_transcript(content)
+    return any(
+        _section_has_generated_content(generated_content, section_title)
+        for section_title in ("结构化正文", "校对正文")
+    )
 
 
 def _replace_placeholder(content, key, value):
@@ -757,7 +798,7 @@ def generate_summary(filepath, progress_label=None):
 
     has_any = any(ph in content for ph in ALL_PLACEHOLDERS)
     if not has_any:
-        if not KEEP_ORIGINAL_SUBTITLES:
+        if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
             updated = _remove_original_subtitles_section(content)
             if updated != content:
                 with open(filepath, "w", encoding="utf-8") as f:
@@ -1007,7 +1048,7 @@ def generate_summary(filepath, progress_label=None):
         except Exception as e:
             print(f"   ⚠️ {label}: AI校对失败: {e}")
 
-    if not KEEP_ORIGINAL_SUBTITLES:
+    if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
         updated = _remove_original_subtitles_section(content)
         if updated != content:
             content = updated
@@ -1080,11 +1121,25 @@ def run_summary_only(target_path=None):
         progress_label = f"[{i}/{len(files)}] {os.path.basename(filepath)}"
         print(f"\n📄 {progress_label}")
         changed = False
+        failed = False
         try:
             changed = generate_summary(filepath, progress_label=progress_label)
         except Exception as e:
             failed_count += 1
+            failed = True
             print(f"   ⚠️ {progress_label}: AI 后处理异常: {e}")
+        if not failed:
+            with open(filepath, "r", encoding="utf-8") as f:
+                pending_content = f.read()
+            if any(placeholder in pending_content for placeholder in ALL_PLACEHOLDERS):
+                failed_count += 1
+                failed = True
+                print(f"   ⚠️ {progress_label}: 仍有 AI 待处理占位符；保留原始字幕以便重试")
+        if not failed:
+            if apply_original_subtitle_preference(filepath):
+                changed = True
+                print(f"   🧹 {progress_label}: 已按设置移除原始字幕")
+        if failed:
             continue
 
         if changed:
@@ -1273,6 +1328,8 @@ def main():
                 if changed and COOLDOWN_DELAY > 0 and i < len(pending):
                     print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                     time.sleep(COOLDOWN_DELAY)
+            if apply_original_subtitle_preference(output_file):
+                print(f"   🧹 [{i}/{len(pending)}] 已按设置移除原始字幕")
 
         else:
             report_rows.append({

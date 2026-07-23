@@ -25,6 +25,7 @@ ALLOWED_PROFILE_KEYS = {
     "up_mid",
     "content_types",
     "output_dir",
+    "output_destinations",
     "allowed_output_roots",
     "allowed_input_roots",
     "allowed_domains",
@@ -141,6 +142,7 @@ class AutomationProfile:
     up_mid: str
     content_types: tuple[str, ...]
     output_dir: pathlib.Path
+    output_destinations: dict[str, pathlib.Path]
     allowed_output_roots: tuple[pathlib.Path, ...]
     allowed_input_roots: tuple[pathlib.Path, ...]
     allowed_domains: tuple[str, ...]
@@ -189,6 +191,39 @@ class AutomationProfile:
         output_roots = tuple(_absolute_path(item, "allowed_output_roots item") for item in raw_output_roots)
         if not any(path_is_within(output_dir, root) for root in output_roots):
             raise AutomationError("output_dir is outside allowed_output_roots", "PATH_NOT_ALLOWED")
+        raw_destinations = data.get("output_destinations", {})
+        if not isinstance(raw_destinations, dict):
+            raise AutomationError("output_destinations must be an object", "PROFILE_INVALID")
+        output_destinations: dict[str, pathlib.Path] = {}
+        for destination_id, raw_path in raw_destinations.items():
+            if not isinstance(destination_id, str) or not PROFILE_ID_PATTERN.fullmatch(destination_id):
+                raise AutomationError("output destination id must match [a-z][a-z0-9_-]*", "PROFILE_INVALID")
+            if not isinstance(raw_path, str):
+                raise AutomationError(
+                    f"output destination {destination_id} must be a string",
+                    "PROFILE_INVALID",
+                )
+            raw_relative = raw_path.strip()
+            if "\x00" in raw_relative:
+                raise AutomationError(f"output destination {destination_id} contains an invalid character", "PROFILE_INVALID")
+            raw_parts = raw_relative.split("/")
+            if not raw_relative or any(part in {"", ".", ".."} for part in raw_parts):
+                raise AutomationError(
+                    f"output destination {destination_id} must be a non-empty relative path without dot segments",
+                    "PROFILE_INVALID",
+                )
+            relative = pathlib.Path(raw_relative)
+            if relative.is_absolute():
+                raise AutomationError(
+                    f"output destination {destination_id} must be a non-empty relative path without dot segments",
+                    "PROFILE_INVALID",
+                )
+            destination_path = (output_dir / relative).resolve(strict=False)
+            if not path_is_within(destination_path, output_dir) or not any(
+                path_is_within(destination_path, root) for root in output_roots
+            ):
+                raise AutomationError(f"output destination {destination_id} is outside the profile allowlist", "PATH_NOT_ALLOWED")
+            output_destinations[destination_id] = destination_path
         if not isinstance(data.get("allowed_input_roots", []), list):
             raise AutomationError("allowed_input_roots must be a list", "PROFILE_INVALID")
         input_roots = tuple(_absolute_path(item, "allowed_input_roots item") for item in data.get("allowed_input_roots", []))
@@ -216,6 +251,7 @@ class AutomationProfile:
             up_mid=up_mid,
             content_types=content_types,
             output_dir=output_dir,
+            output_destinations=output_destinations,
             allowed_output_roots=output_roots,
             allowed_input_roots=input_roots,
             allowed_domains=domains,
@@ -237,7 +273,7 @@ class AutomationProfile:
             asr_model=str(_absolute_path(data.get("asr_model"), "asr_model")) if data.get("asr_model") else "",
             extract_keyframes=_strict_bool(data, "extract_keyframes", False),
             dialogue_detection=_strict_bool(data, "dialogue_detection", False),
-            keep_original_subtitles=_strict_bool(data, "keep_original_subtitles", True),
+            keep_original_subtitles=_strict_bool(data, "keep_original_subtitles", False),
             timeout_seconds=_bounded_int(data.get("timeout_seconds", 0), "timeout_seconds", 0, 86400, 0),
             retry_count=_bounded_int(data.get("retry_count", 0), "retry_count", 0, 20, 0),
             chunk_chars=_bounded_int(data.get("chunk_chars", 0), "chunk_chars", 0, 1000000, 0),
@@ -252,6 +288,10 @@ class AutomationProfile:
                 "up_mid": self.up_mid,
                 "content_types": list(self.content_types),
                 "output_dir": str(self.output_dir),
+                "output_destinations": {
+                    destination_id: path.relative_to(self.output_dir).as_posix()
+                    for destination_id, path in self.output_destinations.items()
+                },
                 "allowed_domains": list(self.allowed_domains),
                 "stock_terms": self.stock_terms,
                 "overwrite_outputs": self.overwrite_outputs,
@@ -295,3 +335,20 @@ def require_profile(profile_id: str) -> AutomationProfile:
         return profiles[profile_id]
     except KeyError as exc:
         raise AutomationError(f"enabled profile not found: {profile_id}", "PROFILE_NOT_FOUND") from exc
+
+
+def resolve_output_destination(profile: AutomationProfile, destination_id: str = "") -> pathlib.Path:
+    value = str(destination_id or "").strip()
+    if not value:
+        return profile.output_dir
+    if not PROFILE_ID_PATTERN.fullmatch(value):
+        raise AutomationError("output destination id is invalid", "PATH_NOT_ALLOWED")
+    try:
+        destination = profile.output_destinations[value].resolve(strict=False)
+    except KeyError as exc:
+        raise AutomationError(f"output destination is not allowed: {value}", "PATH_NOT_ALLOWED") from exc
+    if not path_is_within(destination, profile.output_dir) or not any(
+        path_is_within(destination, root) for root in profile.allowed_output_roots
+    ):
+        raise AutomationError(f"output destination is outside the profile allowlist: {value}", "PATH_NOT_ALLOWED")
+    return destination
