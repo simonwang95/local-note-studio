@@ -71,6 +71,7 @@ IMAGE_SOURCE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".bmp", ".tif", 
 OPUS_IMAGE_CACHE_SCHEMA_VERSION = "2.0"
 OPUS_IMAGE_ANALYSIS_RULES_VERSION = "2026-07-22.1"
 OPUS_IMAGE_ANALYSIS_MAX_TOKENS_HARD_CAP = 8192
+ORIGINAL_CONTENT_END_MARKER = "<!-- local-note-studio:original-end -->"
 
 
 DEFAULTS = {
@@ -2050,6 +2051,8 @@ def convert_webpage(
         "model": model,
         "tags": tags,
         "source_hash": source_hash,
+        "original_content_sha256": sha256_bytes(extracted.encode("utf-8")),
+        "original_content_chars": len(extracted),
         "assets_downloaded": assets_downloaded,
         "asset_count": len(downloaded_assets),
         "asset_failed": len(failed_assets),
@@ -2112,6 +2115,38 @@ def convert_webpage(
     return out_path, item, False
 
 
+def fetch_bilibili_opus_page_content(url: str, cfg: dict[str, str]) -> tuple[str, list[str]]:
+    """Read the complete server-rendered Opus body and its inline images.
+
+    The dynamic detail API may expose only ``opus.summary`` for long-form posts,
+    while the authenticated Opus page already contains the complete article.
+    API metadata and permission checks remain authoritative; this page read only
+    fills the body and attachment evidence that the summary response omits.
+    """
+    opener = build_cookie_opener(bilibili_cookie_path(cfg))
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": cfg["WEB_USER_AGENT"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    )
+    timeout = int(cfg["WEB_FETCH_TIMEOUT_SECONDS"])
+    with opener.open(request, timeout=timeout) as response:
+        raw_html = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+
+    doc = parse_html(raw_html)
+    nodes = doc.xpath(
+        "//*[contains(concat(' ', normalize-space(@class), ' '), ' opus-module-content ')]"
+    )
+    if not nodes:
+        return "", []
+    article = max(nodes, key=lambda node: len(text_content(node)))
+    content = webpage_markdown(article, url)
+    return content, markdown_image_urls(content)
+
+
 def convert_bilibili_opus(
     url: str,
     output_dir: pathlib.Path,
@@ -2132,6 +2167,14 @@ def convert_bilibili_opus(
     )
     payload = fetch_json_with_cookies(api_url, url, cfg)
     parsed = parse_bilibili_opus_payload(payload, url)
+    try:
+        page_content, page_images = fetch_bilibili_opus_page_content(url, cfg)
+    except Exception as exc:
+        print(f"[B站图文 WARN] 完整页面读取失败，保留动态 API 内容：{compact_error_detail(str(exc))}", file=sys.stderr)
+    else:
+        if page_content:
+            parsed["content"] = page_content
+            parsed["images"] = list(dict.fromkeys([*page_images, *parsed["images"]]))
     source_hash = bilibili_opus_source_hash(parsed, opus_id)
     title = parsed["title"]
     out_path = output_path_for(output_dir, f"BILI-OPUS-{slugify(title, opus_id)}_{opus_id}.md", output_filename)
@@ -2139,7 +2182,10 @@ def convert_bilibili_opus(
         return out_path, {}, True
 
     body_lines = [parsed["content"]]
+    embedded_images = set(markdown_image_urls(parsed["content"]))
     for index, image_url in enumerate(parsed["images"], 1):
+        if image_url in embedded_images:
+            continue
         body_lines.extend(["", f"![动态图片 {index}]({image_url})"])
     extracted = "\n".join(body_lines).strip()
     extracted, assets = download_markdown_assets(extracted, out_path, url, cfg, download_assets)
@@ -2187,6 +2233,8 @@ def convert_bilibili_opus(
         "model": model,
         "tags": ["source/bilibili", "source/bilibili-opus", "status/draft"],
         "source_hash": source_hash,
+        "original_content_sha256": sha256_bytes(extracted.encode("utf-8")),
+        "original_content_chars": len(extracted),
         "assets_downloaded": assets_downloaded,
         "asset_count": len(downloaded_assets),
         "asset_failed": len(failed_assets),
@@ -2215,6 +2263,8 @@ def convert_bilibili_opus(
         "## 原文抽取",
         "",
         extracted,
+        "",
+        ORIGINAL_CONTENT_END_MARKER,
     ]
     if image_analysis:
         markdown.extend(["", image_analysis])

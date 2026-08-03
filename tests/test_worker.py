@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -786,6 +787,7 @@ class OpusImageAnalysisTests(unittest.TestCase):
             mock.patch.object(converter, "ensure_bilibili_cookie_login"),
             mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
             mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(converter, "fetch_bilibili_opus_page_content", return_value=("", [])),
             mock.patch.object(
                 converter,
                 "download_markdown_assets",
@@ -832,6 +834,7 @@ class OpusImageAnalysisTests(unittest.TestCase):
             mock.patch.object(converter, "ensure_bilibili_cookie_login"),
             mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
             mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(converter, "fetch_bilibili_opus_page_content", return_value=("", [])),
             mock.patch.object(
                 converter,
                 "download_markdown_assets",
@@ -883,6 +886,7 @@ class OpusImageAnalysisTests(unittest.TestCase):
             mock.patch.object(converter, "ensure_bilibili_cookie_login"),
             mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
             mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(converter, "fetch_bilibili_opus_page_content", return_value=("", [])),
             mock.patch.object(
                 converter,
                 "download_markdown_assets",
@@ -938,6 +942,82 @@ class OpusImageAnalysisTests(unittest.TestCase):
         self.assertEqual(summary["limited"], 2)
         self.assertEqual(section.count("超过安全调用上限"), 2)
 
+    def test_server_rendered_opus_page_exposes_complete_body_and_inline_images(self):
+        image_url = "https://i0.hdslb.com/bfs/new_dyn/fixture.png@1192w"
+        html = (
+            '<html><body><div class="opus-module-content opus-paragraph-children">'
+            '<h1>完整正文标题</h1><p>这是动态 API 摘要之后仍应保留的完整段落。</p>'
+            f'<p><img src="//i0.hdslb.com/bfs/new_dyn/fixture.png@1192w"></p>'
+            '<p>正文结尾和免责声明。</p></div></body></html>'
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = html.encode("utf-8")
+        response.headers.get_content_charset.return_value = "utf-8"
+        opener = mock.MagicMock()
+        opener.open.return_value = response
+        with mock.patch.object(converter, "build_cookie_opener", return_value=opener):
+            content, images = converter.fetch_bilibili_opus_page_content(
+                "https://www.bilibili.com/opus/123", self.cfg("off")
+            )
+        self.assertIn("# 完整正文标题", content)
+        self.assertIn("正文结尾和免责声明", content)
+        self.assertIn(f"![image]({image_url})", content)
+        self.assertEqual(images, [image_url])
+
+    def test_converter_replaces_api_summary_with_page_body_without_duplicating_inline_image(self):
+        image_url = "https://i0.hdslb.com/bfs/new_dyn/full-page.png@1192w"
+        page_content = (
+            "# 完整正文标题\n\nAPI 摘要之后的完整正文。\n\n"
+            f"![image]({image_url})\n\n正文结尾。"
+        )
+        parsed = {
+            "item": {"id": "long-opus"},
+            "title": "长图文测试",
+            "author": "作者",
+            "author_mid": "42",
+            "published": "2026-08-02T22:28:11+08:00",
+            "content": "只有摘要...",
+            "images": [],
+        }
+        asset = self.asset(13, image_url, b"full-page")
+
+        def fake_download(markdown, _out_path, _referer, _cfg, _enabled):
+            self.assertEqual(markdown.count(image_url), 1)
+            return markdown.replace(image_url, str(asset["markdown_path"])), [asset]
+
+        cfg = {**self.cfg("off"), "BILIBILI_COOKIES_FILE": str(self.root / "cookies.txt")}
+        with (
+            mock.patch.object(converter, "bilibili_cookie_path", return_value=self.root / "cookies.txt"),
+            mock.patch.object(converter, "ensure_bilibili_cookie_login"),
+            mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
+            mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(
+                converter, "fetch_bilibili_opus_page_content", return_value=(page_content, [image_url])
+            ),
+            mock.patch.object(converter, "download_markdown_assets", side_effect=fake_download),
+            mock.patch.object(converter, "bilibili_future_warning", return_value=""),
+        ):
+            path, item, skipped = converter.convert_bilibili_opus(
+                "https://www.bilibili.com/opus/123",
+                self.root / "full-page-output",
+                "fixture",
+                cfg,
+                {"items": []},
+                False,
+                True,
+            )
+        markdown = path.read_text(encoding="utf-8")
+        self.assertFalse(skipped)
+        self.assertNotIn("只有摘要...", markdown)
+        self.assertIn("API 摘要之后的完整正文", markdown)
+        self.assertIn("正文结尾", markdown)
+        self.assertEqual(markdown.count(str(asset["markdown_path"])), 1)
+        expected_original = page_content.replace(image_url, str(asset["markdown_path"]))
+        self.assertIn(f"original_content_sha256: {converter.sha256_bytes(expected_original.encode('utf-8'))}", markdown)
+        self.assertIn(converter.ORIGINAL_CONTENT_END_MARKER, markdown)
+        self.assertEqual(item["asset_count"], 1)
+
     def test_converter_keeps_original_markdown_image_references_in_order(self):
         urls = ["https://i.example/one.png", "https://i.example/two.png"]
         parsed = {
@@ -964,6 +1044,7 @@ class OpusImageAnalysisTests(unittest.TestCase):
             mock.patch.object(converter, "ensure_bilibili_cookie_login"),
             mock.patch.object(converter, "fetch_json_with_cookies", return_value={}),
             mock.patch.object(converter, "parse_bilibili_opus_payload", return_value=parsed),
+            mock.patch.object(converter, "fetch_bilibili_opus_page_content", return_value=("", [])),
             mock.patch.object(converter, "download_markdown_assets", side_effect=fake_download),
             mock.patch.object(converter, "bilibili_future_warning", return_value=""),
         ):
@@ -977,6 +1058,39 @@ class OpusImageAnalysisTests(unittest.TestCase):
 
 
 class BilibiliMetadataIsolationTests(unittest.TestCase):
+    def test_nested_source_headings_do_not_truncate_opus_model_or_preserved_original(self):
+        original = (
+            "# 一、一级标题\n\n引言段落。\n\n## 1｜二级标题\n\n"
+            "这是摘要之后的正文。\n\n## 五、风险提示\n\n免责声明。"
+        )
+        body = (
+            "# 草稿\n\n## 来源信息\n\n元数据\n\n## 原文抽取\n\n"
+            f"{original}\n\n{organizer.ORIGINAL_CONTENT_END_MARKER}\n\n"
+            "## 图片分析\n\n### 图片 1\n\n可见文字"
+        )
+        self.assertEqual(organizer.original_content_from_body(body, "bilibili-opus"), original)
+        model_body = organizer.model_body_for_source(body, "bilibili-opus")
+        self.assertIn("这是摘要之后的正文", model_body)
+        self.assertIn("## 五、风险提示", model_body)
+        preserved = organizer.original_source_section(body, "bilibili-opus")
+        self.assertIn(original, preserved)
+        self.assertTrue(preserved.endswith(organizer.ORIGINAL_CONTENT_END_MARKER))
+        self.assertEqual(organizer.original_payload_for_hash(preserved, "bilibili-opus"), original)
+
+    def test_opus_completion_rejects_an_original_that_does_not_match_its_hash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "truncated.md"
+            expected = "完整正文\n\n## 原文中的标题\n\n正文结尾"
+            note.write_text(
+                "---\nstatus: organized\nsource_type: bilibili-opus\n"
+                f"original_content_sha256: {organizer.sha256_text(expected)}\n---\n\n"
+                "# 标题\n\n## 原文抽取\n\n"
+                f"{organizer.ORIGINAL_SECTION_NOTICE}\n\n只有摘要...\n\n"
+                f"{organizer.ORIGINAL_CONTENT_END_MARKER}\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(organizer.organized_note_complete(note, "bilibili-opus"))
+
     def test_opus_source_hash_ignores_volatile_api_fields(self):
         base = {
             "item": {"statistics": {"likes": 1}},
@@ -1242,6 +1356,20 @@ class IntegrityTests(unittest.TestCase):
         path = self.fixture()
         req = worker.TaskRequest(task="web-url", output_dir=str(self.root))
         self.assertEqual(worker.validate_markdown_output(path, req), [])
+
+    def test_integrity_rejects_truncated_original_when_conversion_hash_is_present(self):
+        expected = "完整正文\n\n## 原文内标题\n\n正文结尾"
+        path = self.root / "truncated-opus.md"
+        path.write_text(
+            "---\nsource_url: https://www.bilibili.com/opus/123\nstatus: organized\n"
+            f"original_content_sha256: {hashlib.sha256(expected.encode('utf-8')).hexdigest()}\n---\n\n"
+            "# 标题\n\n## 原文抽取\n\n"
+            f"{worker.ORIGINAL_SECTION_NOTICE}\n\n只有摘要...\n\n"
+            f"{worker.ORIGINAL_CONTENT_END_MARKER}\n",
+            encoding="utf-8",
+        )
+        errors = worker.validate_markdown_output(path, worker.TaskRequest(task="bilibili-opus"))
+        self.assertTrue(any("完整原文校验失败" in error for error in errors))
 
     def test_identical_staged_assets_are_reused_without_touching_complete_output(self):
         staged = self.root / "staged" / "assets" / "post"

@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-08-03
+
+- Advanced the app, Tauri bundle, and Worker audit version to `0.1.21` for the long-form Opus integrity fix.
+- Fixed long-form Bilibili Opus ingestion when the dynamic detail API returns only `opus.summary`: the converter now reads the authenticated server-rendered `opus-module-content`, preserves its Markdown structure and inline image order, downloads those images locally, and keeps the API result as a fallback if the page read fails.
+- Fixed a second silent-truncation path in Qwen organization. Headings inside `## 原文抽取` are no longer treated as generated section boundaries; drafts and organized notes carry an invisible original-end marker plus the localized original's SHA-256/character count, existing-note completeness checks verify the hash, and the Worker integrity gate rejects any organized output whose preserved original differs from the conversion draft.
+- Reprocessed real Opus `1231979117971243025`: the final note contains the 8,997-character original through its risk warning and disclaimer, one locally stored 1.4 MiB PNG, a matching original SHA-256, and a completed structured result with zero failures. The full frontend/build suite, 129 Python tests, and 10 Rust tests pass.
+- Built and mounted the optimized `0.1.21` Apple Silicon DMG. `hdiutil verify`, strict deep ad-hoc signature verification, arm64/version checks, changed Worker resource hashes, and the no-`env.local`/bytecode check passed. `Local Note Studio_0.1.21_aarch64.dmg` is 3,378,730 bytes with SHA-256 `2f6e5a02cb66dd4421b2ec85452f83b4f68d3b5e7b4d6548c74a25130f600eb8`; it was not copied over `/Applications` or notarized.
+
 ## 2026-07-23
 
 - Added Profile-scoped named output destinations for Agent/MCP ingestion. A Profile may map a safe identifier such as `daily_review` to the relative subdirectory `日复盘`; callers can select only the published identifier, while unknown IDs, free-form paths, absolute paths, parent traversal, malformed values, and symlink escapes are rejected before the Worker starts. The same parent Profile owns and recursively indexes the result, so no duplicate child Profile or nested index is required.

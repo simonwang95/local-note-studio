@@ -1664,6 +1664,24 @@ def markdown_frontmatter_value(markdown: str, key: str) -> str:
     return match.group(1).strip().strip('"').strip("'")
 
 
+ORIGINAL_CONTENT_END_MARKER = "<!-- local-note-studio:original-end -->"
+ORIGINAL_SECTION_NOTICE = "> 以下为转换脚本抽取的完整原文，Qwen 整理内容插入在上方，便于回看与校对。"
+
+
+def organized_original_payload(markdown: str) -> str:
+    match = re.search(r"(?m)^##\s+原文抽取\s*$\n?", markdown)
+    if not match:
+        return ""
+    content = markdown[match.end() :]
+    marker_index = content.find(ORIGINAL_CONTENT_END_MARKER)
+    if marker_index >= 0:
+        content = content[:marker_index]
+    content = content.strip()
+    if content.startswith(ORIGINAL_SECTION_NOTICE):
+        content = content[len(ORIGINAL_SECTION_NOTICE) :].lstrip()
+    return content
+
+
 def extracted_original_section(markdown: str) -> str:
     match = re.search(r"(?ms)^##\s+原文抽取\s*$\n(.+)\Z", markdown)
     if not match:
@@ -2165,6 +2183,13 @@ def validate_markdown_output(path: pathlib.Path, req: TaskRequest) -> list[str]:
         original = re.search(r"(?ms)^##\s+原文抽取\s*$\n(.+)", markdown)
         if not original or not original.group(1).strip():
             errors.append("缺少完整原文（## 原文抽取）")
+        expected_original_hash = markdown_frontmatter_value(markdown, "original_content_sha256")
+        if expected_original_hash:
+            original_payload = organized_original_payload(markdown)
+            if not original_payload:
+                errors.append("完整原文内容为空")
+            elif hashlib.sha256(original_payload.encode("utf-8")).hexdigest() != expected_original_hash:
+                errors.append("完整原文校验失败：整理后内容与转换草稿不一致")
     if req.task == "paper-quickread":
         translated = re.search(r"(?ms)^##\s+全文翻译\s*$\n(.+)", markdown)
         if not translated or not translated.group(1).strip():

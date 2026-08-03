@@ -41,6 +41,8 @@ DEFAULTS = {
 
 
 _LAST_MODEL_CALL_MONOTONIC: float | None = None
+ORIGINAL_CONTENT_END_MARKER = "<!-- local-note-studio:original-end -->"
+ORIGINAL_SECTION_NOTICE = "> 以下为转换脚本抽取的完整原文，Qwen 整理内容插入在上方，便于回看与校对。"
 
 
 def load_env_file(path: pathlib.Path) -> dict[str, str]:
@@ -336,16 +338,40 @@ def h2_section(body: str, title: str) -> str:
     return f"## {title}\n\n{content}" if content else ""
 
 
+def original_content_from_body(body: str, source_type: str) -> str:
+    """Return the complete generated original section without treating source H2s as boundaries."""
+    match = re.search(r"(?m)^##\s+原文抽取\s*$\n?", body)
+    if not match:
+        return ""
+    content = body[match.end() :]
+    marker_index = content.find(ORIGINAL_CONTENT_END_MARKER)
+    if marker_index >= 0:
+        content = content[:marker_index]
+    elif source_type == "bilibili-opus":
+        analysis = re.search(r"(?m)^##\s+图片分析\s*$", content)
+        if analysis:
+            content = content[: analysis.start()]
+    return content.strip()
+
+
+def original_payload_for_hash(body: str, source_type: str) -> str:
+    content = original_content_from_body(body, source_type)
+    if content.startswith(ORIGINAL_SECTION_NOTICE):
+        content = content[len(ORIGINAL_SECTION_NOTICE) :].lstrip()
+    return content
+
+
 def model_body_for_source(body: str, source_type: str) -> str:
     if source_type != "bilibili-opus":
         return body
-    evidence = [h2_section(body, "原文抽取"), h2_section(body, "图片分析")]
+    original = original_content_from_body(body, source_type)
+    evidence = [f"## 原文抽取\n\n{original}" if original else "", h2_section(body, "图片分析")]
     selected = "\n\n".join(part for part in evidence if part)
     return selected or body
 
 
 def source_explicitly_discusses_time_conflict(body: str) -> bool:
-    original = h2_section(body, "原文抽取")
+    original = original_content_from_body(body, "bilibili-opus")
     return any(
         marker in original
         for marker in ("时间矛盾", "时间戳错误", "年份错误", "年份笔误", "未来预设", "日期错误")
@@ -563,7 +589,11 @@ def organized_note_complete(
     if str(meta.get("status") or "") != "organized":
         return False
     if source_type == "bilibili-opus":
-        if re.search(r"(?m)^##\s+原文抽取\s*$", body) is None:
+        original = original_payload_for_hash(body, source_type)
+        if not original:
+            return False
+        expected_original_hash = str(meta.get("original_content_sha256") or "")
+        if expected_original_hash and sha256_text(original) != expected_original_hash:
             return False
         if expected_source_hash and str(meta.get("source_hash") or "") != expected_source_hash:
             return False
@@ -593,20 +623,21 @@ def original_source_section(body: str, source_type: str) -> str:
         "bilibili-opus",
     }:
         return ""
-    original = body.strip()
+    original = original_content_from_body(body, source_type)
+    used_body_fallback = not original
+    if used_body_fallback:
+        original = body.strip()
     if not original:
         return ""
-    extracted_section = h2_section(original, "原文抽取")
-    if extracted_section:
-        original = extracted_section.split("\n", 1)[1].strip()
-    if original.startswith("# "):
+    if used_body_fallback and original.startswith("# "):
         lines = original.splitlines()
         original = "\n".join(lines[1:]).lstrip()
     return "\n\n".join(
         [
             "## 原文抽取",
-            "> 以下为转换脚本抽取的完整原文，Qwen 整理内容插入在上方，便于回看与校对。",
+            ORIGINAL_SECTION_NOTICE,
             original,
+            ORIGINAL_CONTENT_END_MARKER,
         ]
     )
 
@@ -684,6 +715,9 @@ def organize_file(
         "draft_hash": draft_hash,
         "source_hash": meta.get("source_hash", ""),
     }
+    for key in ("original_content_sha256", "original_content_chars"):
+        if meta.get(key) not in (None, ""):
+            organized_meta[key] = meta[key]
     if not omit_draft_path:
         organized_meta["draft_path"] = rel(draft_path)
     for key in (
