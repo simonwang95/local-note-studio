@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-08-05
+
+- Advanced the app, Tauri bundle, and Worker audit version to `0.1.22` for consistent idempotent-batch reporting.
+- Clarified idempotent UP-Opus reruns. Fetch logs now describe temporary drafts rather than completed notes, repeated raw image-analysis JSON is replaced by one batch summary, and the organize phase states that Qwen runs only for new or incomplete notes. Existing complete notes report “无需更新（未调用 Qwen）”, while an all-existing batch ends with exact checked/skipped counts, zero model calls, and an explicit “未新增、未改动文件” result instead of an integrity warning.
+- Fixed the structured result for an all-existing UP-Opus batch: organizer skips are now added to `counts.skipped`, so five verified existing notes report `discovered=5`, `skipped=5`, `created=0`, and `updated=0` instead of the fallback `skipped=1`. The desktop status also displays the exact existing-item count.
+- Extended the same contract to local single-media and directory batches, Bilibili favorites/series, UP-video sync, and source-conversion batches. Local directory runs now count existing notes separately from created/updated outputs and emit a structured batch result; UP-video logs distinguish verified existing notes from limit/incremental/retry-policy skips; collection zero-work runs state that ASR/Qwen and file writes were not used. The frontend/build checks, shell syntax validation, 131 Python tests, and 10 Rust tests pass.
+- Built and mounted the optimized `0.1.22` Apple Silicon DMG. `hdiutil verify`, strict deep ad-hoc signature verification, arm64/version checks, changed Worker/media resource hashes, and the no-`env.local`/bytecode check passed. `Local Note Studio_0.1.22_aarch64.dmg` is 3,380,851 bytes with SHA-256 `ee37f9e24c6e41b98015f4ad17e383cbeff9367c4885dd7f9c5f74dffedf5ad1`; it was not copied over `/Applications` or notarized.
+
 ## 2026-08-03
 
 - Advanced the app, Tauri bundle, and Worker audit version to `0.1.21` for the long-form Opus integrity fix.

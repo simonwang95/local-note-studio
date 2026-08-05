@@ -7,8 +7,8 @@ The app uses a Tauri desktop shell, a thin Rust process bridge, and a packaged P
 ## Current capabilities
 
 - Three-tab desktop workspace: Configuration, Tasks, and Validation, with persistent output and log panels.
-- Bilibili single video, favorites/series, opus/charging opus, and one-UP opus batch workflows; long-form Opus posts recover the complete authenticated page body and inline images when the dynamic API exposes only a summary.
-- Web/WeChat, Word/PDF/Office/image/OCR, paper quick-read, AI-Chat JSON, local video/audio, and recursive EPUB export.
+- Bilibili single video, favorites/series, opus/charging opus, and one-UP opus batch workflows; long-form Opus posts recover the complete authenticated page body and inline images when the dynamic API exposes only a summary, while idempotent batch reruns report exact no-update counts and zero model calls for existing complete notes.
+- Web/WeChat, Word/PDF/Office/image/OCR, paper quick-read, AI-Chat JSON, local video/audio, and recursive EPUB export; repeat batches distinguish existing complete results from policy skips and report exact no-update/model-call counts.
 - Task history and recovery, deletable separate recent lists for task output directories and input sources, structured output actions, progress/cancellation, incognito mode, and editable/batch Manifest state.
 - App-managed Python 3.11 runtime with locked packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`/`ffprobe`, and Pandoc.
 - Advanced existing-Conda backend for development or users who already maintain a compatible environment.

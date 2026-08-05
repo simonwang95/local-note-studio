@@ -97,6 +97,15 @@ assert.deepEqual(
   }),
   { task: "bilibili-up-opus", source: "123", cooldown_delay: "12" },
 );
+assert.equal(
+  history.noChangesStatusLabel({ task: "bilibili-up-opus", status: "no_changes", outputs: [], output_dir: "/tmp", counts: { skipped: 5 }, details: { existing_complete: 5 } }),
+  "无需更新（已有 5 项完整内容）",
+);
+assert.equal(
+  history.noChangesStatusLabel({ task: "bilibili-up-video", status: "no_changes", outputs: [], output_dir: "/tmp", counts: { skipped: 2 }, details: { existing_complete: 1 } }),
+  "无需更新（本次跳过 2 项）",
+);
+assert.equal(history.noChangesStatusLabel(null), "无需更新（没有新增内容）");
 assert.equal(shell.resolveAppTab("validation"), "validation");
 assert.equal(shell.resolveAppTab("unknown"), "config");
 assert.equal(shell.adjacentAppTab("validation", 1), "config");

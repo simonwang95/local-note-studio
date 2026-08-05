@@ -10,6 +10,7 @@ import {
   loadTaskHistory,
   loadRecentValues,
   migrateRuntimePreference,
+  noChangesStatusLabel,
   filterTaskHistory,
   pathDialogDefault,
   rememberRecentValue,
@@ -949,7 +950,7 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): 
         : taskResult?.status === "partial_failed"
           ? "部分完成"
           : taskResult?.status === "no_changes"
-            ? "无新增内容"
+            ? noChangesStatusLabel(taskResult)
             : "任务完成",
     );
   } catch (error) {

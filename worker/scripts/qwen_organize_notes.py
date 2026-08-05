@@ -871,11 +871,14 @@ def main() -> int:
                     str(meta.get("source_hash") or "") if source_type == "bilibili-opus" else "",
                 ):
                     skipped += 1
-                    print(f"{progress_label} 已存在完整笔记，跳过：{planned_output.name}", flush=True)
+                    print(
+                        f"{progress_label} 已存在完整笔记，无需更新（未调用 Qwen）：{planned_output.name}",
+                        flush=True,
+                    )
                     continue
                 if source_type != "bilibili-opus" and manifest_item is not None and manifest_item.get("organized_status") == "organized":
                     skipped += 1
-                    print(f"{progress_label} 已整理，跳过：{planned_output.name}", flush=True)
+                    print(f"{progress_label} 已有完整整理结果，无需更新（未调用 Qwen）：{planned_output.name}", flush=True)
                     continue
             if organized > 0 and cooldown_delay > 0:
                 wait_with_progress(cooldown_delay, index, len(sources))
@@ -923,6 +926,10 @@ def main() -> int:
     else:
         print("manifest disabled (incognito)", flush=True)
     print(f"整理阶段完成：成功 {organized}，跳过 {skipped}，失败 {failed}。")
+    if skipped and not failed:
+        print(f"[无需更新] {skipped} 篇已有完整笔记保持不变。", flush=True)
+    if organized == 0 and skipped and failed == 0:
+        print("[模型调用] 0 次；本批没有新增或更新文件。", flush=True)
     return 1 if failed else 0
 
 

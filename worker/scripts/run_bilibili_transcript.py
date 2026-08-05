@@ -338,6 +338,32 @@ def extract_retryable_existing_markdown_paths(stdout: str) -> list[str]:
     return paths
 
 
+def extract_skipped_existing_markdown_paths(stdout: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    marker = "SKIPPED_EXISTING_MARKDOWN_PATH:"
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(marker):
+            continue
+        path = stripped[len(marker):].strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def emit_local_batch_result(total: int, changed: int, skipped: int, failed: int) -> None:
+    print(
+        "LOCAL_BATCH_RESULT_JSON:"
+        + json.dumps(
+            {"total": total, "changed": changed, "skipped": skipped, "failed": failed},
+            ensure_ascii=False,
+        )
+    )
+
+
 def load_manifest(path: pathlib.Path) -> dict[str, object]:
     if not path.exists():
         return {"items": []}
@@ -633,7 +659,12 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
         if paths:
             print(f"检测到已有但未完成的笔记，保留转写并重试 summary-only: {paths[-1]}")
         else:
-            print("未从输出中识别到 Markdown 路径，跳过 summary-only")
+            skipped_paths = extract_skipped_existing_markdown_paths(output)
+            if skipped_paths:
+                print("[无需更新] 已有同名完整笔记；未调用 ASR 或 Qwen，正式文件保持不变。")
+                emit_local_batch_result(1, 0, 1, 0)
+            else:
+                print("未从输出中识别到 Markdown 路径，跳过 summary-only")
             return 0
 
     postprocess_video_notes(paths[-1:], cfg)
@@ -642,6 +673,7 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
     print("\nsummary:", " ".join(summary_command))
     summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=36000)
     postprocess_video_notes(paths[-1:], cfg)
+    emit_local_batch_result(1, 1 if summary_code == 0 else 0, 0, 1 if summary_code else 0)
     return summary_code
 
 

@@ -30,6 +30,24 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.22 internal Apple Silicon artifact (2026-08-05)
+
+- Version: `0.1.22`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.22_aarch64.dmg`
+- Size: `3,380,851 bytes`
+- SHA-256: `ee37f9e24c6e41b98015f4ad17e383cbeff9367c4885dd7f9c5f74dffedf5ad1`
+- Build type: optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+This release makes idempotent batch outcomes explicit and accurate across UP-Opus, local single-media and directory runs, Bilibili favorites/series, UP-video sync, and document/web conversion batches. Temporary Opus drafts no longer look like completed formal notes; repeated raw image-analysis JSON becomes one batch summary; existing complete notes say that Qwen or ASR was not called; and zero-change completion states distinguish verified existing outputs from items deferred by batch limits, incremental state, or failure-retry policy.
+
+Structured results now use the real discovered/skipped counts instead of forcing `skipped=1`. A five-note all-existing Opus run reports `discovered=5`, `skipped=5`, `created=0`, and `updated=0`. Local media directories separately report changed, existing, and failed items, while the desktop status presents the exact no-update or policy-skip count.
+
+The full release check passed the frontend production and compatibility gates, 131 Python tests, 10 Rust tests, shell syntax validation, and the package-consistency audit. The optimized app was ad-hoc signed before the compressed HFS+ DMG was generated. `hdiutil verify` passed; the DMG was mounted read-only, and the mounted app passed strict deep signature verification, reported an arm64 executable and both `0.1.22` bundle versions, matched the source SHA-256 for the Worker, automation version, Opus conversion/organization, and local-media runner/shell resources, and contained no `env.local`, Python bytecode, or `__pycache__`. The artifact was not copied over `/Applications` or notarized.
+
+Developer ID signing, notarization, Intel/universal packaging, and the independent clean-Mac matrix remain separate release gates.
+
 ## 0.1.21 internal Apple Silicon artifact (2026-08-03)
 
 - Version: `0.1.21`

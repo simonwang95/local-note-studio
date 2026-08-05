@@ -252,7 +252,7 @@ class LockAndHistoryTests(unittest.TestCase):
             self.assertNotIn("cookie-secret", serialized)
             self.assertNotIn("api_key", serialized)
             self.assertNotIn("cookies", serialized)
-            self.assertEqual(store.list()[0]["worker_version"], "0.1.21")
+            self.assertEqual(store.list()[0]["worker_version"], "0.1.22")
 
     def test_redaction_covers_provider_error_key_format(self):
         message = "Incorrect API key provided: sk-live-secret123456 url=https://example.com/?signature=signed-value"
@@ -450,10 +450,15 @@ class UpVideoTests(unittest.TestCase):
             next_result = core.TaskResult("incremental", "agent", req.task, "completed", core.utc_now())
             with mock.patch.object(worker, "discover_bilibili_up_videos", return_value=items), mock.patch.object(
                 worker, "existing_video_output", side_effect=[note, None]
-            ), mock.patch.object(worker, "run_command") as run_command:
+            ), mock.patch.object(worker, "run_command") as run_command, mock.patch(
+                "sys.stdout", new_callable=io.StringIO
+            ) as stdout:
                 worker.run_bilibili_up_videos(req, {}, next_result)
             run_command.assert_not_called()
             self.assertEqual(next_result.counts["skipped"], 2)
+            self.assertIn("无需更新（未调用 ASR/Qwen）", stdout.getvalue())
+            self.assertIn("[视频批量] 1 个已有完整结果，无需更新", stdout.getvalue())
+            self.assertIn("另有 1 个按增量、上限或失败重试策略跳过", stdout.getvalue())
 
 
 class ContractAndMcpTests(unittest.TestCase):
@@ -709,17 +714,24 @@ class ContractAndMcpTests(unittest.TestCase):
     def test_worker_redacts_secret_bearing_child_logs(self):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
             output = worker.run_process(
-                [sys.executable, "-c", "print('API_KEY=super-secret SESSDATA=cookie-secret')"],
+                [
+                    sys.executable,
+                    "-c",
+                    "print('API_KEY=super-secret SESSDATA=cookie-secret'); "
+                    "print('OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:{\"mode\":\"off\"}')",
+                ],
                 os.environ.copy(),
             )
         self.assertNotIn("super-secret", output + stdout.getvalue())
         self.assertNotIn("cookie-secret", output + stdout.getvalue())
         self.assertIn("<redacted>", output)
+        self.assertIn("OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:", output)
+        self.assertNotIn("OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:", stdout.getvalue())
 
     def test_no_changes_contract_and_legacy_request_json_remain_compatible(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {"LOCAL_NOTE_STUDIO_STATE_DIR": str(pathlib.Path(temp) / "state")}):
             request = json.dumps({"task": "bilibili-url", "source": "https://www.bilibili.com/video/BVNONE/", "output_dir": str(pathlib.Path(temp) / "notes")})
-            with mock.patch.object(worker, "run_command", return_value=""), mock.patch.object(
+            with mock.patch.object(worker, "run_process", return_value=""), mock.patch.object(
                 worker, "command_for", return_value=["fixture"]
             ), mock.patch.object(worker, "validate_task_outputs", return_value=None), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
                 self.assertEqual(worker.main(["--request-json", request]), 0)

@@ -695,6 +695,7 @@ transcribe_local_file() {
     local file_path="$1"
     local file_index="${2:-}"
     local file_total="${3:-}"
+    LOCAL_ITEM_STATUS="processing"
 
     cleanup_temp
 
@@ -745,7 +746,8 @@ transcribe_local_file() {
         EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
     fi
     if [ -n "$EXISTING" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
-        echo "   ⏭️  $file_label: 已存在转录文件: $(basename "$EXISTING")，跳过 ASR"
+        LOCAL_ITEM_STATUS="skipped"
+        echo "   ⏭️  $file_label: 已有同名笔记，无需重复转录（未调用 ASR）: $(basename "$EXISTING")"
         echo "SKIPPED_EXISTING_MARKDOWN_PATH:$EXISTING"
         return 0
     fi
@@ -763,6 +765,7 @@ transcribe_local_file() {
             local subtitle_output="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
             echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
             write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "本地SRT字幕" "$subtitle_text"
+            LOCAL_ITEM_STATUS="created"
             echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
             echo "GENERATED_MARKDOWN_PATH:$subtitle_output"
             return 0
@@ -852,6 +855,7 @@ transcribe_local_file() {
     echo "   📝 $file_label: 写入 Markdown: $(basename "$OUTPUT_FILE")"
     write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
 
+    LOCAL_ITEM_STATUS="created"
     echo "   ✅ $file_label: 转录完成 → $(basename "$OUTPUT_FILE")"
     echo "GENERATED_MARKDOWN_PATH:$OUTPUT_FILE"
 }
@@ -1004,13 +1008,18 @@ if [ -n "$LOCAL_DIR" ]; then
     echo "📊 找到 $count 个媒体文件"
     echo ""
 
-    success=0 fail=0 current=0
+    success=0 skipped=0 fail=0 current=0
     while IFS= read -r f; do
         current=$((current + 1))
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         if transcribe_local_file "$f" "$current" "$count"; then
-            success=$((success + 1))
-            echo "✅ [$current/$count] $(basename "$f") 处理成功"
+            if [ "$LOCAL_ITEM_STATUS" = "skipped" ]; then
+                skipped=$((skipped + 1))
+                echo "⏭️  [$current/$count] $(basename "$f") 已有笔记，无需更新"
+            else
+                success=$((success + 1))
+                echo "✅ [$current/$count] $(basename "$f") 新建/更新完成"
+            fi
         else
             fail=$((fail + 1))
             echo "❌ [$current/$count] $(basename "$f") 处理失败"
@@ -1019,7 +1028,11 @@ if [ -n "$LOCAL_DIR" ]; then
 
     echo ""
     echo "================================================================================"
-    echo "📊 批量转录完成: 成功 $success 个, 失败 $fail 个"
+    echo "📊 批量转录完成: 新建/更新 $success 个, 无需更新 $skipped 个, 失败 $fail 个"
+    if [ "$success" -eq 0 ] && [ "$skipped" -gt 0 ] && [ "$fail" -eq 0 ]; then
+        echo "[无需更新] $skipped 个已有笔记保持不变；本批未调用 ASR 或 Qwen。"
+    fi
+    printf 'LOCAL_BATCH_RESULT_JSON:{"total":%d,"changed":%d,"skipped":%d,"failed":%d}\n' "$count" "$success" "$skipped" "$fail"
     echo "================================================================================"
     exit $((fail > 0 ? 1 : 0))
 fi

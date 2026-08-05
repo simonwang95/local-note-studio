@@ -1347,6 +1347,7 @@ def run_bilibili_up_videos(req: TaskRequest, env: dict[str, str], result: TaskRe
     result.manifest_path = str(manifest_path)
     result.counts["discovered"] += len(discovered)
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    existing_count = 0
     for video in discovered:
         record = find_up_sync_item(manifest, video["bvid"])
         if record is None:
@@ -1369,6 +1370,11 @@ def run_bilibili_up_videos(req: TaskRequest, env: dict[str, str], result: TaskRe
                 completed_at=record.get("completed_at") or utc_now(),
             )
             result.counts["skipped"] += 1
+            existing_count += 1
+            print(
+                f"[视频] 已存在完整笔记，无需更新（未调用 ASR/Qwen）：{video['bvid']} {video['title']}",
+                flush=True,
+            )
             continue
         if record.get("status") == "completed":
             record.update(status="failed", organized_status="failed", error_code="OUTPUT_MISSING", error="completed output is missing")
@@ -1408,6 +1414,18 @@ def run_bilibili_up_videos(req: TaskRequest, env: dict[str, str], result: TaskRe
         candidates = candidates[:limit]
         result.counts["skipped"] += len(deferred)
     save_up_sync_manifest(manifest_path, manifest)
+
+    if existing_count:
+        increment_existing_complete(result, existing_count)
+    if not candidates and result.counts["skipped"]:
+        if existing_count:
+            print(
+                f"[视频批量] {existing_count} 个已有完整结果，无需更新；本批未调用 ASR/Qwen。",
+                flush=True,
+            )
+        policy_skipped = result.counts["skipped"] - existing_count
+        if policy_skipped > 0:
+            print(f"[视频批量] 另有 {policy_skipped} 个按增量、上限或失败重试策略跳过。", flush=True)
 
     attempted = 0
     succeeded = 0
@@ -1483,7 +1501,7 @@ def run_bilibili_up_sync(req: TaskRequest, env: dict[str, str], result: TaskResu
         opus_req = replace(req, task="bilibili-up-opus")
         opus_before = output_snapshot(req.output_dir)
         run_convert_and_organize_task(opus_req, env, result)
-        validate_task_outputs(opus_req, opus_before)
+        validate_task_outputs(opus_req, opus_before, result)
     if "video" in content_types:
         try:
             run_bilibili_up_videos(req, env, result)
@@ -1548,25 +1566,27 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
             try:
                 output = run_process(convert_command, env)
             except RuntimeError as exc:
-                match = re.search(r"抓取阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", str(exc))
-                if req.task != "bilibili-up-opus" or result is None or not match or int(match.group(2)) == 0:
+                summary = up_opus_draft_summary(str(exc))
+                if req.task != "bilibili-up-opus" or result is None or not summary or summary[1] == 0:
                     raise
-                converted_count, skipped_count, failed_count = (int(value) for value in match.groups())
+                converted_count, skipped_count, failed_count = summary
                 result.counts["discovered"] += converted_count + skipped_count + failed_count
                 result.counts["skipped"] += skipped_count
+                increment_existing_complete(result, skipped_count)
                 result.counts["failed"] += failed_count
                 result.status = "partial_failed"
                 result.warnings.append("new UP opus items failed while previously complete items were skipped")
                 return ""
         analysis_cooldown_remaining = record_opus_image_analysis_summaries(output, result, req.cooldown_delay)
-        if result is not None and req.task == "bilibili-up-opus":
-            match = re.search(r"抓取阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", output)
-            if match:
-                converted_count, skipped_count, failed_count = (int(value) for value in match.groups())
+        if result is not None:
+            summary = conversion_stage_summary(output)
+            if summary:
+                converted_count, skipped_count, failed_count = summary
                 result.counts["discovered"] += converted_count + skipped_count + failed_count
                 result.counts["skipped"] += skipped_count
+                increment_existing_complete(result, skipped_count)
                 result.counts["failed"] += failed_count
-                if failed_count and (converted_count or skipped_count):
+                if req.task == "bilibili-up-opus" and failed_count and (converted_count or skipped_count):
                     result.status = "partial_failed"
         if req.task == "bilibili-up-opus" or resumed_recovery:
             converted_paths = [
@@ -1586,7 +1606,10 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
         if recovery_dir.exists():
             shutil.rmtree(recovery_dir)
         shutil.copytree(staging_dir, recovery_dir)
-        print(f"[恢复点] 转换草稿已暂存；若 Qwen 失败，可从任务历史只重试整理步骤：{recovery_dir}")
+        print(
+            f"[临时恢复点] 草稿已暂存；全部整理成功或确认无需更新后会自动删除。"
+            f"若 Qwen 失败，可从任务历史只重试整理步骤：{recovery_dir}"
+        )
 
         organize_command = [*python_cmd(req, SCRIPTS_DIR / "qwen_organize_notes.py")]
         for converted_path in converted_paths:
@@ -1597,24 +1620,34 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
         if req.output_filename and req.task != "bilibili-up-opus":
             organize_command.extend(["--output-filename", req.output_filename])
         print("")
-        print(f"开始 Qwen 整理：共 {len(converted_paths)} 篇，正式输出到 {req.output_dir}")
+        print(
+            f"开始完整性比对：共 {len(converted_paths)} 篇；"
+            f"仅对新增或不完整笔记调用 Qwen，正式输出目录为 {req.output_dir}"
+        )
         if analysis_cooldown_remaining > 0:
             wait_for_adjacent_model_call(analysis_cooldown_remaining, "图片分析与正式整理之间")
         organize_before = output_snapshot(req.output_dir)
         try:
-            run_process(organize_command, env)
+            organize_output = run_process(organize_command, env)
         except RuntimeError as exc:
             if req.task != "bilibili-up-opus" or not changed_outputs(req.output_dir, organize_before):
                 raise
             promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
-            match = re.search(r"整理阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", str(exc))
-            failed_count = int(match.group(3)) if match else 1
+            summary = organize_stage_summary(str(exc))
+            skipped_count = summary[1] if summary else 0
+            failed_count = summary[2] if summary else 1
             if result is not None:
+                result.counts["skipped"] += skipped_count
+                increment_existing_complete(result, skipped_count)
                 result.counts["failed"] += failed_count
                 result.status = "partial_failed"
                 result.warnings.append("some UP opus items failed during Qwen organization; recovery drafts were retained")
             print("[部分完成] 已保留成功整理的动态和失败项恢复点；可使用 retry-failed 重试。", file=sys.stderr, flush=True)
         else:
+            summary = organize_stage_summary(organize_output)
+            if result is not None and summary:
+                result.counts["skipped"] += summary[1]
+                increment_existing_complete(result, summary[1])
             promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
             shutil.rmtree(recovery_dir, ignore_errors=True)
 
@@ -2080,7 +2113,26 @@ def finalize_success_result(
     result.counts["updated"] += sum(1 for path in outputs if path in before)
     if processing_task and not outputs and not req.dry_run and result.status == "completed":
         result.status = "no_changes"
-        result.counts["skipped"] = max(1, result.counts.get("skipped", 0))
+    if result.status == "no_changes":
+        checked = max(result.counts.get("discovered", 0), result.counts.get("skipped", 0))
+        skipped = result.counts.get("skipped", 0)
+        existing_complete = min(skipped, parse_int(result.details.get("existing_complete"), 0))
+        if checked > 0:
+            if skipped > 0 and existing_complete == skipped:
+                print(
+                    f"[任务结果] 无需更新：已检查 {checked} 项，"
+                    f"其中 {skipped} 项已有完整结果；未新增、未改动文件。"
+                )
+            elif skipped > 0:
+                policy_skipped = skipped - existing_complete
+                print(
+                    f"[任务结果] 无需更新：已检查 {checked} 项，已有完整结果 {existing_complete} 项，"
+                    f"按批量策略跳过 {policy_skipped} 项；未新增、未改动文件。"
+                )
+            else:
+                print(f"[任务结果] 无需更新：已检查 {checked} 项，没有发现需要处理的新内容。")
+        else:
+            print("[任务结果] 无需更新：本次没有新增内容，也没有改动已有文件。")
     if result.status == "partial_failed":
         result.retryable = True
         if result.error is None:
@@ -2197,12 +2249,26 @@ def validate_markdown_output(path: pathlib.Path, req: TaskRequest) -> list[str]:
     return errors
 
 
-def validate_task_outputs(req: TaskRequest, before: dict[pathlib.Path, tuple[int, int]]) -> None:
+def validate_task_outputs(
+    req: TaskRequest,
+    before: dict[pathlib.Path, tuple[int, int]],
+    result: TaskResult | None = None,
+) -> None:
     if req.dry_run or not req.output_dir:
         return
     outputs = changed_outputs(req.output_dir, before)
     if not outputs:
-        print("[完整性 WARN] 本次没有新增或更新输出（可能全部命中跳过策略）。")
+        skipped = result.counts.get("skipped", 0) if result is not None else 0
+        existing_complete = (
+            min(skipped, parse_int(result.details.get("existing_complete"), 0)) if result is not None else 0
+        )
+        if skipped > 0 and existing_complete == skipped:
+            unit = "篇" if req.task in {"bilibili-opus", "bilibili-up-opus", "web-url"} else "项"
+            print(f"[完整性 OK] {skipped} {unit}已有完整结果，无需更新；正式文件保持不变。")
+        elif skipped > 0:
+            print(f"[完整性 INFO] 本次未生成新文件；按批量或重试策略跳过 {skipped} 项，已有文件未被改动。")
+        else:
+            print("[完整性 INFO] 本次没有新增或更新文件；已有文件未被改动。")
         return
     failures: list[str] = []
     for path in outputs:
@@ -2241,6 +2307,8 @@ def run_process(command: list[str], env: dict[str, str]) -> str:
             for line in process.stdout:
                 line = redact_text(line)
                 lines.append(line)
+                if line.startswith(("OPUS_IMAGE_ANALYSIS_SUMMARY_JSON:", "LOCAL_BATCH_RESULT_JSON:")):
+                    continue
                 sys.stdout.write(line)
                 sys.stdout.flush()
         returncode = process.wait()
@@ -2284,6 +2352,78 @@ def extract_converted_paths(output: str) -> list[str]:
         seen.add(path)
         paths.append(path)
     return paths
+
+
+def up_opus_draft_summary(output: str) -> tuple[int, int, int] | None:
+    match = re.search(
+        r"(?:草稿准备完成：生成|抓取阶段完成：成功)\s+(\d+)，(?:源级)?跳过\s+(\d+)，失败\s+(\d+)",
+        output,
+    )
+    return tuple(int(value) for value in match.groups()) if match else None
+
+
+def conversion_stage_summary(output: str) -> tuple[int, int, int] | None:
+    opus_summary = up_opus_draft_summary(output)
+    if opus_summary:
+        return opus_summary
+    match = re.search(r"done converted=(\d+) skipped=(\d+) failed=(\d+)", output)
+    return tuple(int(value) for value in match.groups()) if match else None
+
+
+def organize_stage_summary(output: str) -> tuple[int, int, int] | None:
+    match = re.search(r"整理阶段完成：成功\s+(\d+)，跳过\s+(\d+)，失败\s+(\d+)", output)
+    return tuple(int(value) for value in match.groups()) if match else None
+
+
+def increment_existing_complete(result: TaskResult, count: int) -> None:
+    if count <= 0:
+        return
+    result.details["existing_complete"] = max(0, parse_int(result.details.get("existing_complete"), 0)) + count
+
+
+def record_batch_task_summaries(output: str, result: TaskResult, req: TaskRequest) -> None:
+    for line in output.splitlines():
+        if line.startswith("LOCAL_BATCH_RESULT_JSON:"):
+            try:
+                payload = json.loads(line.split(":", 1)[1])
+            except ValueError:
+                continue
+            total = max(0, parse_int(payload.get("total"), 0))
+            changed = max(0, parse_int(payload.get("changed"), 0))
+            skipped = max(0, parse_int(payload.get("skipped"), 0))
+            failed = max(0, parse_int(payload.get("failed"), 0))
+            result.counts["discovered"] += total
+            result.counts["skipped"] += skipped
+            increment_existing_complete(result, skipped)
+            result.details["local_media_batch"] = {
+                "total": total,
+                "changed": changed,
+                "skipped": skipped,
+                "failed": failed,
+            }
+            print(
+                f"[本地媒体] 已检查 {total} 个：新建/更新 {changed}，无需更新 {skipped}，失败 {failed}。",
+                flush=True,
+            )
+            continue
+        if line.startswith("BATCH_RESULT_JSON:") and req.task == "bilibili-favorite":
+            try:
+                payload = json.loads(line.split(":", 1)[1])
+            except ValueError:
+                continue
+            total = max(0, parse_int(payload.get("total"), 0))
+            success = max(0, parse_int(payload.get("success"), 0))
+            failed = max(0, parse_int(payload.get("failed"), 0))
+            result.counts["discovered"] += total
+            result.counts["failed"] += failed
+            result.details["video_batch"] = {"total": total, "success": success, "failed": failed}
+            if total == 0:
+                print("[视频批量] 没有新视频或失败项需要处理；未调用 ASR/Qwen，未改动文件。", flush=True)
+            else:
+                print(f"[视频批量] 已处理 {total} 个：完成 {success}，失败 {failed}。", flush=True)
+            if failed:
+                result.status = "partial_failed"
+                result.warnings.append("some collection videos failed; use retry-failed after correcting the cause")
 
 
 def opus_image_analysis_summaries(output: str) -> list[dict[str, Any]]:
@@ -2340,6 +2480,19 @@ def record_opus_image_analysis_summaries(
                 clean = redact_text(str(warning))
                 if clean and clean not in result.warnings:
                     result.warnings.append(clean)
+    mode = details["mode"] if isinstance(details["mode"], str) else "/".join(details["mode"])
+    if mode == "off":
+        print(
+            f"[图片分析] 已关闭；{details['posts']} 篇图文共检测到 {details['images']} 张正文图片，未调用模型。",
+            flush=True,
+        )
+    else:
+        print(
+            f"[图片分析] 模式 {mode}：{details['posts']} 篇、{details['images']} 张图片，"
+            f"已分析 {details['analyzed']}，缓存命中 {details['cache_hits']}，"
+            f"模型调用 {details['model_calls']}，失败 {details['failed']}。",
+            flush=True,
+        )
     effective_cooldown = (
         float(cooldown_delay)
         if cooldown_delay >= 0
@@ -2545,7 +2698,9 @@ def execute_request(req: TaskRequest, result: TaskResult) -> None:
         result.finish()
         return
     if req.task == "refresh-bilibili-cookies":
-        sys.stdout.write(run_command(command_for(req), env, req.dry_run))
+        output = run_command(command_for(req), env, req.dry_run)
+        if req.dry_run:
+            sys.stdout.write(output)
         result.finish()
         return
     if req.task in {"bilibili-up-video", "bilibili-up-sync"}:
@@ -2555,12 +2710,16 @@ def execute_request(req: TaskRequest, result: TaskResult) -> None:
     before = output_snapshot(req.output_dir)
     if req.task in {"web-url", "bilibili-opus", "bilibili-up-opus", "source-file", "ai-chat"}:
         sys.stdout.write(run_convert_and_organize_task(req, env, result))
-        validate_task_outputs(req, before)
+        validate_task_outputs(req, before, result)
         finalize_success_result(result, req, before, processing_task=True)
         return
     command = command_for(req)
-    sys.stdout.write(run_command(command, env, req.dry_run))
-    validate_task_outputs(req, before)
+    if req.dry_run:
+        sys.stdout.write(run_command(command, env, True))
+    else:
+        output = run_process(command, env)
+        record_batch_task_summaries(output, result, req)
+    validate_task_outputs(req, before, result)
     finalize_success_result(result, req, before, processing_task=True)
 
 

@@ -51,6 +51,60 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertTrue(req.retry_failed)
         self.assertFalse(req.keep_original_subtitles)
 
+    def test_up_opus_existing_notes_report_exact_no_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            output_dir = root / "notes"
+            output_dir.mkdir()
+            state_dir = root / "state"
+            req = worker.TaskRequest(
+                task="bilibili-up-opus",
+                source="https://space.bilibili.com/1420210197",
+                output_dir=str(output_dir),
+                favorite_limit=5,
+            )
+            result = worker.TaskResult(
+                "existing-opus",
+                "gui",
+                req.task,
+                "completed",
+                worker.utc_now(),
+                output_dir=req.output_dir,
+            )
+            call_count = 0
+
+            def fake_run_process(command, _env):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    staging_dir = pathlib.Path(command[command.index("--output-dir") + 1])
+                    for index in range(5):
+                        (staging_dir / f"draft-{index}.md").write_text(f"# 草稿 {index}\n", encoding="utf-8")
+                    return "草稿准备完成：生成 5，源级跳过 0，失败 0；尚未改动正式笔记。\n"
+                return (
+                    "整理阶段完成：成功 0，跳过 5，失败 0。\n"
+                    "[无需更新] 5 篇已有完整笔记保持不变。\n"
+                    "[模型调用] 0 次；本批没有新增或更新文件。\n"
+                )
+
+            with (
+                mock.patch.object(worker, "build_env", return_value={"LOCAL_NOTE_STUDIO_STATE_DIR": str(state_dir)}),
+                mock.patch.object(worker, "run_process", side_effect=fake_run_process),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                worker.execute_request(req, result)
+
+            log = stdout.getvalue()
+            self.assertEqual(result.status, "no_changes")
+            self.assertEqual(result.counts["discovered"], 5)
+            self.assertEqual(result.counts["skipped"], 5)
+            self.assertEqual(result.counts["created"], 0)
+            self.assertEqual(result.counts["updated"], 0)
+            self.assertIn("开始完整性比对：共 5 篇；仅对新增或不完整笔记调用 Qwen", log)
+            self.assertIn("[完整性 OK] 5 篇已有完整结果，无需更新；正式文件保持不变。", log)
+            self.assertIn("[任务结果] 无需更新：已检查 5 项，其中 5 项已有完整结果", log)
+            self.assertNotIn("完整性 WARN", log)
+
     def test_raw_subtitles_default_off_and_can_be_explicitly_enabled(self):
         self.assertFalse(worker.TaskRequest(task="").keep_original_subtitles)
         self.assertFalse(worker.TaskRequest.from_mapping({}).keep_original_subtitles)
@@ -348,7 +402,7 @@ class RequestAndCommandContractTests(unittest.TestCase):
             (profile / "Network" / "Cookies").touch()
             request = json.dumps({"task": "refresh-bilibili-cookies", "browser_profile": str(profile)})
             with mock.patch.dict(os.environ, {"LOCAL_NOTE_STUDIO_STATE_DIR": str(pathlib.Path(temp_dir) / "state")}):
-                with mock.patch.object(worker, "run_command", return_value="refreshed\n"):
+                with mock.patch.object(worker, "run_command", side_effect=lambda *_args: print("refreshed") or ""):
                     with mock.patch.object(worker, "output_snapshot", side_effect=AssertionError("unexpected output scan")):
                         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
                             self.assertEqual(worker.main(["--request-json", request]), 0)
@@ -1629,11 +1683,38 @@ class BatchAndDiagnosticsTests(unittest.TestCase):
             mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
             mock.patch.object(runner, "stream_command", return_value=(0, skipped_output)) as stream,
             mock.patch.object(runner, "postprocess_video_notes") as postprocess,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
         self.assertEqual(code, 0)
         self.assertEqual(stream.call_count, 1)
         postprocess.assert_not_called()
+        self.assertIn("[无需更新] 已有同名完整笔记", stdout.getvalue())
+        result_line = next(
+            line for line in stdout.getvalue().splitlines() if line.startswith("LOCAL_BATCH_RESULT_JSON:")
+        )
+        self.assertEqual(
+            json.loads(result_line.split(":", 1)[1]),
+            {"total": 1, "changed": 0, "skipped": 1, "failed": 0},
+        )
+
+    def test_local_media_batch_summary_updates_worker_counts(self):
+        req = worker.TaskRequest(task="local-video", output_dir="/tmp/notes")
+        result = worker.TaskResult(
+            "local-existing",
+            "gui",
+            req.task,
+            "completed",
+            worker.utc_now(),
+            output_dir=req.output_dir,
+        )
+        output = 'LOCAL_BATCH_RESULT_JSON:{"total":3,"changed":0,"skipped":3,"failed":0}\n'
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            worker.record_batch_task_summaries(output, result, req)
+        self.assertEqual(result.counts["discovered"], 3)
+        self.assertEqual(result.counts["skipped"], 3)
+        self.assertEqual(result.details["local_media_batch"]["changed"], 0)
+        self.assertIn("[本地媒体] 已检查 3 个：新建/更新 0，无需更新 3，失败 0。", stdout.getvalue())
 
     def test_skipped_incomplete_local_file_retries_summary_from_preserved_transcript(self):
         with tempfile.TemporaryDirectory() as temp:

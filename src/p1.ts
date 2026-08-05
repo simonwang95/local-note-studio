@@ -244,6 +244,14 @@ export function taskResultFromLog(text: string): TaskResult | null {
   return structuredLine<TaskResult>(text, "TASK_RESULT_JSON:");
 }
 
+export function noChangesStatusLabel(result: TaskResult | null): string {
+  const skipped = Number(result?.counts?.skipped || 0);
+  const existing = Math.min(skipped, Number(result?.details?.existing_complete || 0));
+  if (skipped > 0 && existing === skipped) return `无需更新（已有 ${skipped} 项完整内容）`;
+  if (skipped > 0) return `无需更新（本次跳过 ${skipped} 项）`;
+  return "无需更新（没有新增内容）";
+}
+
 export function progressFromLine(text: string): ProgressEvent | null {
   return structuredLine<ProgressEvent>(text, "PROGRESS_JSON:");
 }

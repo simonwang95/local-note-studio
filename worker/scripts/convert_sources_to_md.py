@@ -3808,7 +3808,7 @@ def main() -> int:
             update_manifest(manifest, item)
             converted += 1
             if args.bilibili_up_opus:
-                print(f"[抓取 {url_index}/{len(urls)}] 完成：{out_path.name}")
+                print(f"[抓取 {url_index}/{len(urls)}] 草稿已准备：{out_path.name}")
             else:
                 print(f"converted {url} -> {rel(out_path)}")
         except Exception as exc:
@@ -3838,7 +3838,10 @@ def main() -> int:
     if manifest_enabled:
         save_manifest(manifest_path, manifest)
     if args.bilibili_up_opus:
-        print(f"抓取阶段完成：成功 {converted}，跳过 {skipped}，失败 {failed}。")
+        print(
+            f"草稿准备完成：生成 {converted}，源级跳过 {skipped}，失败 {failed}；"
+            "尚未改动正式笔记。"
+        )
     else:
         manifest_label = rel(manifest_path) if manifest_enabled else "disabled (incognito)"
         print(f"done converted={converted} skipped={skipped} failed={failed} manifest={manifest_label}")

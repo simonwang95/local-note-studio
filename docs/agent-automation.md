@@ -1,6 +1,6 @@
 # Agent 自动化
 
-Local Note Studio 0.1.21 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
+Local Note Studio 0.1.22 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
 
 ## 安全边界
 
