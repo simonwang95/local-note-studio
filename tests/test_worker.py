@@ -101,9 +101,91 @@ class RequestAndCommandContractTests(unittest.TestCase):
             self.assertEqual(result.counts["created"], 0)
             self.assertEqual(result.counts["updated"], 0)
             self.assertIn("开始完整性比对：共 5 篇；仅对新增或不完整笔记调用 Qwen", log)
+            self.assertIn("[临时恢复点] 本批全部处理完成，临时草稿与恢复点已清理。", log)
             self.assertIn("[完整性 OK] 5 篇已有完整结果，无需更新；正式文件保持不变。", log)
             self.assertIn("[任务结果] 无需更新：已检查 5 项，其中 5 项已有完整结果", log)
             self.assertNotIn("完整性 WARN", log)
+
+    def test_up_opus_space_logs_candidates_instead_of_formal_new_notes(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "has_more": False,
+                "items": [
+                    {
+                        "id_str": "123",
+                        "modules": {"module_dynamic": {"major": {"type": "MAJOR_TYPE_OPUS"}}},
+                    },
+                    {
+                        "id_str": "456",
+                        "modules": {"module_dynamic": {"major": {"type": "MAJOR_TYPE_OPUS"}}},
+                    },
+                ],
+            },
+        }
+        with (
+            mock.patch.object(converter, "bilibili_cookie_path", return_value=pathlib.Path("cookies.txt")),
+            mock.patch.object(converter, "ensure_bilibili_cookie_login"),
+            mock.patch.object(converter, "fetch_json_with_cookies", return_value=payload),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            urls = converter.fetch_bilibili_space_opus_urls("1420210197", {}, limit=2)
+
+        self.assertEqual(
+            urls,
+            ["https://www.bilibili.com/opus/123", "https://www.bilibili.com/opus/456"],
+        )
+        self.assertIn("收集到候选图文 2 条，达到处理上限 2 条", stdout.getvalue())
+        self.assertNotIn("新增图文", stdout.getvalue())
+
+    def test_up_opus_recovery_cleanup_failure_is_visible_and_non_destructive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            output_dir = root / "notes"
+            output_dir.mkdir()
+            state_dir = root / "state"
+            req = worker.TaskRequest(
+                task="bilibili-up-opus",
+                source="https://space.bilibili.com/1420210197",
+                output_dir=str(output_dir),
+            )
+            result = worker.TaskResult(
+                "cleanup-warning",
+                "gui",
+                req.task,
+                "completed",
+                worker.utc_now(),
+                output_dir=req.output_dir,
+            )
+            call_count = 0
+
+            def fake_run_process(command, _env):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    staging_dir = pathlib.Path(command[command.index("--output-dir") + 1])
+                    (staging_dir / "draft.md").write_text("# 草稿\n", encoding="utf-8")
+                    return "草稿准备完成：生成 1，源级跳过 0，失败 0；尚未改动正式笔记。\n"
+                return "整理阶段完成：成功 0，跳过 1，失败 0。\n"
+
+            original_rmtree = shutil.rmtree
+
+            def fail_recovery_cleanup(path, *args, **kwargs):
+                if pathlib.Path(path).is_relative_to(state_dir / "recovery"):
+                    raise OSError("fixture cleanup denied")
+                return original_rmtree(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(worker, "build_env", return_value={"LOCAL_NOTE_STUDIO_STATE_DIR": str(state_dir)}),
+                mock.patch.object(worker, "run_process", side_effect=fake_run_process),
+                mock.patch.object(worker.shutil, "rmtree", side_effect=fail_recovery_cleanup),
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                worker.execute_request(req, result)
+
+            self.assertTrue(any((state_dir / "recovery").iterdir()))
+            self.assertIn("恢复点未能自动清理", stderr.getvalue())
+            self.assertIn("completed outputs but failed to clean temporary recovery drafts", result.warnings)
 
     def test_raw_subtitles_default_off_and_can_be_explicitly_enabled(self):
         self.assertFalse(worker.TaskRequest(task="").keep_original_subtitles)

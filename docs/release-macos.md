@@ -30,6 +30,22 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.23 internal Apple Silicon artifact (2026-08-06)
+
+- Version: `0.1.23`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.23_aarch64.dmg`
+- Size: `3,488,846 bytes`
+- SHA-256: `2be62e5625470aaf95319a2783c49cc59abb486d648a4aa15b5aa65c04fdc735`
+- Build type: optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+This release completes the UP-Opus logging clarity pass. Space pagination now says that it collected candidate posts instead of implying that formal notes were created before completeness checks. After every fully successful or all-existing batch, the Worker confirms that the temporary drafts and recovery point were removed; a cleanup failure keeps the completed outputs and emits a visible warning instead of silently claiming success.
+
+The full release check passed the frontend production and compatibility gates, 133 Python tests, 10 Rust tests, shell syntax validation, and the package-consistency audit. The optimized app was ad-hoc signed before the compressed HFS+ DMG was generated. `hdiutil verify` passed; the DMG was mounted read-only, and the mounted app passed strict deep signature verification, reported an arm64 executable and both `0.1.23` bundle versions, matched the source SHA-256 for the Worker, automation version, and Opus converter, and contained no `env.local`, Python bytecode, or `__pycache__`. The artifact was not copied over `/Applications` or notarized.
+
+Developer ID signing, notarization, Intel/universal packaging, and the independent clean-Mac matrix remain separate release gates.
+
 ## 0.1.22 internal Apple Silicon artifact (2026-08-05)
 
 - Version: `0.1.22`

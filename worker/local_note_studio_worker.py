@@ -1552,6 +1552,7 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
     recovery_base = pathlib.Path(env.get("LOCAL_NOTE_STUDIO_STATE_DIR") or pathlib.Path.home() / "Library/Application Support/Local Note Studio/state") / "recovery"
     recovery_key = hashlib.sha256(f"{req.task}\0{req.source}\0{req.output_dir}".encode("utf-8")).hexdigest()
     recovery_dir = recovery_base / recovery_key
+    recovery_cleanup_completed = False
 
     with tempfile.TemporaryDirectory(prefix="local-note-studio-drafts-") as staging_dir:
         staged_req = replace(req, output_dir=staging_dir)
@@ -1649,7 +1650,23 @@ def run_convert_and_organize_task(req: TaskRequest, env: dict[str, str], result:
                 result.counts["skipped"] += summary[1]
                 increment_existing_complete(result, summary[1])
             promote_staged_assets(pathlib.Path(staging_dir), pathlib.Path(req.output_dir))
-            shutil.rmtree(recovery_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(recovery_dir)
+            except FileNotFoundError:
+                recovery_cleanup_completed = True
+            except OSError as exc:
+                print(
+                    f"[临时恢复点 WARN] 正式结果已完成，但恢复点未能自动清理：{recovery_dir} ({exc})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if result is not None:
+                    result.warnings.append("completed outputs but failed to clean temporary recovery drafts")
+            else:
+                recovery_cleanup_completed = True
+
+    if recovery_cleanup_completed:
+        print("[临时恢复点] 本批全部处理完成，临时草稿与恢复点已清理。", flush=True)
 
     if req.task in {"bilibili-opus", "bilibili-up-opus"}:
         archive_legacy_bilibili_drafts(pathlib.Path(req.output_dir))

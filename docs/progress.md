@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-08-06
+
+- Advanced the app, Tauri bundle, and Worker audit version to `0.1.23` for the final UP-Opus log clarity pass.
+- Changed Bilibili space pagination logs from the ambiguous “新增图文” to “收集到候选图文”, making it explicit that discovery precedes formal-note completeness checks. Successful batches now confirm that both temporary drafts and the recovery point were removed; cleanup failures retain the completed outputs but emit an explicit warning.
+- Built and mounted the optimized `0.1.23` Apple Silicon DMG. The release check passed 133 Python tests and 10 Rust tests; `hdiutil verify`, strict deep ad-hoc signature verification, arm64/version checks, changed Worker/converter resource hashes, and the no-`env.local`/bytecode check also passed. `Local Note Studio_0.1.23_aarch64.dmg` is 3,488,846 bytes with SHA-256 `2be62e5625470aaf95319a2783c49cc59abb486d648a4aa15b5aa65c04fdc735`; it was not copied over `/Applications` or notarized.
+
 ## 2026-08-05
 
 - Advanced the app, Tauri bundle, and Worker audit version to `0.1.22` for consistent idempotent-batch reporting.

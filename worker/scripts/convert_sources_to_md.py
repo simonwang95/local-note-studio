@@ -1354,10 +1354,10 @@ def fetch_bilibili_space_opus_urls(source: str, cfg: dict[str, str], limit: int 
             opus_urls.append(f"https://www.bilibili.com/opus/{opus_id}")
             page_added += 1
             if limit > 0 and len(opus_urls) >= limit:
-                print(f"B站空间第 {page} 页：新增图文 {page_added} 条，达到处理上限 {limit} 条。")
+                print(f"B站空间第 {page} 页：收集到候选图文 {page_added} 条，达到处理上限 {limit} 条。")
                 return opus_urls
 
-        print(f"B站空间第 {page} 页：读取动态 {len(items)} 条，新增图文 {page_added} 条。")
+        print(f"B站空间第 {page} 页：读取动态 {len(items)} 条，收集到候选图文 {page_added} 条。")
         if not data.get("has_more"):
             break
         next_offset = str(data.get("offset") or "").strip()
