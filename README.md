@@ -6,6 +6,12 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 
 > 当前版本：`0.1.23`。项目仍处于内部测试阶段，现有 macOS 安装包采用临时签名，尚未完成 Developer ID 签名与 Apple 公证。
 
+## 界面预览
+
+![Local Note Studio 任务界面](docs/assets/local-note-studio-ui.jpg)
+
+任务工作区集中展示任务类型、处理选项、输入输出路径、执行控制以及实时日志。
+
 ## 主要功能
 
 - **多来源统一整理**：支持视频、网页、Office/PDF、图片、论文、AI 对话和本地媒体。
