@@ -1,119 +1,184 @@
 # Local Note Studio
 
-Local Note Studio is a local-first macOS desktop app that turns Bilibili videos and posts, web pages, documents, papers, local media, and AI-Chat exports into Obsidian-compatible Markdown.
+Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**，可以把 B 站视频与图文、网页、文档、论文、本地音视频和 AI 对话记录，转换成适合长期保存的 **Obsidian 兼容 Markdown**。
 
-The app uses a Tauri desktop shell, a thin Rust process bridge, and a packaged Python worker. Notes, task history, indexes, cookies, runtime files, and model settings stay on the user's Mac.
+它把内容采集、字幕或语音转写、OCR、AI 整理、任务恢复和结果校验集中在一个桌面工作区中。笔记、配置、任务记录、缓存与索引默认保存在本机；需要模型处理时，内容会发送到用户自行配置的 OpenAI 兼容 API。
 
-## Current capabilities
+> 当前版本：`0.1.23`。项目仍处于内部测试阶段，现有 macOS 安装包采用临时签名，尚未完成 Developer ID 签名与 Apple 公证。
 
-- Three-tab desktop workspace: Configuration, Tasks, and Validation, with persistent output and log panels.
-- Bilibili single video, favorites/series, opus/charging opus, and one-UP opus batch workflows; long-form Opus posts recover the complete authenticated page body and inline images when the dynamic API exposes only a summary, while idempotent batch reruns report exact no-update counts and zero model calls for existing complete notes.
-- Web/WeChat, Word/PDF/Office/image/OCR, paper quick-read, AI-Chat JSON, local video/audio, and recursive EPUB export; repeat batches distinguish existing complete results from policy skips and report exact no-update/model-call counts.
-- Task history and recovery, deletable separate recent lists for task output directories and input sources, structured output actions, progress/cancellation, incognito mode, and editable/batch Manifest state.
-- App-managed Python 3.11 runtime with locked packages, `yt-dlp`, `mlx-whisper`, `ffmpeg`/`ffprobe`, and Pandoc.
-- Advanced existing-Conda backend for development or users who already maintain a compatible environment.
-- Profile-restricted Agent CLI and stdio MCP tools for incremental UP video/opus sync, single URL/file ingestion, failed-item retry, environment checks, persistent status queries, and deterministic read-only retrieval over existing Markdown notes.
-- Worker-wide cross-process task locking, versioned structured results, and redacted SQLite automation history shared by GUI, CLI, Agent, and MCP entry points.
+## 主要功能
 
-## Agent automation
+- **多来源统一整理**：支持视频、网页、Office/PDF、图片、论文、AI 对话和本地媒体。
+- **结构化 Markdown 输出**：按任务保留来源信息、抽取原文或字幕，生成便于检索、引用和继续编辑的笔记。
+- **字幕与语音转写**：B 站任务可选择 yt-dlp 字幕、网页字幕或 ASR；本地媒体支持同目录字幕与 Whisper ASR。
+- **OCR 与多模态识别**：可处理图片和扫描型 PDF，并支持中断后续跑。
+- **批量与增量处理**：支持收藏夹、系列、UP 主图文和本地目录批量任务；重复运行会识别已有完整结果。
+- **可恢复的任务工作流**：提供实时日志、进度、取消、任务历史、失败项重试和输出完整性校验。
+- **本机运行时管理**：桌面应用可以安装和修复独立的 Python、`yt-dlp`、`ffmpeg`、Whisper 运行库、ASR 模型与 Pandoc，无需改动系统 Python。
 
-Automation uses the existing Worker and processing scripts; it does not duplicate Bilibili download, ASR, Qwen, Manifest, recovery, or integrity logic. Copy and customize [`worker/automation-profiles.example.json`](worker/automation-profiles.example.json) under `~/Library/Application Support/Local Note Studio/config/automation-profiles.json`, then validate without writing:
+## 支持的任务
 
-```bash
-scripts/local-notes-agent profiles
-scripts/local-notes-agent env-check --profile qingfeng
-scripts/local-notes-agent sync-up --profile qingfeng --dry-run
-scripts/local-notes-agent rebuild-index --profile qingfeng
-```
+| 任务 | 输入 | 输出与说明 |
+| --- | --- | --- |
+| B 站单链接 | 视频 URL | 字幕/ASR 转写、AI 整理，可选关键帧和对话角色标注 |
+| B 站收藏夹/系列 | 当前账号可访问的收藏夹或系列 | 批量生成笔记，单项失败不阻断其余任务 |
+| B 站动态/充电动态 | 动态 URL | 抓取正文和图片后整理为 Markdown |
+| B 站 UP 主图文批量 | UP 主 UID 或空间链接 | 分页发现图文内容并逐篇整理 |
+| 微信公众号/网页 | 文章或网页 URL | 支持静态采集，也可使用指定浏览器会话处理登录或 JS 页面 |
+| Word/PDF 整理 | 文件或目录 | 支持 `.doc`、`.docx`、`.pdf`、`.pptx`、`.xlsx`、`.csv`、`.html` 和图片等格式 |
+| AI-Chat JSON | LM Studio 导出的 `.conversation.json` | 转换为 Markdown 对话笔记 |
+| 论文速读 | 论文 PDF | 生成速读笔记并保留全文翻译 |
+| 本地视频/音频 | 单个媒体文件或目录 | 字幕/ASR 转写并生成 Markdown，可递归处理目录 |
+| 目录导出 EPUB | Markdown 目录 | 递归合并并导出单个 EPUB |
 
-Profiles may expose fixed `output_destinations` such as `daily_review -> 日复盘`. Single URL/file ingestion can select one by ID, while arbitrary output paths, parent traversal, and symlink escape remain unavailable to the Agent. New video settings default to omitting the raw-subtitle section after successful organization; structured notes, proofread text, source metadata, and user-owned adjacent `.srt` files are preserved. If model post-processing is incomplete, the generated note temporarily retains its transcript so the same source can safely retry instead of becoming unrecoverable.
+## 快速开始
 
-OpenHanako's official app can launch `scripts/local-notes-mcp` as a local stdio Connector. Import [`docs/openhanako-mcp.example.json`](docs/openhanako-mcp.example.json) after replacing the placeholder absolute paths. Do not put API keys or Cookie values in the Connector or Profile; secrets remain in the existing protected Local Note Studio configuration.
+### 使用 DMG 安装包
 
-The MCP server now exposes 11 tools. The original seven automation tools remain compatible; four additional tools search, read, list recent notes, and retrieve historical viewpoint evidence from enabled Profiles. Those four tools never rebuild an index, acquire the global write lock, write audit history, call a network/LLM/Shell/Stocks/MySQL service, or modify Markdown/Manifest files. Build the Profile index explicitly before first use and again after manual note changes:
+适合日常使用和测试。准备以下条件：
 
-```bash
-scripts/local-notes-agent rebuild-index --profile qingfeng
-```
+- macOS 12 或更高版本；
+- 与 Mac CPU 架构匹配的 DMG（Apple Silicon 使用 `aarch64`，Intel 使用 `x86_64`）；
+- 一个可访问的 OpenAI 兼容 API；
+- 首次安装托管环境和默认 ASR 模型时可用的网络连接。
 
-Successful Agent ingestion refreshes that Profile index atomically. A refresh failure is only a warning: the completed note remains intact and the explicit command can recover the index later. See [Agent automation](docs/agent-automation.md#已有笔记只读检索) and the [Chinese user guide](docs/user-guide-zh.md#在-hanaagentopenhanako-中只读检索已有笔记) for the index contract, provenance labels, examples, and recovery steps.
+安装与首次运行：
 
-Bilibili opus Profiles can set `"opus_image_analysis": "off" | "ocr" | "vision"`. `off` keeps the download/reference-only behavior, `ocr` extracts visible text without expanded inference, and `vision` relates verifiable text, tables, charts, K-lines, screenshots, and relevance to the post body. Finance-oriented Profiles should normally use `vision`; it costs up to one multimodal model call per uncached attachment. OCR/vision calls use their own `OPUS_IMAGE_ANALYSIS_MAX_TOKENS` (default `4096`, hard-capped at `8192`) and `OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS` (default `300`) instead of inheriting long-document budgets. Successful results are cached by image SHA-256, mode, model, rules version, and read-only post/time context under isolated automation state. Truncated, empty, invalid-JSON, timed-out, or otherwise failed results are never cached; the body and downloaded images remain available for a safe retry.
+1. 打开 DMG，将 **Local Note Studio** 拖入“应用程序”。
+2. 启动应用，在“配置”中保留推荐的“应用托管环境”。
+3. 填写 LLM API Base、API Key、模型名称和默认输出根目录。
+4. 点击“安装/修复”，等待运行时、媒体工具和默认 ASR 模型安装完成。
+5. 切换到“校验”，点击“检查依赖”。
+6. 在“任务”中选择任务类型、输入源和输出目录，先“预览命令”，确认后运行。
 
-Image dates are preserved only as directly visible text. The trusted Bilibili publish timestamp, current date, and `Asia/Shanghai` timezone are supplied as read-only context, and the model may not rewrite a visible year from historical assumptions. Formal organization also applies deterministic guards against unsupported time corrections and model-added A-share codes; stock suffixes in the Qwen section are corrected only when the original source contained the code, otherwise removed, while the generated A-share validation table remains authoritative.
+内部测试包尚未公证。请先通过可信渠道核对 SHA-256，再使用右键或 Control-click →“打开”。具体版本、校验值和升级方式见 [macOS 发布说明](docs/release-macos.md)。
 
-See [Agent automation](docs/agent-automation.md) for Profile precedence, allowlists, commands, MCP tool side effects, result/error schema, global locking, incremental rules, history storage, and controlled validation.
+### 配置 B 站登录态（可选）
 
-## Install a test build
+公开内容可以先尝试不配置 Cookie；私有收藏夹、充电内容或需要账号权限的字幕通常需要登录态。
 
-For another Mac with the same CPU architecture, the DMG is the only Local Note Studio file that needs to be transferred. The intended managed-runtime path should not require this source checkout, Node.js, Rust, Xcode, Homebrew, or conda, but this path still needs independent clean-Mac validation before it is treated as release-ready.
+1. 在已登录 B 站的 Chrome 中打开 `chrome://version/`。
+2. 复制“个人资料路径”，并在应用中选择对应的末级 `Default` 或 `Profile N` 目录。
+3. “B 站 Cookie 文件”可留空，应用会将筛选后的 B 站 Cookie 保存在自己的应用数据目录。
+4. 点击“授权并刷新 Cookie”，随后在日志中确认登录态校验通过。
 
-1. Open the matching DMG (`aarch64` for Apple Silicon, `x86_64` for Intel) and drag Local Note Studio to Applications.
-2. Open Configuration, keep **App-managed runtime**, enter the tester's LLM API/model and output root, then click **Install/Repair**.
-3. Open Validation and run **Check dependencies** before the first task.
+应用只读取用户明确选择的 Chrome Profile，并且只写出 B 站域名的 Cookie。更完整的权限说明和故障排查见 [中文操作手册](docs/user-guide-zh.md)。
 
-The DMG contains the app and worker, but not an LLM service, personal cookies, indexes, output data, or embedded ASR model weights. First-time managed-runtime setup requires network access and downloads the default MLX Whisper ASR model into Application Support. Runtime/tool downloads prefer HTTP/1.1 to avoid fragile HTTP/2 paths on some test networks. If the default PyPI route fails with TLS, proxy, or timeout errors, the installer automatically retries locked Python dependencies through fallback PyPI mirrors; advanced testers can also launch with `LOCAL_NOTE_STUDIO_PIP_INDEX_URL` or `LOCAL_NOTE_STUDIO_PYTHON_RUNTIME_URL` set to reachable mirrors. Tool archives can be mirrored independently with `LOCAL_NOTE_STUDIO_PANDOC_URL`, `LOCAL_NOTE_STUDIO_FFMPEG_URL`, or `LOCAL_NOTE_STUDIO_FFPROBE_URL`. ASR model downloads try Hugging Face first and then `https://hf-mirror.com`; `LOCAL_NOTE_STUDIO_HF_ENDPOINT` can point to another Hugging Face-compatible endpoint.
+## 界面工作流
 
-Pandoc is only required for recursive Markdown-to-EPUB export. If the Pandoc GitHub/CDN download fails during Install/Repair, Local Note Studio keeps the managed runtime usable for video, document, OCR, Cookie, ASR, and Bilibili workflows and marks the runtime as needing repair until Pandoc is installed.
+桌面应用分为三个主要区域：
 
-In app-managed mode, nested Bilibili ASR scripts are pinned to the same managed Python executable as the outer worker, so a stray Conda, `.venv`, or GUI `PATH` entry cannot shadow `mlx-whisper` during transcription. Dependency checks use real imports for managed ASR packages instead of only checking package metadata.
+1. **配置**：选择托管环境或现有 Conda/Python，设置模型、ASR、Cookie 和默认输出路径。
+2. **任务**：选择输入类型和处理选项，预览命令、运行或取消任务，并查看历史与恢复入口。
+3. **校验**：检查依赖、浏览处理记录和 Manifest 状态。
 
-Internal test packages are currently ad-hoc signed rather than Developer ID signed/notarized. Verify the published SHA-256 first, then use Control-click → Open. See [macOS release and tester handoff](docs/release-macos.md) and the [Chinese user guide](docs/user-guide-zh.md) for exact steps.
+右侧输出与日志面板会持续显示当前任务的命令、进度、警告和最终文件位置。建议先用一篇公开网页或一个小文档验证配置，再运行长视频或批量任务。
 
-To upgrade an internal build, quit the app and replace `/Applications/Local Note Studio.app` with the copy from the new DMG. Replacing or trashing only the `.app` preserves settings and managed data under `~/Library/Application Support/Local Note Studio/`. Do not remove that directory during a normal upgrade.
+## 从源码开发
 
-## Runtime selection and persistence
+### 环境要求
 
-Fresh installs default to the app-managed runtime. Legacy settings that never recorded an explicit runtime preference migrate to managed once.
+- macOS 12+
+- Node.js 20+
+- Rust 工具链与 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)
+- 应用托管环境，或兼容的 Python 3.10/3.11、Conda 与媒体处理环境
 
-If a user explicitly selects **Existing Conda / Python (Advanced)**, the selected backend, environment name, Python command, and optional Conda executable path are saved locally and remain selected on the next launch. Finder-launched apps do not inherit the terminal's full `PATH`, so Local Note Studio searches common Miniforge, Miniconda, Anaconda, Homebrew, and system locations. A non-standard installation can be configured with an absolute path such as:
-
-```text
-/Users/xxx/miniforge3/bin/conda
-```
-
-Managed-runtime requests never pass a saved Conda environment to the worker.
-
-The selected ASR model directory is saved locally, masked by default, and can be revealed or explicitly saved from Configuration. Replaying an old task applies only task parameters; it no longer replaces the current runtime, API, model, ASR, or Cookie configuration with historical values.
-
-The optional model-cooldown override applies to the task's generic and specialized Qwen cooldown variables. Leave it empty to use the stable environment defaults, or set `0` to disable waiting. UP-opus image analysis and note organization wait only between adjacent real model calls—not for `off`, SHA-256 cache hits, or entries skipped because a complete note already exists.
-
-Cookie refresh follows a least-privilege path: in the signed-in Chrome window open `chrome://version/`, copy “Profile Path”, and select that concrete `Default` or `Profile N` directory. Leave the Cookie file field empty to store filtered Bilibili cookies under the app's Application Support directory, then choose “Authorize and refresh Cookie”. macOS may request access to other app data and Chrome Safe Storage; Local Note Studio does not need Documents, Desktop, Downloads, Apple Music/media-library, network-volume, or removable-volume access for Cookie refresh. Broad profile directories are rejected before any recursive search, and operational tasks with no note-output directory bypass the Markdown output scanner entirely.
-
-## Source development
-
-Requirements: macOS 12+, Node.js 20 or newer, Rust/Tauri prerequisites, and either the managed runtime or a compatible Python/Conda environment. Node.js 16 is not supported by the current Vite build.
+安装前端依赖并启动桌面开发模式：
 
 ```bash
 npm install
 npm run tauri:dev
 ```
 
-`npm run dev` starts only the Vite preview at `http://127.0.0.1:1420`; it cannot invoke the worker. It is now launched through a small cleanup wrapper so the Vite child exits when its parent process disappears. If an older orphaned development server is already running, stop it with `npm run dev:stop` or Activity Monitor before starting a new desktop session. Machine-specific paths and credentials belong in ignored local settings or `worker/env.local`, never in committed files.
-
-Run all frontend, Python, and Rust regression checks with:
+`npm run tauri:dev` 会同时启动 Vite 和 Tauri 桌面窗口，只有桌面窗口可以调用 Worker。若只需预览前端界面，可运行：
 
 ```bash
+npm run dev
+```
+
+浏览器预览模式不能检查依赖或执行笔记任务。开发机的路径、Cookie 和密钥应写入已被 Git 忽略的 `worker/env.local`：
+
+```bash
+cp worker/env.example worker/env.local
+```
+
+### 常用命令
+
+```bash
+# 构建前端
+npm run build
+
+# 运行前端、Python 与 Rust 全部检查
 npm run check
-```
 
-Run release configuration checks with:
-
-```bash
+# 检查发布配置
 npm run release:check
+
+# 构建 .app 与 DMG
+npm run tauri:build
 ```
 
-## Project layout
+更完整的源码环境说明见 [环境配置](docs/environment.md)，打包流程见 [macOS 发布说明](docs/release-macos.md)。
+
+## 技术架构
+
+```text
+Tauri 桌面界面（TypeScript / Vite）
+  -> Rust 命令桥接与运行时管理
+  -> Python Worker
+  -> 下载、转写、OCR、内容整理脚本
+  -> 本地 Markdown / EPUB 输出
+```
+
+- 前端负责配置、任务状态、进度、日志和历史交互。
+- Rust 层负责桌面能力、Worker 进程管理、取消和托管运行时生命周期。
+- Python Worker 负责参数校验、任务编排、结果检查和调用具体处理脚本。
+- 修改型任务使用跨进程锁，避免桌面端、CLI 等入口同时写入相同状态。
+
+详细进程模型和 Worker 合同见 [架构文档](docs/architecture.md)。
+
+## 项目结构
 
 ```text
 local-note-studio/
-  src/                    TypeScript UI and shared view state
-  src-tauri/              macOS shell, process bridge, runtime manager
-  worker/                 Python worker and processing scripts
-  tests/                  Frontend and worker regression tests
-  docs/                   Product, architecture, environment, release guides
+├── src/                 # TypeScript 前端与界面状态
+├── src-tauri/           # Tauri/Rust 桌面壳、进程桥接与运行时管理
+├── worker/              # Python Worker、转换、转写与整理脚本
+├── scripts/             # 开发、发布与高级命令行入口
+├── tests/               # 前端、Python 和 Rust 回归测试
+└── docs/                # 使用、架构、环境与发布文档
 ```
 
-## Release status
+## 数据与隐私
 
-Development-side `.app`/DMG packaging is working. Developer ID signing, Apple notarization, Intel/universal packaging, and the documented clean-Mac task matrix remain release gates before public distribution.
+Local Note Studio 采用本地优先设计，但不是完全离线应用：
+
+- 输出笔记、任务状态、索引、缓存、Cookie 和模型设置保存在用户的 Mac 上。
+- 托管运行时位于 `~/Library/Application Support/Local Note Studio/`，正常升级只替换 `.app`，不会删除该目录中的数据。
+- 采集在线来源、下载运行时或 ASR 模型时需要联网。
+- AI 整理与多模态 OCR 会把相关内容发送到用户配置的 OpenAI 兼容 API，数据策略取决于该服务提供方。
+- 安装包不会包含个人 API Key、Cookie、笔记、索引或大型模型权重。
+
+请勿提交 `worker/env.local`、Cookie 文件、真实密钥或个人输出目录。
+
+## 高级扩展
+
+项目也提供基于命名 Profile 的受限 CLI，可用于增量同步、失败重试、状态查询和已有笔记检索；需要接入支持 stdio 的本地 Agent 时，也可选用 MCP 入口。相关能力复用同一套 Worker，并限制可访问的来源、输出位置和参数范围。配置方式见 [Agent 自动化文档](docs/agent-automation.md)。
+
+## 文档
+
+- [中文操作手册](docs/user-guide-zh.md)：完整界面说明、各任务填写方式与常见问题
+- [产品说明](docs/product.md)：产品目标、范围与当前非目标
+- [架构文档](docs/architecture.md)：进程模型、运行时边界与 Worker 合同
+- [环境配置](docs/environment.md)：托管环境、Conda、LLM、ASR 与 Cookie 配置
+- [开发计划](docs/development-plan.md)：阶段目标与实现计划
+- [待办事项](docs/todo.md)：当前优先级和验收标准
+- [macOS 发布说明](docs/release-macos.md)：测试包、签名、公证与 clean-Mac 验收
+
+## 当前限制
+
+- 目前仅提供 macOS 桌面应用，Windows 与 Linux 尚未支持。
+- LLM 与多模态 OCR 服务由用户自行配置，应用不内置本地大语言模型。
+- 默认 ASR 模型在首次“安装/修复”时下载，不直接打包进 DMG。
+- B 站内容可用性受账号权限、Cookie 状态和站点接口变化影响。
+- Developer ID 签名、Apple 公证、Intel/Universal 正式包和独立 clean-Mac 全流程验收仍是公开发布前的门槛。
