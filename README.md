@@ -147,13 +147,58 @@ Tauri 桌面界面（TypeScript / Vite）
 
 ```text
 local-note-studio/
-├── src/                 # TypeScript 前端与界面状态
-├── src-tauri/           # Tauri/Rust 桌面壳、进程桥接与运行时管理
-├── worker/              # Python Worker、转换、转写与整理脚本
-├── scripts/             # 开发、发布与高级命令行入口
-├── tests/               # 前端、Python 和 Rust 回归测试
-└── docs/                # 使用、架构、环境与发布文档
+├── index.html                         # Vite 页面入口
+├── package.json                       # 前端依赖、开发/构建/测试命令
+├── src/                               # TypeScript 前端
+│   ├── main.ts                        # 主界面、配置表单与任务请求组装
+│   ├── app-shell.ts                   # 配置/任务/校验页签状态
+│   ├── p1.ts                          # 任务历史、最近记录与结果解析
+│   ├── manifest-state.ts              # Manifest 查看与编辑状态
+│   └── styles.css                     # 桌面界面样式
+├── src-tauri/                         # Tauri/Rust 桌面层
+│   ├── src/main.rs                    # Worker 桥接、进程取消与托管运行时管理
+│   ├── capabilities/default.json      # 桌面权限声明
+│   ├── tauri.conf.json                # 窗口、资源和安装包配置
+│   ├── Cargo.toml                     # Rust 依赖与包信息
+│   └── icons/                         # 应用图标资源
+├── worker/                            # Python 业务层
+│   ├── local_note_studio_worker.py    # 统一任务入口、编排与结果校验
+│   ├── automation_core.py             # 跨入口锁、任务执行与审计基础能力
+│   ├── automation_profiles.py         # 受限 Profile 加载与校验
+│   ├── local_notes_agent.py           # 高级 CLI 入口
+│   ├── local_notes_retrieval.py       # 已有 Markdown 笔记索引与检索
+│   ├── local_notes_mcp.py             # 可选 stdio MCP 适配层
+│   ├── requirements-managed.lock      # 托管 Python 环境锁定依赖
+│   ├── env.example                    # 源码开发环境变量示例
+│   └── scripts/                       # 具体内容处理脚本
+│       ├── run_bilibili_transcript.py # B 站和本地媒体任务入口
+│       ├── bilibili/                  # 字幕发现、下载、ASR 与批量转写
+│       ├── convert_sources_to_md.py   # 网页、Office、PDF、图片等转 Markdown
+│       ├── qwen_organize_notes.py     # 通用 AI 笔记整理
+│       ├── quick_read_pdf.py          # 论文速读与全文翻译
+│       ├── export_epub.py             # Markdown 目录导出 EPUB
+│       ├── export_bilibili_cookies.py # Chrome Profile 登录态导出
+│       └── video_keyframes.py         # 视频关键帧提取
+├── scripts/                           # 项目级命令入口
+│   ├── dev-server.mjs                 # Vite 开发服务启动与清理
+│   ├── release_check.py               # 发布前一致性检查
+│   └── local-notes-*                  # 高级 CLI/MCP 启动包装器
+├── tests/                             # 回归测试
+│   ├── test_p1.mjs                    # 前端状态与兼容性测试
+│   ├── test_worker.py                 # Worker 任务合同测试
+│   ├── test_automation.py             # 自动化、锁与历史测试
+│   ├── test_note_retrieval.py         # 笔记索引与检索测试
+│   └── fixtures/                      # 测试输入与预期结果
+└── docs/                              # 项目文档
+    ├── user-guide-zh.md               # 中文操作手册
+    ├── architecture.md                # 架构与 Worker 合同
+    ├── environment.md                 # 环境、模型、ASR 与 Cookie 配置
+    ├── release-macos.md               # macOS 构建、签名与测试交付
+    ├── agent-automation.md            # 高级自动化说明
+    └── assets/                        # README 等文档使用的图片
 ```
+
+`dist/`、`node_modules/`、`src-tauri/target/`、`__pycache__/`、运行缓存和本机私有配置均为构建或运行时内容，不属于核心源码结构。
 
 ## 数据与隐私
 
