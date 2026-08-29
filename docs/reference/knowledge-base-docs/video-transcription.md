@@ -81,7 +81,7 @@ BILIBILI_OUTPUT_DIR="notes/Net/BiliBili" $PY scripts/run_bilibili_transcript.py 
 - 桌面应用的“字幕/转录优先级”下拉框会覆盖上述环境变量：`yt-dlp` 字幕优先、网页播放器字幕优先、ASR 语音转写优先。
 - `VIDEO_MANIFEST_ENABLED=true` 时默认写入 `indexes/video-manifest.json`；命令行 `--no-video-manifest` 优先级更高。
 - Qwen reasoning 模型建议沿用旧项目参数：`SUMMARY_MAX_TOKENS=80000`、`LLM_TIMEOUT=1800`。
-- 一句话、摘要、思维导图、结构化正文、金句、复习清单、术语和校对默认合并到一个模型任务；只有超过 `SUMMARY_CHUNK_CHARS` 的长视频才分块，并使用 `SUMMARY_CHUNK_OVERLAP_CHARS` 保留重叠上下文，最后再做一次综合。
+- 一句话、摘要、思维导图、结构化正文、金句、复习清单、术语和校对默认合并到一个模型任务。转录超过 `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` 时，七个整理栏目仍合并一次，接近原文长度的校对正文按 `SUMMARY_PROOFREAD_CHUNK_CHARS` 分段、关闭 thinking 并确定性拼接，避免长输出提前结束；缺失的非校对栏目只定向补偿，不重做成功栏目。只有整理输入超过 `SUMMARY_CHUNK_CHARS` 时才使用带 overlap 的摘要分块与最终综合。
 - `--dry-run` 只打印命令，不执行。
 - 无 `--limit` 的收藏夹模式会运行本仓库完整批处理；建议日常增量先使用 `--limit 1` 或小批量验证。
 

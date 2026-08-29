@@ -673,7 +673,9 @@ def run_local_file(project_dir: pathlib.Path, cfg: dict[str, str], local_file: s
     print("\nsummary:", " ".join(summary_command))
     summary_code, _summary_output = stream_command(summary_command, project_dir, env, timeout=36000)
     postprocess_video_notes(paths[-1:], cfg)
-    emit_local_batch_result(1, 1 if summary_code == 0 else 0, 0, 1 if summary_code else 0)
+    # The Markdown was already created/updated by transcription even when optional
+    # LLM postprocessing is incomplete, so report the retained partial result.
+    emit_local_batch_result(1, 1, 0, 1 if summary_code else 0)
     return summary_code
 
 

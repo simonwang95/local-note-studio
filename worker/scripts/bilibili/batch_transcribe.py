@@ -20,6 +20,8 @@ import select
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from typing import Optional
 
 import requests
 
@@ -86,6 +88,16 @@ SUMMARY_MAX_TOKENS = int(_env.get("SUMMARY_MAX_TOKENS", "80000"))
 SUMMARY_MAX_TOKENS_CAP = int(_env.get("SUMMARY_MAX_TOKENS_CAP", str(max(SUMMARY_MAX_TOKENS, 80000))))
 SUMMARY_CHUNK_CHARS = int(_env.get("SUMMARY_CHUNK_CHARS", "60000"))
 SUMMARY_CHUNK_OVERLAP_CHARS = int(_env.get("SUMMARY_CHUNK_OVERLAP_CHARS", _env.get("QWEN_ORGANIZE_OVERLAP_CHARS", "800")))
+SUMMARY_PROOFREAD_CHUNK_CHARS = max(1000, int(_env.get("SUMMARY_PROOFREAD_CHUNK_CHARS", "10000")))
+SUMMARY_PROOFREAD_SINGLE_PASS_CHARS = max(
+    SUMMARY_PROOFREAD_CHUNK_CHARS,
+    int(_env.get("SUMMARY_PROOFREAD_SINGLE_PASS_CHARS", "12000")),
+)
+SUMMARY_PROOFREAD_ENABLE_THINKING = (
+    _env.get("SUMMARY_PROOFREAD_ENABLE_THINKING", "false").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+SUMMARY_PROOFREAD_TIMEOUT = max(60, int(_env.get("SUMMARY_PROOFREAD_TIMEOUT", "600")))
 SUMMARY_CHUNK_COOLDOWN_DELAY = max(0.0, float(_env.get("SUMMARY_CHUNK_COOLDOWN_DELAY", _env.get("COOLDOWN_DELAY", "0"))))
 LLM_TIMEOUT = int(_env.get("LLM_TIMEOUT", "1800"))
 LLM_MAX_RETRIES = max(0, int(_env.get("LLM_MAX_RETRIES", "2")))
@@ -399,8 +411,25 @@ def _is_retryable_http_status(status_code):
     return status_code in (408, 409, 425, 429) or status_code >= 500
 
 
-def _call_llm(system_prompt, user_prompt, max_tokens=None, task_name="LLM", max_retries=None):
-    """调用 LLM，返回响应文本或 None。临时错误按配置重试。"""
+@dataclass(frozen=True)
+class LLMResponse:
+    content: str
+    finish_reason: str = ""
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+
+
+def _call_llm(
+    system_prompt,
+    user_prompt,
+    max_tokens=None,
+    task_name="LLM",
+    max_retries=None,
+    enable_thinking=None,
+    timeout=None,
+):
+    """调用 LLM，返回文本及结束原因。临时错误按配置重试。"""
     if not SUMMARY_API_KEY:
         return None
 
@@ -416,6 +445,8 @@ def _call_llm(system_prompt, user_prompt, max_tokens=None, task_name="LLM", max_
         ],
         "max_tokens": max_tokens or SUMMARY_MAX_TOKENS,
     }
+    if enable_thinking is not None:
+        payload["enable_thinking"] = bool(enable_thinking)
     retry_count = LLM_MAX_RETRIES if max_retries is None else max(0, max_retries)
     total_attempts = max(1, retry_count + 1)
     last_error = None
@@ -429,7 +460,7 @@ def _call_llm(system_prompt, user_prompt, max_tokens=None, task_name="LLM", max_
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {SUMMARY_API_KEY}",
                 },
-                timeout=LLM_TIMEOUT,
+                timeout=(10, timeout or LLM_TIMEOUT),
             )
 
             if resp.status_code >= 400:
@@ -451,12 +482,14 @@ def _call_llm(system_prompt, user_prompt, max_tokens=None, task_name="LLM", max_
             else:
                 raise ValueError(f"Unexpected response: {resp_data}")
 
+            finish_reason = str(choice.get("finish_reason") or "") if isinstance(choice, dict) else ""
+            usage = resp_data.get("usage", {}) if isinstance(resp_data, dict) else {}
+            completion_details = usage.get("completion_tokens_details") or {}
+            prompt_tokens = usage.get("prompt_tokens")
+            completion_tokens = usage.get("completion_tokens")
+            reasoning_tokens = completion_details.get("reasoning_tokens")
             if not content or not content.strip():
-                finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
                 current_tokens = int(payload.get("max_tokens") or SUMMARY_MAX_TOKENS)
-                usage = resp_data.get("usage", {}) if isinstance(resp_data, dict) else {}
-                completion_tokens = usage.get("completion_tokens")
-                reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
                 if finish_reason == "length" and current_tokens < SUMMARY_MAX_TOKENS_CAP:
                     next_tokens = min(SUMMARY_MAX_TOKENS_CAP, max(current_tokens * 2, current_tokens + 1024))
                     payload["max_tokens"] = next_tokens
@@ -471,7 +504,18 @@ def _call_llm(system_prompt, user_prompt, max_tokens=None, task_name="LLM", max_
                     f"reasoning_tokens={reasoning_tokens})"
                 )
 
-            return content
+            print(
+                f"   📐 {task_name}: finish_reason={finish_reason or 'unknown'}, "
+                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
+                f"reasoning_tokens={reasoning_tokens}, content_chars={len(content)}"
+            )
+            return LLMResponse(
+                content=content,
+                finish_reason=finish_reason,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
 
         except RuntimeError:
             raise
@@ -508,7 +552,8 @@ def _chunk_text_with_overlap(text, max_chars=SUMMARY_CHUNK_CHARS, overlap_chars=
         hard_end = min(length, start + max_chars)
         end = hard_end
         if hard_end < length:
-            min_boundary = start + max(max_chars // 2, max_chars - max(overlap_chars * 2, 1))
+            boundary_slack = max(overlap_chars * 2, max_chars // 5, 1)
+            min_boundary = start + max(max_chars // 2, max_chars - boundary_slack)
             candidates = [
                 text.rfind("\n\n", min_boundary, hard_end),
                 text.rfind("\n", min_boundary, hard_end),
@@ -531,8 +576,31 @@ def _chunk_text_with_overlap(text, max_chars=SUMMARY_CHUNK_CHARS, overlap_chars=
     return chunks
 
 
-def _run_chunked_llm(task_name, title, transcript_text, system_prompt, chunk_instruction, combine_instruction, max_tokens=None):
-    chunks = _chunk_text_with_overlap(transcript_text)
+def _wait_between_llm_calls(next_task_name):
+    if SUMMARY_CHUNK_COOLDOWN_DELAY <= 0:
+        return
+    print(f"   ⏳ {SUMMARY_CHUNK_COOLDOWN_DELAY:g} 秒后调用{next_task_name}...")
+    time.sleep(SUMMARY_CHUNK_COOLDOWN_DELAY)
+
+
+def _run_chunked_llm(
+    task_name,
+    title,
+    transcript_text,
+    system_prompt,
+    chunk_instruction,
+    combine_instruction,
+    max_tokens=None,
+    chunk_chars=None,
+    overlap_chars=None,
+):
+    effective_chunk_chars = SUMMARY_CHUNK_CHARS if chunk_chars is None else chunk_chars
+    effective_overlap_chars = SUMMARY_CHUNK_OVERLAP_CHARS if overlap_chars is None else overlap_chars
+    chunks = _chunk_text_with_overlap(
+        transcript_text,
+        max_chars=effective_chunk_chars,
+        overlap_chars=effective_overlap_chars,
+    )
     if not chunks:
         return None
     if len(chunks) == 1:
@@ -545,7 +613,7 @@ def _run_chunked_llm(task_name, title, transcript_text, system_prompt, chunk_ins
 
     print(
         f"   🧩 {task_name}: 长文本分为 {len(chunks)} 块 "
-        f"(chunk={SUMMARY_CHUNK_CHARS}, overlap={SUMMARY_CHUNK_OVERLAP_CHARS})"
+        f"(chunk={effective_chunk_chars}, overlap={effective_overlap_chars})"
     )
     partials = []
     for index, chunk in enumerate(chunks, 1):
@@ -561,16 +629,16 @@ def _run_chunked_llm(task_name, title, transcript_text, system_prompt, chunk_ins
             max_tokens=max_tokens,
             task_name=f"{task_name} 分块 {index}/{len(chunks)}",
         )
-        if partial:
-            partials.append(f"## 分块 {index}\n\n{partial.strip()}")
-        if SUMMARY_CHUNK_COOLDOWN_DELAY > 0 and index < len(chunks):
-            print(f"   ⏳ {SUMMARY_CHUNK_COOLDOWN_DELAY:g} 秒后处理下一个分块...")
-            time.sleep(SUMMARY_CHUNK_COOLDOWN_DELAY)
+        if partial and partial.content:
+            partials.append(f"## 分块 {index}\n\n{partial.content.strip()}")
+        if index < len(chunks):
+            _wait_between_llm_calls("下一个分块")
 
     if not partials:
         return None
 
     joined = "\n\n".join(partials)
+    _wait_between_llm_calls("分块综合")
     return _call_llm(
         "你是本地知识库整理助手。请综合多个分块结果，去除相邻分块重叠造成的重复内容，保持原始顺序和事实边界。",
         (
@@ -601,7 +669,7 @@ def _detect_dialogue(text, sample_chars=3000):
             task_name="对话检测",
             max_retries=0,
         )
-        if result and "是" in result:
+        if result and "是" in result.content:
             return True
     except Exception:
         pass
@@ -877,25 +945,119 @@ def _combined_summary_prompts(requested, transcript_text):
     return system_prompt, chunk_instruction, combine_instruction
 
 
-def _parse_combined_summary(response, requested):
+def _response_content(response):
+    if isinstance(response, LLMResponse):
+        return response.content
+    return response or ""
+
+
+def _recover_unclosed_proofread(response, requested, transcript_text):
+    """Recover a complete-looking final proofread only when the model ended normally."""
+    if "proofread" not in requested or not transcript_text or not isinstance(response, LLMResponse):
+        return ""
+    if response.finish_reason not in {"stop", "eos", "eos_token"}:
+        return ""
+    text = response.content
+    opening = "[[LNS_SECTION:proofread]]"
+    closing = "[[/LNS_SECTION:proofread]]"
+    start = text.rfind(opening)
+    if start < 0 or closing in text[start:]:
+        return ""
+    body = text[start + len(opening):].strip()
+    if "[[LNS_SECTION:" in body or "[[/LNS_SECTION:" in body:
+        return ""
+    if len(body) < int(len(transcript_text.strip()) * 0.7):
+        return ""
+    if body[-1:] not in "。！？.!?）)】]”’\"'":
+        return ""
+    return body
+
+
+def _parse_combined_summary(response, requested, transcript_text=""):
+    response_text = _response_content(response)
     sections = {}
     for key in requested:
         marker_pattern = (
             rf"(?s)\[\[LNS_SECTION:{re.escape(key)}\]\]\s*(.*?)\s*"
             rf"\[\[/LNS_SECTION:{re.escape(key)}\]\]"
         )
-        match = re.search(marker_pattern, response or "")
+        match = re.search(marker_pattern, response_text)
         if match and match.group(1).strip():
             sections[key] = match.group(1).strip()
             continue
         label = SUMMARY_SECTION_LABELS[key]
         heading_match = re.search(
             rf"(?ms)^##\s+{re.escape(label)}\s*$\n(.*?)(?=^##\s+|\Z)",
-            response or "",
+            response_text,
         )
         if heading_match and heading_match.group(1).strip():
             sections[key] = heading_match.group(1).strip()
+    if "proofread" not in sections:
+        recovered = _recover_unclosed_proofread(response, requested, transcript_text)
+        if recovered:
+            sections["proofread"] = recovered
+            print("   🩹 模型正常结束但漏写校对正文结束标记；已通过长度和句末校验安全恢复")
     return sections
+
+
+def _run_summary_sections(label, title, transcript_text, requested):
+    system_prompt, chunk_instruction, combine_instruction = _combined_summary_prompts(
+        requested,
+        transcript_text,
+    )
+    response = _run_chunked_llm(
+        f"整篇笔记 {label}",
+        title,
+        transcript_text,
+        system_prompt,
+        chunk_instruction,
+        combine_instruction,
+        max_tokens=SUMMARY_MAX_TOKENS,
+    )
+    return _parse_combined_summary(response, requested, transcript_text)
+
+
+def _run_chunked_proofread(label, title, transcript_text):
+    """Generate long proofread chunks and join them without a lossy synthesis call."""
+    chunks = _chunk_text_with_overlap(
+        transcript_text,
+        max_chars=SUMMARY_PROOFREAD_CHUNK_CHARS,
+        overlap_chars=0,
+    )
+    if not chunks:
+        return ""
+    print(
+        f"   🧩 {label}: 校对正文共 {len(transcript_text)} 字，分为 {len(chunks)} 段 "
+        f"(每段不超过 {SUMMARY_PROOFREAD_CHUNK_CHARS} 字)"
+    )
+    system_prompt, chunk_instruction, _combine_instruction = _combined_summary_prompts(
+        ["proofread"],
+        transcript_text,
+    )
+    proofread_parts = []
+    for index, chunk in enumerate(chunks, 1):
+        if index > 1:
+            _wait_between_llm_calls("下一段校对")
+        response = _call_llm(
+            system_prompt,
+            (
+                f"视频标题：{title}\n\n"
+                f"校对分段：{index}/{len(chunks)}\n"
+                "说明：各段没有重叠，请完整校对当前段，不要概括或省略。\n\n"
+                f"{chunk_instruction}\n\n"
+                f"转录文本分段：\n{chunk}"
+            ),
+            max_tokens=SUMMARY_MAX_TOKENS,
+            task_name=f"校对正文 {label} 分段 {index}/{len(chunks)}",
+            enable_thinking=SUMMARY_PROOFREAD_ENABLE_THINKING,
+            timeout=SUMMARY_PROOFREAD_TIMEOUT,
+        )
+        parsed = _parse_combined_summary(response, ["proofread"], chunk)
+        proofread = parsed.get("proofread", "").strip()
+        if not proofread:
+            raise RuntimeError(f"校对正文分段 {index}/{len(chunks)} 未返回完整栏目")
+        proofread_parts.append(proofread)
+    return "\n\n".join(proofread_parts)
 
 
 def _replace_requested_sections(content, sections):
@@ -925,7 +1087,7 @@ def _replace_requested_sections(content, sections):
 
 
 def generate_summary(filepath, progress_label=None):
-    """一次模型任务生成视频笔记的全部待处理栏目，超长文本才分块。"""
+    """Generate pending sections with an adaptive path for long verbatim output."""
     label = progress_label or os.path.basename(filepath)
 
     if not SUMMARY_API_KEY or not os.path.exists(filepath):
@@ -959,23 +1121,49 @@ def generate_summary(filepath, progress_label=None):
 
     requested_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in requested)
     print(f"   🚀 {label}: 单次整理 {requested_labels}...")
-    try:
-        system_prompt, chunk_instruction, combine_instruction = _combined_summary_prompts(
-            requested,
-            transcript_text,
+    deferred_proofread = (
+        "proofread" in requested
+        and len(transcript_text) > SUMMARY_PROOFREAD_SINGLE_PASS_CHARS
+    )
+    primary_requested = [key for key in requested if key != "proofread"] if deferred_proofread else list(requested)
+    sections = {}
+    completed_model_call = False
+
+    if deferred_proofread:
+        print(
+            f"   📚 {label}: 校对正文输入 {len(transcript_text)} 字，超过单次阈值 "
+            f"{SUMMARY_PROOFREAD_SINGLE_PASS_CHARS}；摘要栏目仍合并一次，校对正文单独分段"
         )
-        response = _run_chunked_llm(
-            f"整篇笔记 {label}",
-            title,
-            transcript_text,
-            system_prompt,
-            chunk_instruction,
-            combine_instruction,
-            max_tokens=SUMMARY_MAX_TOKENS,
-        )
-        sections = _parse_combined_summary(response, requested)
-    except Exception as exc:
-        print(f"   ⚠️ {label}: 整篇笔记生成失败: {exc}")
+
+    if primary_requested:
+        try:
+            sections.update(_run_summary_sections(label, title, transcript_text, primary_requested))
+            completed_model_call = True
+        except Exception as exc:
+            print(f"   ⚠️ {label}: 整篇笔记生成失败: {exc}")
+
+        primary_missing = [key for key in primary_requested if key not in sections]
+        if primary_missing and completed_model_call:
+            _wait_between_llm_calls("缺失栏目的定向补偿")
+            missing_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in primary_missing)
+            print(f"   🔁 {label}: 仅重试缺失栏目：{missing_labels}")
+            try:
+                sections.update(_run_summary_sections(label, title, transcript_text, primary_missing))
+            except Exception as exc:
+                print(f"   ⚠️ {label}: 缺失栏目补偿失败: {exc}")
+
+    if deferred_proofread:
+        if completed_model_call:
+            _wait_between_llm_calls("分段校对正文")
+        try:
+            proofread = _run_chunked_proofread(label, title, transcript_text)
+            completed_model_call = True
+            if proofread:
+                sections["proofread"] = proofread
+        except Exception as exc:
+            print(f"   ⚠️ {label}: 分段校对正文生成失败: {exc}")
+
+    if not sections and not completed_model_call:
         return False
 
     content, changed = _replace_requested_sections(content, sections)
@@ -1072,15 +1260,18 @@ def run_summary_only(target_path=None):
                 failed_count += 1
                 failed = True
                 print(f"   ⚠️ {progress_label}: 仍有 AI 待处理占位符；保留原始字幕以便重试")
+        if changed:
+            changed_count += 1
         if not failed:
             if apply_original_subtitle_preference(filepath):
+                if not changed:
+                    changed_count += 1
                 changed = True
                 print(f"   🧹 {progress_label}: 已按设置移除原始字幕")
         if failed:
             continue
 
         if changed:
-            changed_count += 1
             if COOLDOWN_DELAY > 0 and i < len(files):
                 print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
                 time.sleep(COOLDOWN_DELAY)

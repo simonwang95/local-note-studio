@@ -58,6 +58,10 @@
 | `SUMMARY_CHUNK_CHARS` | `60000` | B 站整篇笔记单次整理的转录文本单块最大字符数 |
 | `SUMMARY_CHUNK_OVERLAP_CHARS` | `800` | B 站摘要/导图/校对分块之间的重叠上下文字符数 |
 | `SUMMARY_CHUNK_COOLDOWN_DELAY` | `60` | B 站摘要/导图/校对分块之间的冷却等待秒数；默认继承 `COOLDOWN_DELAY` |
+| `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` | `12000` | 校对正文可与其余栏目放进同一次模型任务的最大转录字符数 |
+| `SUMMARY_PROOFREAD_CHUNK_CHARS` | `10000` | 长校对正文的单段字符数；分段结果按原顺序直接拼接，不再调用模型综合 |
+| `SUMMARY_PROOFREAD_ENABLE_THINKING` | `false` | 长校对分段是否启用模型推理；机械校对默认关闭以减少耗时和输出压力 |
+| `SUMMARY_PROOFREAD_TIMEOUT` | `600` | 长校对分段的单次读取超时秒数 |
 | `ASR_ENGINE` | `whisper` | B 站字幕缺失时的 ASR 引擎，支持 `whisper` / `qwen3` |
 | `ASR_LOCAL_MODEL` | 空 | 本地 Whisper 或 Qwen3-ASR 模型路径 |
 | `ASR_PROGRESS_INTERVAL` | `30` | Whisper 转写进度提示间隔秒数 |

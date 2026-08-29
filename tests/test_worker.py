@@ -211,6 +211,25 @@ class RequestAndCommandContractTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertIn("## 原始字幕", note.read_text(encoding="utf-8"))
 
+    def test_summary_only_reports_retained_partial_write_and_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "partial-video.md"
+            note.write_text(
+                "# 视频\n\n"
+                f"## 校对正文\n\n{batch_transcriber.PLACEHOLDERS['proofread']}\n\n"
+                "## 原始字幕\n\n保留的原始转写\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "set"),
+                mock.patch.object(batch_transcriber, "generate_summary", return_value=True),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                result = batch_transcriber.run_summary_only(str(note))
+            self.assertEqual(result, 1)
+            self.assertIn("写入: 1 个", stdout.getvalue())
+            self.assertIn("失败: 1 个", stdout.getvalue())
+
     def test_summary_only_removes_raw_subtitles_after_note_is_complete(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             note = pathlib.Path(temp_dir) / "video.md"
@@ -291,15 +310,105 @@ class RequestAndCommandContractTests(unittest.TestCase):
             with (
                 mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
                 mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0),
                 mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=response) as model_task,
             ):
                 self.assertTrue(batch_transcriber.generate_summary(str(note)))
 
             final = note.read_text(encoding="utf-8")
-            model_task.assert_called_once()
+            self.assertEqual(model_task.call_count, 2)
             self.assertIn("- 已返回摘要", final)
             self.assertIn(batch_transcriber.PLACEHOLDERS["structured_body"], final)
             self.assertIn("保留用于重试的原始字幕", final)
+
+    def test_long_proofread_is_split_while_other_sections_stay_combined(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "long-video.md"
+            keys = [
+                "one_line", "quick_summary", "mindmap", "structured_body",
+                "quotes", "review", "terms", "proofread",
+            ]
+            note.write_text(
+                "# 长视频\n\n"
+                + "\n\n".join(
+                    f"## {batch_transcriber.SUMMARY_SECTION_LABELS[key]}\n\n"
+                    f"{batch_transcriber.PLACEHOLDERS[key]}"
+                    for key in keys
+                )
+                + "\n\n<details>\n<summary>📄 原始字幕</summary>\n\n第一段。第二段。\n\n</details>\n",
+                encoding="utf-8",
+            )
+            derived = "\n\n".join(
+                f"[[LNS_SECTION:{key}]]\n{key}结果\n[[/LNS_SECTION:{key}]]"
+                for key in keys if key != "proofread"
+            )
+            proofread_responses = [
+                batch_transcriber.LLMResponse(
+                    f"[[LNS_SECTION:proofread]]\n校对第一段。\n[[/LNS_SECTION:proofread]]",
+                    "stop",
+                ),
+                batch_transcriber.LLMResponse(
+                    f"[[LNS_SECTION:proofread]]\n校对第二段。\n[[/LNS_SECTION:proofread]]",
+                    "stop",
+                ),
+            ]
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
+                mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_SINGLE_PASS_CHARS", 5),
+                mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_CHUNK_CHARS", 5),
+                mock.patch.object(batch_transcriber, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0),
+                mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=derived) as combined,
+                mock.patch.object(batch_transcriber, "_chunk_text_with_overlap", return_value=["第一段。", "第二段。"]),
+                mock.patch.object(batch_transcriber, "_call_llm", side_effect=proofread_responses) as proofread,
+            ):
+                self.assertTrue(batch_transcriber.generate_summary(str(note)))
+
+            final = note.read_text(encoding="utf-8")
+            combined.assert_called_once()
+            self.assertEqual(proofread.call_count, 2)
+            self.assertIn("校对第一段。\n\n校对第二段。", final)
+            self.assertNotIn("【AI待处理", final)
+            self.assertNotIn("原始字幕", final)
+
+    def test_chunked_proofread_disables_thinking_and_uses_short_timeout(self):
+        response = batch_transcriber.LLMResponse(
+            "[[LNS_SECTION:proofread]]\n校对完成。\n[[/LNS_SECTION:proofread]]",
+            "stop",
+        )
+        with (
+            mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_CHUNK_CHARS", 100),
+            mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_ENABLE_THINKING", False),
+            mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_TIMEOUT", 321),
+            mock.patch.object(batch_transcriber, "_call_llm", return_value=response) as model,
+        ):
+            self.assertEqual(
+                batch_transcriber._run_chunked_proofread("测试", "标题", "原始正文。"),
+                "校对完成。",
+            )
+        self.assertFalse(model.call_args.kwargs["enable_thinking"])
+        self.assertEqual(model.call_args.kwargs["timeout"], 321)
+
+    def test_normally_finished_unclosed_proofread_is_safely_recovered(self):
+        transcript = "这是完整正文。" * 10
+        body = "这是校对正文。" * 10
+        response = batch_transcriber.LLMResponse(
+            "[[LNS_SECTION:proofread]]\n" + body,
+            finish_reason="stop",
+        )
+        sections = batch_transcriber._parse_combined_summary(response, ["proofread"], transcript)
+        self.assertEqual(sections["proofread"], body)
+
+    def test_length_finished_unclosed_proofread_is_not_recovered(self):
+        transcript = "这是完整正文。" * 10
+        response = batch_transcriber.LLMResponse(
+            "[[LNS_SECTION:proofread]]\n" + ("这是校对正文。" * 10),
+            finish_reason="length",
+        )
+        self.assertEqual(
+            batch_transcriber._parse_combined_summary(response, ["proofread"], transcript),
+            {},
+        )
 
     def test_empty_generated_section_does_not_consume_details_raw_transcript(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1843,6 +1952,30 @@ class BatchAndDiagnosticsTests(unittest.TestCase):
             json.loads(result_line.split(":", 1)[1]),
             {"total": 1, "changed": 0, "skipped": 1, "failed": 0},
         )
+
+    def test_partial_local_file_reports_retained_markdown_as_changed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            note = pathlib.Path(temp) / "partial.md"
+            note.write_text("# 部分完成\n", encoding="utf-8")
+            cfg = {"CONDA_ENV": "", "VIDEO_MANIFEST_ENABLED": "false"}
+            generated_output = f"GENERATED_MARKDOWN_PATH:{note}\n"
+            with (
+                mock.patch.object(runner, "project_env", return_value={}),
+                mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
+                mock.patch.object(runner, "python_command", return_value=["python", "summary.py"]),
+                mock.patch.object(runner, "stream_command", side_effect=[(0, generated_output), (1, "partial")]),
+                mock.patch.object(runner, "postprocess_video_notes"),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
+            self.assertEqual(code, 1)
+            result_line = next(
+                line for line in stdout.getvalue().splitlines() if line.startswith("LOCAL_BATCH_RESULT_JSON:")
+            )
+            self.assertEqual(
+                json.loads(result_line.split(":", 1)[1]),
+                {"total": 1, "changed": 1, "skipped": 0, "failed": 1},
+            )
 
     def test_local_media_batch_summary_updates_worker_counts(self):
         req = worker.TaskRequest(task="local-video", output_dir="/tmp/notes")

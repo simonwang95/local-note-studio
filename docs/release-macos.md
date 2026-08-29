@@ -30,6 +30,24 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.25 internal Apple Silicon artifact (2026-08-29)
+
+- Version: `0.1.25`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.25_aarch64.dmg`
+- Size: `3,433,213 bytes`
+- SHA-256: `e1c3356e8afc34325b7e1787bd42c53b86dd679b9b129c9ecd9572e10dcecee1`
+- Filesystem/build type: compressed APFS / optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+This release fixes long-video note completion with MTPLX Qwen3.8 27B. Normal-length transcripts still generate all eight note sections in one model call. Above 12,000 transcript characters, the seven compact sections remain combined while the near-verbatim proofread text is split into non-overlapping chunks of at most 10,000 characters, generated with thinking disabled, and joined deterministically without another model synthesis. Missing compact sections are retried alone; successful sections are never regenerated. Non-empty model responses now log `finish_reason` and bounded token/character diagnostics, while a normally finished final proofread missing only its closing marker can be recovered only after length and sentence-end validation.
+
+A real copy of the reported 61-minute note supplied an 18,110-character transcript. Its two proofread chunks returned `finish_reason=stop`, no reasoning tokens, 10,143 and 8,199 response characters, and completed the note in 5 minutes 7 seconds with no placeholder or raw-transcript residue. The formal user note was not modified. Partial failures now report retained Markdown writes accurately and classify downstream model failures as `LLM_FAILED` instead of the earlier successful subtitle phase.
+
+The full release check passed the frontend production and compatibility gates, 142 Python tests, 10 Rust tests, and the package-consistency audit. The APFS DMG passed `hdiutil verify` and was mounted read-only; its contained app passed strict deep ad-hoc signature verification, reported arm64 and both `0.1.25` bundle versions, matched source SHA-256 hashes for the changed Worker resources, and contained no `env.local`, Python bytecode, or `__pycache__`. The artifact was not copied over `/Applications` or notarized.
+
+Developer ID signing, notarization, Intel/universal packaging, and the independent clean-Mac matrix remain separate release gates.
+
 ## 0.1.24 internal Apple Silicon artifact (2026-08-29)
 
 - Version: `0.1.24`

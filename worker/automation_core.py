@@ -22,7 +22,7 @@ from typing import Any, Iterator
 
 
 RESULT_SCHEMA_VERSION = "1.0"
-WORKER_VERSION = "0.1.24"
+WORKER_VERSION = "0.1.25"
 PROFILE_SCHEMA_VERSION = "1.0"
 RULES_VERSION = "1.0"
 SECRET_KEYS = {
@@ -151,10 +151,12 @@ def classify_error(exc: BaseException) -> tuple[str, bool]:
     rules = (
         (("cookie", "未登录", "login"), "BILIBILI_AUTH_INVALID", True),
         (("412", "risk", "风控"), "BILIBILI_RATE_LIMITED", True),
+        # Video commands retain earlier subtitle logs; prefer the actual downstream
+        # model failure when both keyword families appear in the wrapped output.
+        (("llm", "qwen", "model", "模型"), "LLM_FAILED", True),
         (("subtitle", "字幕"), "BILIBILI_SUBTITLE_UNAVAILABLE", True),
         (("download", "下载"), "BILIBILI_DOWNLOAD_FAILED", True),
         (("whisper", "asr", "转写"), "ASR_FAILED", True),
-        (("llm", "qwen", "model", "模型"), "LLM_FAILED", True),
         (("integrity", "完整性"), "OUTPUT_INTEGRITY_FAILED", True),
         (("permission", "access denied", "无权限"), "SOURCE_ACCESS_DENIED", False),
         (("not found", "不存在"), "SOURCE_NOT_FOUND", False),

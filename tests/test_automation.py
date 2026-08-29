@@ -36,6 +36,12 @@ def load_worker():
 worker = load_worker()
 
 
+class ErrorClassificationTests(unittest.TestCase):
+    def test_llm_failure_wins_over_earlier_subtitle_log_text(self):
+        error = RuntimeError("字幕转写成功，后续模型未返回校对正文")
+        self.assertEqual(core.classify_error(error), ("LLM_FAILED", True))
+
+
 def profile_mapping(root: pathlib.Path, **overrides):
     data = {
         "id": "fixture",
@@ -252,7 +258,7 @@ class LockAndHistoryTests(unittest.TestCase):
             self.assertNotIn("cookie-secret", serialized)
             self.assertNotIn("api_key", serialized)
             self.assertNotIn("cookies", serialized)
-            self.assertEqual(store.list()[0]["worker_version"], "0.1.24")
+            self.assertEqual(store.list()[0]["worker_version"], "0.1.25")
 
     def test_redaction_covers_provider_error_key_format(self):
         message = "Incorrect API key provided: sk-live-secret123456 url=https://example.com/?signature=signed-value"
