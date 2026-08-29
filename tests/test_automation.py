@@ -252,7 +252,7 @@ class LockAndHistoryTests(unittest.TestCase):
             self.assertNotIn("cookie-secret", serialized)
             self.assertNotIn("api_key", serialized)
             self.assertNotIn("cookies", serialized)
-            self.assertEqual(store.list()[0]["worker_version"], "0.1.23")
+            self.assertEqual(store.list()[0]["worker_version"], "0.1.24")
 
     def test_redaction_covers_provider_error_key_format(self):
         message = "Incorrect API key provided: sk-live-secret123456 url=https://example.com/?signature=signed-value"

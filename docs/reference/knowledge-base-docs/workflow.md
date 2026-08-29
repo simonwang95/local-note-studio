@@ -6,7 +6,7 @@
 源文件/视频/B站收藏夹
   -> 抽取或转写
   -> Markdown 草稿
-  -> qwen3.6-35b-a3b-nvfp4 结构化整理
+  -> MTPLX Qwen3.8 27B 结构化整理
   -> 人工或 Agent 校验
   -> 更新 manifest/index
   -> Obsidian 中复习和链接
@@ -99,7 +99,7 @@ B 站和本地视频输出根目录为 `notes/Net/BiliBili`，脚本会自动写
 - 当前转写运行的 conda 环境是 `CONDA_ENV=course-whisper`。
 - 包装脚本会自动用 `conda run -n course-whisper ...` 调用迁移后的 B 站/本地视频脚本。
 - 当前 ASR 配置为 `ASR_ENGINE=whisper`，本地模型路径由 `ASR_LOCAL_MODEL` 指定。
-- Qwen 后处理使用 `SUMMARY_MODEL`/`DEFAULT_LLM_MODEL`，当前为 `qwen3.6-35b-a3b-nvfp4`。
+- Qwen 后处理使用 `SUMMARY_MODEL`/`DEFAULT_LLM_MODEL`，当前为 `mtplx-qwen38-27b-optimized-speed`。
 
 ## B 站收藏夹流程
 

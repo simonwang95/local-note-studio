@@ -30,6 +30,24 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.24 internal Apple Silicon artifact (2026-08-29)
+
+- Version: `0.1.24`
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.24_aarch64.dmg`
+- Size: `3,431,197 bytes`
+- SHA-256: `c37c23aff4cabb887edd2dbb0e34a810283f11951df876b02422cad0a76446ef`
+- Filesystem/build type: compressed APFS / optimized release
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
+This release switches the built-in OpenAI-compatible defaults to the local MTPLX Qwen3.8 27B deployment and migrates only the exact former LM Studio default triplet, preserving customized settings. Generic organization now uses 60,000-character chunks and an 80,000-character synthesis window. Bilibili video post-processing generates the one-line summary, quick summary, mind map, structured body, quotes, review list, terms, and proofread text in one model task for normal-length notes; missing fields retain their placeholders and raw transcript for safe retry.
+
+The configured `mtplx-qwen38-27b-optimized-speed` model passed both text-boundary and real visual-input probes. Given the repository UI screenshot, it correctly returned `Local Note Studio`, `任务`, `B站单链接`, and `运行任务` in the requested JSON fields.
+
+The full release check passed the frontend production and compatibility gates, 135 Python tests, 10 Rust tests, and the package-consistency audit. The optimized app passed strict deep ad-hoc signature verification before packaging. The first no-mount HFS attempt was explicitly rejected because mounted HFS translated sandbox provenance metadata into disallowed FinderInfo attributes. The final APFS DMG was then verified and mounted read-only; its contained app passed strict deep signature verification, reported an arm64 executable and both `0.1.24` bundle versions, matched the source SHA-256 for the Worker and changed organization scripts, and contained no `env.local`, Python bytecode, or `__pycache__`. The artifact was not copied over `/Applications` or notarized.
+
+Developer ID signing, notarization, Intel/universal packaging, and the independent clean-Mac matrix remain separate release gates.
+
 ## 0.1.23 internal Apple Silicon artifact (2026-08-06)
 
 - Version: `0.1.23`

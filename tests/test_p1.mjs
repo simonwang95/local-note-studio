@@ -77,6 +77,29 @@ assert.deepEqual(history.migrateRuntimePreference({ runtimeBackend: "conda", con
 });
 assert.equal(history.migrateRuntimePreference({ runtimeBackend: "conda", runtimePreferenceConfirmed: true }).runtimeBackend, "conda");
 assert.equal(history.migrateRuntimePreference({ cookies: "./bili_cookies.txt", runtimePreferenceConfirmed: true }).cookies, "");
+assert.deepEqual(
+  history.migrateRuntimePreference({
+    runtimePreferenceConfirmed: true,
+    apiBase: "http://127.0.0.1:1234/v1",
+    apiKey: "lm-studio",
+    model: "qwen3.6-35b-a3b-nvfp4",
+  }),
+  {
+    runtimePreferenceConfirmed: true,
+    apiBase: "http://127.0.0.1:8000/v1",
+    apiKey: "mtplx-local",
+    model: "mtplx-qwen38-27b-optimized-speed",
+  },
+);
+assert.equal(
+  history.migrateRuntimePreference({
+    runtimePreferenceConfirmed: true,
+    apiBase: "http://127.0.0.1:1234/v1",
+    apiKey: "custom-key",
+    model: "qwen3.6-35b-a3b-nvfp4",
+  }).apiBase,
+  "http://127.0.0.1:1234/v1",
+);
 assert.deepEqual(history.runtimeSelectionPayload("managed", "course-whisper", "/tmp/conda"), {
   runtime_backend: "managed",
   conda_env: "",

@@ -78,9 +78,9 @@ OCR_FALLBACK_COMMANDS = {
 }
 
 MANAGED_ASR_MODEL_NAME = "whisper-large-v3-turbo"
-BUILTIN_LLM_API_BASE = "http://127.0.0.1:1234/v1"
-BUILTIN_LLM_API_KEY = "lm-studio"
-BUILTIN_LLM_MODEL = "qwen3.6-35b-a3b-nvfp4"
+BUILTIN_LLM_API_BASE = "http://127.0.0.1:8000/v1"
+BUILTIN_LLM_API_KEY = "mtplx-local"
+BUILTIN_LLM_MODEL = "mtplx-qwen38-27b-optimized-speed"
 ASR_MODEL_HINT = "Choose an existing Whisper model directory in the app Configuration, or run managed Install/Repair to download the default model."
 
 
@@ -318,6 +318,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     if req.chunk_chars > 0:
         env["QWEN_ORGANIZE_MAX_CHARS"] = str(req.chunk_chars)
         env["QWEN_QUICKREAD_TRANSLATION_CHARS"] = str(req.chunk_chars)
+        env["SUMMARY_CHUNK_CHARS"] = str(req.chunk_chars)
     subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
     if subtitle_strategy == "web":
         env["BILIBILI_PREFER_WEB_SUBTITLE"] = "true"
@@ -890,8 +891,8 @@ def check_environment(req: TaskRequest, env: dict[str, str]) -> str:
     lines.append("")
     lines.append("Configuration checks")
     for label, value, hint in [
-        ("LLM API base", api_base, "Set an OpenAI-compatible API base such as http://127.0.0.1:1234/v1."),
-        ("LLM API key", api_key, "Set an API key. LM Studio can use a placeholder such as lm-studio."),
+        ("LLM API base", api_base, "Set an OpenAI-compatible API base such as http://127.0.0.1:8000/v1."),
+        ("LLM API key", api_key, "Set an API key. A local MTPLX endpoint can use a placeholder such as mtplx-local."),
         ("LLM model", model, "Set the model name served by your OpenAI-compatible endpoint."),
     ]:
         ok = bool(value)

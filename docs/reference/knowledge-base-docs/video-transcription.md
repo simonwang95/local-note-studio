@@ -21,7 +21,7 @@ scripts/bilibili/
 ## 本项目适配目标
 
 1. 输出路径改为由 `env.local` 配置。
-2. 模型默认改为 `qwen3.6-35b-a3b-nvfp4`。
+2. 模型默认改为 MTPLX 部署的 `mtplx-qwen38-27b-optimized-speed`。
 3. 生成的 Markdown 增加统一 frontmatter。
 4. manifest 记录视频 URL、BV 号、avid、源字幕、ASR 引擎、输出笔记。
 5. 对收藏夹按增量方式处理，避免重复下载和重复整理。
@@ -81,7 +81,7 @@ BILIBILI_OUTPUT_DIR="notes/Net/BiliBili" $PY scripts/run_bilibili_transcript.py 
 - 桌面应用的“字幕/转录优先级”下拉框会覆盖上述环境变量：`yt-dlp` 字幕优先、网页播放器字幕优先、ASR 语音转写优先。
 - `VIDEO_MANIFEST_ENABLED=true` 时默认写入 `indexes/video-manifest.json`；命令行 `--no-video-manifest` 优先级更高。
 - Qwen reasoning 模型建议沿用旧项目参数：`SUMMARY_MAX_TOKENS=80000`、`LLM_TIMEOUT=1800`。
-- 长视频的摘要、思维导图、AI 校对会按 `SUMMARY_CHUNK_CHARS` 分块，并使用 `SUMMARY_CHUNK_OVERLAP_CHARS` 保留重叠上下文；分块之间按 `SUMMARY_CHUNK_COOLDOWN_DELAY` 冷却，避免只处理前 20000 字。
+- 一句话、摘要、思维导图、结构化正文、金句、复习清单、术语和校对默认合并到一个模型任务；只有超过 `SUMMARY_CHUNK_CHARS` 的长视频才分块，并使用 `SUMMARY_CHUNK_OVERLAP_CHARS` 保留重叠上下文，最后再做一次综合。
 - `--dry-run` 只打印命令，不执行。
 - 无 `--limit` 的收藏夹模式会运行本仓库完整批处理；建议日常增量先使用 `--limit 1` 或小批量验证。
 

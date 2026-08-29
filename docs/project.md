@@ -13,7 +13,7 @@ The first version should make existing command-line workflows easier and safer t
    - advanced mode: an explicitly selected existing Conda environment (commonly `course-whisper`) or Python command; the selection persists across launches
    - OpenAI-compatible LLM API base
    - API key
-   - model name, default `qwen3.6-35b-a3b-nvfp4`
+   - model name, default `mtplx-qwen38-27b-optimized-speed`
    - optional Bilibili Netscape cookie file
    - optional Chrome Profile path for refreshing the Bilibili cookie file
 2. Check environment dependencies and show installation hints.

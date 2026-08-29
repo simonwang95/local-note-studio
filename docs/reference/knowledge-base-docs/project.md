@@ -18,7 +18,7 @@
 - Obsidian 兼容：使用标准 Markdown、YAML frontmatter、相对链接和清晰目录。
 - Agent 友好：项目说明、流程、进度和索引都放在可读文件里。
 - 增量处理：通过 hash 和 manifest 识别新增、变更、已完成、失败任务。
-- 本地模型可完成：默认主整理模型为 `qwen3.6-35b-a3b-nvfp4`。
+- 本地模型可完成：默认主整理模型为 `mtplx-qwen38-27b-optimized-speed`。
 
 ## 当前默认目录
 

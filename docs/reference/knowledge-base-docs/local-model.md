@@ -5,14 +5,16 @@
 本项目默认主整理模型：
 
 ```text
-qwen3.6-35b-a3b-nvfp4
+mtplx-qwen38-27b-optimized-speed
 ```
 
-默认通过 LM Studio 或兼容 OpenAI API 的本地服务调用：
+默认通过 MTPLX 的 OpenAI 兼容本地服务调用：
 
 ```text
-http://127.0.0.1:1234/v1
+http://127.0.0.1:8000/v1
 ```
+
+该部署支持视觉输入。2026-08-29 使用 Local Note Studio 界面截图实测时，模型准确识别了应用名、当前菜单、任务类型和主按钮文字。
 
 ## 角色分工
 
@@ -48,7 +50,7 @@ $PY scripts/qwen_organize_notes.py --from-manifest --limit 1
 脚本会：
 
 - 从 `indexes/source-manifest.json` 读取已转换草稿。
-- 按 `QWEN_ORGANIZE_MAX_CHARS` 分块，并使用 `QWEN_ORGANIZE_OVERLAP_CHARS` 保留重叠上下文。
+- 优先在 Qwen3.8 27B 的 131,072 上下文内一次整理；超过 `QWEN_ORGANIZE_MAX_CHARS` 才分块，并使用 `QWEN_ORGANIZE_OVERLAP_CHARS` 保留重叠上下文。
 - 对长文先分块整理，再综合成正式笔记；综合阶段过长时继续分批综合，不做静默截断。
 - 正式笔记默认生成 `## 思维导图`，适用于论文、微信公众号、普通网页、聊天记录等 source 草稿。
 - PDF 论文的速读和精读产物默认在末尾保留 `## 全文翻译`；这会显著增加 token、耗时和文件大小。

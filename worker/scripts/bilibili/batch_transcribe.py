@@ -84,7 +84,7 @@ SUMMARY_API_URL = _env.get("SUMMARY_API_URL", _env.get("DEFAULT_LLM_API_BASE", "
 SUMMARY_MODEL = _env.get("SUMMARY_MODEL", _env.get("DEFAULT_LLM_MODEL", "gpt-4o-mini"))
 SUMMARY_MAX_TOKENS = int(_env.get("SUMMARY_MAX_TOKENS", "80000"))
 SUMMARY_MAX_TOKENS_CAP = int(_env.get("SUMMARY_MAX_TOKENS_CAP", str(max(SUMMARY_MAX_TOKENS, 80000))))
-SUMMARY_CHUNK_CHARS = int(_env.get("SUMMARY_CHUNK_CHARS", "20000"))
+SUMMARY_CHUNK_CHARS = int(_env.get("SUMMARY_CHUNK_CHARS", "60000"))
 SUMMARY_CHUNK_OVERLAP_CHARS = int(_env.get("SUMMARY_CHUNK_OVERLAP_CHARS", _env.get("QWEN_ORGANIZE_OVERLAP_CHARS", "800")))
 SUMMARY_CHUNK_COOLDOWN_DELAY = max(0.0, float(_env.get("SUMMARY_CHUNK_COOLDOWN_DELAY", _env.get("COOLDOWN_DELAY", "0"))))
 LLM_TIMEOUT = int(_env.get("LLM_TIMEOUT", "1800"))
@@ -784,20 +784,157 @@ def _upsert_section_before_raw(content, section_title, section_text):
     return content.rstrip() + "\n\n" + section_text.strip() + "\n"
 
 
+SUMMARY_SECTION_LABELS = {
+    "one_line": "一句话概括",
+    "quick_summary": "速读摘要",
+    "mindmap": "思维导图",
+    "structured_body": "结构化正文",
+    "quotes": "金句与重要原话",
+    "review": "可复习清单",
+    "terms": "术语与概念",
+    "proofread": "校对正文",
+}
+
+
+def _requested_summary_sections(content):
+    requested = []
+    if PLACEHOLDERS["one_line"] in content:
+        requested.append("one_line")
+    if any(
+        placeholder in content
+        for placeholder in (
+            PLACEHOLDERS["quick_summary"],
+            LEGACY_PLACEHOLDERS["summary"],
+            LEGACY_PLACEHOLDERS["old_summary"],
+        )
+    ):
+        requested.append("quick_summary")
+    if PLACEHOLDERS["mindmap"] in content or LEGACY_PLACEHOLDERS["mindmap"] in content:
+        requested.append("mindmap")
+    for key in ("structured_body", "quotes", "review", "terms"):
+        if PLACEHOLDERS[key] in content:
+            requested.append(key)
+    if PLACEHOLDERS["proofread"] in content or LEGACY_PLACEHOLDERS["proofread"] in content:
+        requested.append("proofread")
+    return requested
+
+
+def _summary_output_contract(requested):
+    return "\n\n".join(
+        f"[[LNS_SECTION:{key}]]\n{SUMMARY_SECTION_LABELS[key]}的内容\n[[/LNS_SECTION:{key}]]"
+        for key in requested
+    )
+
+
+def _combined_summary_prompts(requested, transcript_text):
+    instructions = {
+        "one_line": "用一句中文概括全文，不超过 80 字；只写结论，不要标题、编号或解释。",
+        "quick_summary": "用 5-8 条中文 Markdown 列表覆盖核心问题、关键事实、论证链条和结论。",
+        "mindmap": "使用 2 空格缩进的 Markdown 列表，层次清晰并覆盖全文核心结构。",
+        "structured_body": (
+            "按内容选择自然结构，使用 Markdown 三级及以下标题；保留事实、因果、步骤、定义、例子、结论、"
+            "行动建议和风险边界；把口语改成清晰书面表达。"
+        ),
+        "quotes": "提取 5-10 条最值得复看或引用的原话/关键判断句，用 Markdown 列表；不要编造时间戳。",
+        "review": "生成 6-12 条问题、判断点、操作项或待查证事项，用 Markdown 列表。",
+        "terms": "去重提取术语、专名、概念或缩写，每条使用「术语：解释」格式；没有时明确说明。",
+        "proofread": (
+            "输出完整校对文本：只修正明显 ASR 同音错字、断句和标点，适度去除口语填充词；"
+            "严禁删改实质内容或改变原意。"
+        ),
+    }
+    if "proofread" in requested:
+        instructions["proofread"] += _build_domain_prompt(PROOFREAD_DOMAINS)
+        instructions["proofread"] += build_stock_reference_prompt(transcript_text, A_SHARE_TERMS_ENABLED)
+        if ENABLE_DIALOGUE_DETECTION:
+            instructions["proofread"] += (
+                "如果文本有明确多人轮流发言特征，直接在本次校对中推断说话人切换并用角色名或"
+                "「说话人A/B」标注；不要另行输出对话判断。"
+            )
+
+    requested_rules = "\n".join(
+        f"- {key}（{SUMMARY_SECTION_LABELS[key]}）：{instructions[key]}" for key in requested
+    )
+    contract = _summary_output_contract(requested)
+    system_prompt = (
+        "你是本地知识库视频笔记整理助手。必须忠于转录文本，不编造，不输出思考过程。"
+        "请在一次回答中完成全部指定栏目，每个栏目只出现一次。\n\n"
+        f"栏目要求：\n{requested_rules}\n\n"
+        "严格使用下面的边界标记返回内容；标记必须原样保留，标记外不要输出任何文字：\n"
+        f"{contract}"
+    )
+    chunk_instruction = (
+        "请只依据当前分块生成全部指定栏目。校对正文仅覆盖当前分块；其他栏目保留本分块事实和论证顺序。\n\n"
+        f"输出合同：\n{contract}"
+    )
+    combine_instruction = (
+        "请按栏目综合所有分块结果：去除 overlap 重复，保留原始顺序和事实边界；"
+        "校对正文须完整合并，其他栏目须形成覆盖全文的最终版本。\n\n"
+        f"栏目要求：\n{requested_rules}\n\n"
+        "严格按以下输出合同返回，标记外不要输出任何文字：\n"
+        f"{contract}"
+    )
+    return system_prompt, chunk_instruction, combine_instruction
+
+
+def _parse_combined_summary(response, requested):
+    sections = {}
+    for key in requested:
+        marker_pattern = (
+            rf"(?s)\[\[LNS_SECTION:{re.escape(key)}\]\]\s*(.*?)\s*"
+            rf"\[\[/LNS_SECTION:{re.escape(key)}\]\]"
+        )
+        match = re.search(marker_pattern, response or "")
+        if match and match.group(1).strip():
+            sections[key] = match.group(1).strip()
+            continue
+        label = SUMMARY_SECTION_LABELS[key]
+        heading_match = re.search(
+            rf"(?ms)^##\s+{re.escape(label)}\s*$\n(.*?)(?=^##\s+|\Z)",
+            response or "",
+        )
+        if heading_match and heading_match.group(1).strip():
+            sections[key] = heading_match.group(1).strip()
+    return sections
+
+
+def _replace_requested_sections(content, sections):
+    replacements = {
+        "one_line": (PLACEHOLDERS["one_line"],),
+        "quick_summary": (
+            PLACEHOLDERS["quick_summary"],
+            LEGACY_PLACEHOLDERS["summary"],
+            LEGACY_PLACEHOLDERS["old_summary"],
+        ),
+        "mindmap": (PLACEHOLDERS["mindmap"], LEGACY_PLACEHOLDERS["mindmap"]),
+        "structured_body": (PLACEHOLDERS["structured_body"],),
+        "quotes": (PLACEHOLDERS["quotes"],),
+        "review": (PLACEHOLDERS["review"],),
+        "terms": (PLACEHOLDERS["terms"],),
+        "proofread": (PLACEHOLDERS["proofread"], LEGACY_PLACEHOLDERS["proofread"]),
+    }
+    changed = False
+    for key, value in sections.items():
+        if not value:
+            continue
+        for placeholder in replacements[key]:
+            if placeholder in content:
+                content = content.replace(placeholder, value.strip())
+                changed = True
+    return content, changed
+
+
 def generate_summary(filepath, progress_label=None):
-    """使用 LLM 为视频转录文件生成通用型结构化笔记。"""
+    """一次模型任务生成视频笔记的全部待处理栏目，超长文本才分块。"""
     label = progress_label or os.path.basename(filepath)
 
-    if not SUMMARY_API_KEY:
-        return False
-    if not os.path.exists(filepath):
+    if not SUMMARY_API_KEY or not os.path.exists(filepath):
         return False
 
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    has_any = any(ph in content for ph in ALL_PLACEHOLDERS)
-    if not has_any:
+    if not any(ph in content for ph in ALL_PLACEHOLDERS):
         if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
             updated = _remove_original_subtitles_section(content)
             if updated != content:
@@ -816,237 +953,37 @@ def generate_summary(filepath, progress_label=None):
             break
 
     transcript_text = _extract_transcript_text(content)
-    if not transcript_text:
+    requested = _requested_summary_sections(content)
+    if not transcript_text or not requested:
         return False
 
-    changed = False
+    requested_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in requested)
+    print(f"   🚀 {label}: 单次整理 {requested_labels}...")
+    try:
+        system_prompt, chunk_instruction, combine_instruction = _combined_summary_prompts(
+            requested,
+            transcript_text,
+        )
+        response = _run_chunked_llm(
+            f"整篇笔记 {label}",
+            title,
+            transcript_text,
+            system_prompt,
+            chunk_instruction,
+            combine_instruction,
+            max_tokens=SUMMARY_MAX_TOKENS,
+        )
+        sections = _parse_combined_summary(response, requested)
+    except Exception as exc:
+        print(f"   ⚠️ {label}: 整篇笔记生成失败: {exc}")
+        return False
 
-    # ===== 一句话概括 =====
-    if PLACEHOLDERS["one_line"] in content:
-        print(f"   🪶 {label}: 生成一句话概括...")
-        try:
-            one_line = _run_chunked_llm(
-                f"一句话概括 {label}",
-                title,
-                transcript_text,
-                "你是一个视频笔记整理助手。请用一句中文概括整段内容，不超过 80 字；"
-                "只写结论，不要输出标题、编号或解释。",
-                "请为当前分块写一句话概括，突出主题和结论。",
-                "请综合所有分块概括，写成一句不超过 80 字的总概括。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            content, did = _replace_placeholder(content, "one_line", one_line)
-            changed = changed or did
-            if did:
-                print(f"   ✅ {label}: 一句话概括已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 一句话概括生成失败: {e}")
-
-    # ===== 速读摘要 / 兼容旧摘要 =====
-    summary_placeholders = [
-        PLACEHOLDERS["quick_summary"],
-        LEGACY_PLACEHOLDERS["summary"],
-        LEGACY_PLACEHOLDERS["old_summary"],
-    ]
-    if any(ph in content for ph in summary_placeholders):
-        print(f"   📝 {label}: 生成速读摘要...")
-        try:
-            summary = _run_chunked_llm(
-                f"摘要生成 {label}",
-                title,
-                transcript_text,
-                "你是一个通用视频笔记助手。请生成速读摘要，适配主题本身，"
-                "不要默认这是股票课程。用中文 Markdown 列表输出，覆盖核心问题、关键事实、论证链条和结论。",
-                "请为当前分块生成速读摘要，保留本分块的关键事实、论证链条和结论。",
-                "请综合所有分块摘要，生成一份不重复、覆盖全文的速读摘要，控制在 5-8 条。",
-            )
-            if summary:
-                for ph in summary_placeholders:
-                    if ph in content:
-                        content = content.replace(ph, summary.strip())
-                        changed = True
-                print(f"   ✅ {label}: 速读摘要已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 摘要生成失败: {e}")
-
-    # ===== 思维导图 =====
-    if PLACEHOLDERS["mindmap"] in content:
-        print(f"   🧠 {label}: 生成思维导图...")
-        try:
-            mindmap = _run_chunked_llm(
-                f"思维导图生成 {label}",
-                title,
-                transcript_text,
-                "你是一个结构化整理助手。请根据转录文本生成一份思维导图，"
-                "使用缩进的 Markdown 列表格式（2空格缩进）。\n"
-                "格式示例：\n"
-                "- 主题\n  - 子主题\n    - 要点\n"
-                "要求：层次清晰、要点精炼、覆盖全文核心内容。",
-                "请为当前分块生成 Markdown 缩进列表格式的思维导图。",
-                "请综合所有分块思维导图，生成一份去重后的全片 Markdown 思维导图，保持层次清晰。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            if mindmap:
-                content = content.replace(PLACEHOLDERS["mindmap"], mindmap.strip())
-                changed = True
-                print(f"   ✅ {label}: 思维导图已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 思维导图生成失败: {e}")
-
-    # ===== 结构化正文 =====
-    if PLACEHOLDERS["structured_body"] in content:
-        print(f"   🧱 {label}: 生成结构化正文...")
-        try:
-            structured = _run_chunked_llm(
-                f"结构化正文 {label}",
-                title,
-                transcript_text,
-                "你是一个本地知识库整理助手。请把视频转录整理成可复习的结构化正文。\n"
-                "要求：\n"
-                "1) 根据内容选择自然结构，不预设为股票、AI、课程或新闻；\n"
-                "2) 使用 Markdown 二级以下标题，建议从「### 一、...」开始；\n"
-                "3) 保留事实、因果、步骤、定义、例子和结论；\n"
-                "4) 把口语转成清晰书面表达，但不要编造原文没有的信息；\n"
-                "5) 如果内容存在行动建议、操作流程或风险边界，要单独写清楚。",
-                "请把当前分块整理成结构化正文，保留本分块事实和论证顺序。",
-                "请综合所有分块，生成一份连贯、去重、覆盖全文的结构化正文；"
-                "按主题合并，不要机械保留分块编号。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            content, did = _replace_placeholder(content, "structured_body", structured)
-            changed = changed or did
-            if did:
-                print(f"   ✅ {label}: 结构化正文已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 结构化正文生成失败: {e}")
-
-    # ===== 金句 / 重要原话 =====
-    if PLACEHOLDERS["quotes"] in content:
-        print(f"   💬 {label}: 提取金句/重要原话...")
-        try:
-            quotes = _run_chunked_llm(
-                f"金句提取 {label}",
-                title,
-                transcript_text,
-                "你是一个视频笔记整理助手。请提取最值得复看或引用的重要原话。"
-                "如果没有足够精彩的原话，就提取关键判断句。不要编造时间戳。",
-                "请从当前分块提取 2-5 条重要原话或关键判断句。",
-                "请综合所有分块，保留 5-10 条最有复习价值的原话/判断句；用 Markdown 列表输出。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            content, did = _replace_placeholder(content, "quotes", quotes)
-            changed = changed or did
-            if did:
-                print(f"   ✅ {label}: 金句/重要原话已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 金句提取失败: {e}")
-
-    # ===== 可复习清单 =====
-    if PLACEHOLDERS["review"] in content:
-        print(f"   ✅ {label}: 生成可复习清单...")
-        try:
-            review = _run_chunked_llm(
-                f"复习清单 {label}",
-                title,
-                transcript_text,
-                "你是一个学习笔记助手。请把视频内容转成复习清单，"
-                "优先使用问题、判断点、操作项和需要二次查证的事项。",
-                "请为当前分块生成可复习清单。",
-                "请综合所有分块，生成 6-12 条可复习清单；用 Markdown 任务列表或普通列表均可。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            content, did = _replace_placeholder(content, "review", review)
-            changed = changed or did
-            if did:
-                print(f"   ✅ {label}: 可复习清单已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 复习清单生成失败: {e}")
-
-    # ===== 术语与概念 =====
-    if PLACEHOLDERS["terms"] in content:
-        print(f"   📚 {label}: 提取术语与概念...")
-        try:
-            terms = _run_chunked_llm(
-                f"术语提取 {label}",
-                title,
-                transcript_text,
-                "你是一个知识库术语整理助手。请提取视频中有复习价值的术语、专名、概念或缩写，"
-                "每条用「术语：解释」格式；如果内容没有明显术语，写「本视频没有明显需要单独整理的术语。」",
-                "请提取当前分块中的术语与概念。",
-                "请综合所有分块，去重后输出术语与概念列表。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            content, did = _replace_placeholder(content, "terms", terms)
-            changed = changed or did
-            if did:
-                print(f"   ✅ {label}: 术语与概念已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: 术语提取失败: {e}")
-
-    # ===== 校对正文 =====
-    proofread_placeholders = [PLACEHOLDERS["proofread"], LEGACY_PLACEHOLDERS["proofread"]]
-    if any(ph in content for ph in proofread_placeholders):
-        print(f"   🔍 {label}: AI校对转录文本...")
-        try:
-            # 可选：先判断是否为对话
-            is_dialogue = False
-            if ENABLE_DIALOGUE_DETECTION:
-                is_dialogue = _detect_dialogue(transcript_text)
-            if is_dialogue:
-                print(f"   💬 {label}: 检测为对话内容，校对时将标注说话角色")
-
-            # 构建领域专有名词提示
-            domain_terms = _build_domain_prompt(PROOFREAD_DOMAINS)
-            stock_terms = build_stock_reference_prompt(transcript_text, A_SHARE_TERMS_ENABLED)
-
-            if is_dialogue:
-                proofread_prompt = (
-                    "你是一个文字校对员。以下是语音转文字的对话转录文本。\n"
-                    "规则：\n"
-                    "1) 修正明显的同音错别字和语音识别错误\n"
-                    "2) 修复断句问题（合并不合理的断句、拆分超长句）\n"
-                    "3) 去除口语填充词（如过多的「嗯」「啊」「就是说」）\n"
-                    "4) 修正标点符号，使文本更易读\n"
-                    "5) 严禁增删实质性内容，严禁改变原意和说话风格\n"
-                    "6) 根据语义判断说话人切换的位置，为每个发言段落标注角色。\n"
-                    "   格式使用「角色名：」或「说话人：」前缀（如「主持人：」「嘉宾：」）。\n"
-                    "   如果无法确定具体角色名，使用「说话人A：」「说话人B：」区分。\n"
-                    "   连续同一角色的发言合并为一段，角色切换时另起新段。\n"
-                    + domain_terms
-                    + stock_terms +
-                    "7) 输出完整的校对后文本（含角色标注）"
-                )
-            else:
-                proofread_prompt = (
-                    "你是一个文字校对员。请校对并修正以下语音转文字的转录文本。\n"
-                    "规则：\n"
-                    "1) 修正明显的同音错别字和语音识别错误\n"
-                    "2) 修复断句问题（合并不合理的断句、拆分超长句）\n"
-                    "3) 去除口语填充词（如过多的「嗯」「啊」「就是说」）\n"
-                    "4) 修正标点符号，使文本更易读\n"
-                    "5) 严禁增删实质性内容，严禁改变原意和说话风格\n"
-                    + domain_terms
-                    + stock_terms +
-                    "6) 输出完整的校对后文本"
-                )
-
-            proofread = _run_chunked_llm(
-                f"AI校对 {label}",
-                title,
-                transcript_text,
-                proofread_prompt,
-                "请只校对当前分块，修正明显 ASR 错误、断句和标点；不要新增原文没有的信息。",
-                "请把所有分块校对结果合并为一份完整校对文本，去除 overlap 重复，保持原始顺序和语义。",
-                max_tokens=SUMMARY_MAX_TOKENS,
-            )
-            if proofread:
-                for ph in proofread_placeholders:
-                    if ph in content:
-                        content = content.replace(ph, proofread.strip())
-                        changed = True
-                print(f"   ✅ {label}: AI校对已写入")
-        except Exception as e:
-            print(f"   ⚠️ {label}: AI校对失败: {e}")
+    content, changed = _replace_requested_sections(content, sections)
+    missing = [SUMMARY_SECTION_LABELS[key] for key in requested if key not in sections]
+    if missing:
+        print(f"   ⚠️ {label}: 模型未返回栏目，将保留占位符以便重试：{'、'.join(missing)}")
+    if sections:
+        print(f"   ✅ {label}: 单次整理已写入 {len(sections)}/{len(requested)} 个栏目")
 
     if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
         updated = _remove_original_subtitles_section(content)

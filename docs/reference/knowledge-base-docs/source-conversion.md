@@ -7,7 +7,7 @@
 第一阶段支持：
 
 - PDF：使用 Python 开源库 `pypdf` 抽取文本。
-- PDF + Qwen：可选调用本地 `qwen3.6-35b-a3b-nvfp4` 对抽取文本做 Markdown 和公式整理。
+- PDF + Qwen：可选调用本地 `mtplx-qwen38-27b-optimized-speed` 对抽取文本做 Markdown 和公式整理。
 - LM Studio conversation JSON：解析对话标题、角色、模型和正文。
 - `.docx`：使用 `zipfile` 和 WordprocessingML XML 抽取标题、正文、列表、表格、超链接和图片资产。
 - 网页 URL：使用开源库 `lxml` 抽取正文并转换为 Markdown。

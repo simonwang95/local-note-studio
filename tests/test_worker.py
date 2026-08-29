@@ -238,6 +238,69 @@ class RequestAndCommandContractTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(note.read_text(encoding="utf-8"), original)
 
+    def test_video_note_generation_combines_all_sections_into_one_model_task(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "video.md"
+            sections = [
+                ("一句话概括", "one_line"),
+                ("速读摘要", "quick_summary"),
+                ("思维导图", "mindmap"),
+                ("结构化正文", "structured_body"),
+                ("金句与重要原话", "quotes"),
+                ("可复习清单", "review"),
+                ("术语与概念", "terms"),
+                ("校对正文", "proofread"),
+            ]
+            note.write_text(
+                "# 合并调用测试\n\n"
+                + "\n\n".join(
+                    f"## {heading}\n\n{batch_transcriber.PLACEHOLDERS[key]}" for heading, key in sections
+                )
+                + "\n\n<details>\n<summary>📄 原始字幕</summary>\n\n这是需要整理的原始字幕。\n\n</details>\n",
+                encoding="utf-8",
+            )
+            response = "\n\n".join(
+                f"[[LNS_SECTION:{key}]]\n{heading}结果\n[[/LNS_SECTION:{key}]]"
+                for heading, key in sections
+            )
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
+                mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=response) as model_task,
+            ):
+                self.assertTrue(batch_transcriber.generate_summary(str(note)))
+
+            final = note.read_text(encoding="utf-8")
+            model_task.assert_called_once()
+            self.assertNotIn("【AI待处理", final)
+            self.assertNotIn("原始字幕", final)
+            for heading, _key in sections:
+                self.assertIn(f"{heading}结果", final)
+
+    def test_partial_combined_generation_keeps_missing_placeholders_and_raw_transcript(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            note = pathlib.Path(temp_dir) / "video.md"
+            note.write_text(
+                "# 部分返回测试\n\n"
+                f"## 速读摘要\n\n{batch_transcriber.PLACEHOLDERS['quick_summary']}\n\n"
+                f"## 结构化正文\n\n{batch_transcriber.PLACEHOLDERS['structured_body']}\n\n"
+                "<details>\n<summary>📄 原始字幕</summary>\n\n保留用于重试的原始字幕。\n\n</details>\n",
+                encoding="utf-8",
+            )
+            response = "[[LNS_SECTION:quick_summary]]\n- 已返回摘要\n[[/LNS_SECTION:quick_summary]]"
+            with (
+                mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
+                mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=response) as model_task,
+            ):
+                self.assertTrue(batch_transcriber.generate_summary(str(note)))
+
+            final = note.read_text(encoding="utf-8")
+            model_task.assert_called_once()
+            self.assertIn("- 已返回摘要", final)
+            self.assertIn(batch_transcriber.PLACEHOLDERS["structured_body"], final)
+            self.assertIn("保留用于重试的原始字幕", final)
+
     def test_empty_generated_section_does_not_consume_details_raw_transcript(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             note = pathlib.Path(temp_dir) / "legacy-details-video.md"
@@ -510,6 +573,7 @@ class RequestAndCommandContractTests(unittest.TestCase):
         with mock.patch.dict("os.environ", env):
             self.assertEqual(organizer.config()["QWEN_ORGANIZE_COOLDOWN_DELAY"], "12")
         self.assertEqual(env["QWEN_ORGANIZE_MAX_CHARS"], "24000")
+        self.assertEqual(env["SUMMARY_CHUNK_CHARS"], "24000")
         self.assertEqual(env["OCR_RESUME"], "false")
 
     def test_explicit_zero_disables_all_model_cooldowns(self):

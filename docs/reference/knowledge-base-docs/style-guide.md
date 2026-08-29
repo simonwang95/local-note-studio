@@ -21,7 +21,7 @@ source_url:
 created: 2026-06-10
 updated: 2026-06-10
 status: draft
-model: qwen3.6-35b-a3b-nvfp4
+model: mtplx-qwen38-27b-optimized-speed
 tags:
   - source/pdf
   - domain/ai

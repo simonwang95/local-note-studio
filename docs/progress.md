@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-08-29
+
+- Advanced the app, Tauri bundle, and Worker audit version to `0.1.24` for the MTPLX Qwen3.8 27B default and single-pass note organization release.
+- Switched the built-in desktop and Worker LLM defaults to the local MTPLX endpoint at `127.0.0.1:8000/v1` with `mtplx-qwen38-27b-optimized-speed`; exact legacy LM Studio defaults migrate automatically while customized configurations remain unchanged.
+- Collapsed the eight Bilibili video-note post-processing passes into one structured model task per normal-length note. Dialogue-role inference now happens inside that same task, missing sections retain their placeholders and raw transcript for retry, and only texts above 60,000 characters use chunk-and-synthesize calls.
+- Raised the generic organizer's default chunk size from 22,000 to 60,000 characters and its synthesis window to 80,000 characters to use the deployed model's 131,072-token context and reduce avoidable per-note calls.
+- Verified the configured model's visual input with the repository UI screenshot: it correctly returned `Local Note Studio`, `任务`, `B站单链接`, and `运行任务` in the requested JSON fields.
+- Built and read-only mounted the optimized `0.1.24` Apple Silicon APFS DMG. The full release gate passed 135 Python tests and 10 Rust tests; `hdiutil verify`, strict deep ad-hoc signature verification, arm64/version checks, changed Worker/organizer resource hashes, and the no-`env.local`/bytecode check also passed. `Local Note Studio_0.1.24_aarch64.dmg` is 3,431,197 bytes with SHA-256 `c37c23aff4cabb887edd2dbb0e34a810283f11951df876b02422cad0a76446ef`; it was not copied over `/Applications` or notarized.
+
 ## 2026-08-06
 
 - Advanced the app, Tauri bundle, and Worker audit version to `0.1.23` for the final UP-Opus log clarity pass.

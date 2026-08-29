@@ -1,6 +1,6 @@
 # Agent 自动化
 
-Local Note Studio 0.1.23 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
+Local Note Studio 0.1.24 提供受限 Agent CLI、本地 stdio MCP Server 和已有 Markdown 笔记的只读检索。OpenHanako 等 Agent 只负责选择命名 Profile、触发任务和查询状态；采集、转写、Qwen 整理、Manifest、恢复点和完整性检查仍由 `worker/local_note_studio_worker.py` 及现有脚本完成。
 
 ## 安全边界
 
@@ -162,7 +162,7 @@ SQLite 使用 WAL 与完整同步，保存脱敏请求、状态、统计、输�
 
 `status` 可为 `completed`、`no_changes`、`partial_failed`、`failed`、`cancelled` 或 `timeout`；异常强制终止且来不及返回结果的历史记录会在下次查询时恢复为 `interrupted`。`deliveries` 在可用时包含笔记路径、`source_type`、`source_url`、`source_hash`、BVID/动态 ID、`author_mid`、`published` 和 `organized_status`，供下游读取；Local Note Studio 不执行股票观点提取或数据库写入。
 
-`env-check` 会在 `details.environment_report` 返回脱敏后的运行时检查报告，并与真实任务共用 request → environment → 内置 LM Studio 默认值的有效 LLM 配置解析；内置默认 key 只报告为 `set`。B站图文任务还可在 `details.opus_image_analysis` 返回模式、图片数、`finish_reason`、数值型 `completion_tokens`、`max_tokens`、`timeout_seconds`、`retry_count`、真实模型调用、缓存命中、失败和安全上限统计。Cookie、API Key、浏览器 Profile 和图片 base64 字段从结果/历史合同中直接省略，warning 也不含 reasoning 或完整服务端错误正文。Profile、状态或历史读取本身失败时仍返回上述合同，而不是未结构化的 traceback。
+`env-check` 会在 `details.environment_report` 返回脱敏后的运行时检查报告，并与真实任务共用 request → environment → 内置 MTPLX 默认值的有效 LLM 配置解析；内置默认 key 只报告为 `set`。B站图文任务还可在 `details.opus_image_analysis` 返回模式、图片数、`finish_reason`、数值型 `completion_tokens`、`max_tokens`、`timeout_seconds`、`retry_count`、真实模型调用、缓存命中、失败和安全上限统计。Cookie、API Key、浏览器 Profile 和图片 base64 字段从结果/历史合同中直接省略，warning 也不含 reasoning 或完整服务端错误正文。Profile、状态或历史读取本身失败时仍返回上述合同，而不是未结构化的 traceback。
 
 稳定错误码包括：`INVALID_REQUEST`、`PROFILE_INVALID`、`PROFILE_NOT_FOUND`、`PATH_NOT_ALLOWED`、`URL_NOT_ALLOWED`、`TASK_LOCKED`、`TASK_TIMEOUT`、`TASK_CANCELLED`、`TASK_INTERRUPTED`、`PARTIAL_FAILURE`、`BILIBILI_AUTH_INVALID`、`BILIBILI_RATE_LIMITED`、`BILIBILI_DISCOVERY_FAILED`、`BILIBILI_SUBTITLE_UNAVAILABLE`、`BILIBILI_DOWNLOAD_FAILED`、`ASR_FAILED`、`LLM_FAILED`、`OUTPUT_INTEGRITY_FAILED`、`OUTPUT_MISSING`、`SOURCE_ACCESS_DENIED`、`SOURCE_NOT_FOUND`、`BATCH_ALL_FAILED`、`STATE_STORAGE_ERROR`、`WORKER_CONTRACT_ERROR`、`UNSUPPORTED_REQUEST` 和兜底 `TASK_FAILED`。是否适合重试由 `retryable` 明确给出，无需解析中文日志。
 

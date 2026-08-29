@@ -122,9 +122,9 @@ cp worker/env.example worker/env.local
 
 ```bash
 CONDA_ENV="course-whisper"
-DEFAULT_LLM_API_BASE="http://127.0.0.1:1234/v1"
-DEFAULT_LLM_API_KEY="lm-studio"
-DEFAULT_LLM_MODEL="qwen3.6-35b-a3b-nvfp4"
+DEFAULT_LLM_API_BASE="http://127.0.0.1:8000/v1"
+DEFAULT_LLM_API_KEY="mtplx-local"
+DEFAULT_LLM_MODEL="mtplx-qwen38-27b-optimized-speed"
 DEFAULT_OUTPUT_ROOT="/Users/xxx/Notes"
 NOTES_DIR="/Users/xxx/Notes"
 OBSIDIAN_VAULT_DIR="/Users/xxx/Notes"
@@ -249,9 +249,9 @@ Waiting for your frontend dev server...
 - `Conda 环境`：仅高级后端使用，预填 `course-whisper`，可改为自己的环境名
 - `Conda 可执行文件`：通常留空自动查找；自定义安装位置请填写绝对路径
 - `Python 命令`：仅高级后端且不使用 Conda 环境时使用，默认 `python3`
-- `LLM API Base`：默认 `http://127.0.0.1:1234/v1`
-- `API Key`：LM Studio 可用 `lm-studio`
-- `模型`：默认 `qwen3.6-35b-a3b-nvfp4`
+- `LLM API Base`：默认 `http://127.0.0.1:8000/v1`
+- `API Key`：本机 MTPLX 服务可用占位值 `mtplx-local`
+- `模型`：默认 `mtplx-qwen38-27b-optimized-speed`（Qwen3.8 27B）
 - `ASR 模型目录`：选择后会自动保存在本机，也可点击旁边的“保存配置”；默认隐藏，眼睛按钮可临时显示。历史任务重新运行不会再用旧的空路径覆盖当前配置
 - `B站 Cookie 文件`：可选，处理私有收藏夹或受限字幕时通常需要
 
@@ -292,7 +292,7 @@ conda run -n course-whisper python3 -m pip install pypdf
 
 装完后重新点击“检查依赖”。
 
-如果你已经在 LM Studio 或其他 OpenAI-compatible 服务里加载了支持视觉输入的 `qwen3.6` 模型，那么图片 OCR 和扫描版 PDF OCR 会优先直接走当前 LLM 接口，不依赖本机 Swift OCR。`tesseract` / `pdftoppm` 只是备用兜底。
+如果当前 OpenAI-compatible 服务加载的是支持视觉输入的模型，那么图片 OCR 和扫描版 PDF OCR 会优先直接走当前 LLM 接口，不依赖本机 Swift OCR。默认 MTPLX Qwen3.8 27B 已通过真实截图识别测试，可直接用于这条视觉路径；`tesseract` / `pdftoppm` 仍是备用兜底。
 
 ### B站字幕和 ASR 的优先级
 
@@ -742,13 +742,13 @@ course-whisper
 1. PDF 路径是否存在
 2. `pypdf` 是否安装
 3. LLM API Base 是否可访问
-4. 模型名是否和 LM Studio 中加载的模型一致
+4. 模型名是否和 MTPLX 或其他 OpenAI-compatible 服务实际暴露的模型 ID 一致
 
 ## 7. 推荐日常流程
 
 每次使用时按这个顺序：
 
-1. 启动 LM Studio 或其他 OpenAI-compatible LLM 服务。
+1. 启动 MTPLX 或其他 OpenAI-compatible LLM 服务。
 2. 运行 `npm run tauri:dev`。
 3. 在 Tauri 桌面窗口点击“检查依赖”。
 4. 填写输出根目录。

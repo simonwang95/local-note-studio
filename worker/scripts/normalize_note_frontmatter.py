@@ -22,7 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 DEFAULTS = {
     "NOTES_DIR": "notes",
-    "DEFAULT_LLM_MODEL": "qwen3.6-35b-a3b-nvfp4",
+    "DEFAULT_LLM_MODEL": "mtplx-qwen38-27b-optimized-speed",
 }
 
 FIELD_ORDER = [

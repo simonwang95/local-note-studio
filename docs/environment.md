@@ -73,9 +73,9 @@ ffmpeg -version
 The app expects an OpenAI-compatible API:
 
 ```bash
-DEFAULT_LLM_API_BASE="http://127.0.0.1:1234/v1"
-DEFAULT_LLM_API_KEY="lm-studio"
-DEFAULT_LLM_MODEL="qwen3.6-35b-a3b-nvfp4"
+DEFAULT_LLM_API_BASE="http://127.0.0.1:8000/v1"
+DEFAULT_LLM_API_KEY="mtplx-local"
+DEFAULT_LLM_MODEL="mtplx-qwen38-27b-optimized-speed"
 ```
 
 For Bilibili summary/proofread workflows, the worker also maps these values to:

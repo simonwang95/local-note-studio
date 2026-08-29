@@ -55,6 +55,15 @@ export function migrateRuntimePreference(value: unknown): Record<string, unknown
     settings.runtimePreferenceConfirmed = true;
   }
   if (settings.cookies === "./bili_cookies.txt") settings.cookies = "";
+  const usesLegacyLlmDefaults =
+    settings.apiBase === "http://127.0.0.1:1234/v1" &&
+    settings.apiKey === "lm-studio" &&
+    settings.model === "qwen3.6-35b-a3b-nvfp4";
+  if (usesLegacyLlmDefaults) {
+    settings.apiBase = "http://127.0.0.1:8000/v1";
+    settings.apiKey = "mtplx-local";
+    settings.model = "mtplx-qwen38-27b-optimized-speed";
+  }
   return settings;
 }
 
