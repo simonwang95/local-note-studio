@@ -30,6 +30,17 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
+## 0.1.26 internal Apple Silicon artifact (2026-09-04)
+
+- Version: `0.1.26`
+- Changes: note-filename date prefix (the `文件名补充日期` task option plus a standalone `补充文件名日期` batch-rename action that applies the same `YYYY-MM-DD-` prefix to already-organized notes), the MTPLX thinking control (the `启用思考` option), deterministic mind-map generation/indentation checks, and a short-Opus skip. General organization and Bilibili video summaries send `enable_thinking` explicitly and default it to off; hierarchy quality is enforced independently of that choice. Both paths share one three-level mind-map rule and normalize accepted output to two-space Markdown lists. A shallow general-note map is regenerated semantically from the complete organized note through the same `LNS_SECTION:mindmap` boundary contract used by video notes, while shallow video results stay in the existing targeted-retry path; neither path silently accepts a flat map. A-share stock-code cleanup now preserves line-leading Markdown indentation, and a final post-processing guard rejects any hierarchy damaged after generation. Bilibili image-text posts whose body is below `QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS` (default `1000`) are preserved verbatim instead of calling Qwen when `QWEN_ORGANIZE_SHORT_OPUS_SKIP` is on (default); both are set in `env.local` (see `worker/env.example`), and setting the threshold to `0` disables the skip.
+- Status: source and the full check gate (frontend build/compatibility, 181 Python tests, 10 Rust tests) pass. The `0.1.26` Apple Silicon DMG is built and the corrected nested Bilibili Opus mind map has passed user acceptance (see below).
+- Architecture: Apple Silicon / `arm64` (`aarch64` artifact suffix)
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.26_aarch64.dmg`
+- Size: `3,496,042 bytes`
+- SHA-256: `f8148e7f7d142df94057664d383c939259ee888233d46f08f792751eee29aed2`
+- Signature: complete ad-hoc app signature with sealed resources; no Developer ID and no notarization
+
 ## 0.1.25 internal Apple Silicon artifact (2026-08-29)
 
 - Version: `0.1.25`

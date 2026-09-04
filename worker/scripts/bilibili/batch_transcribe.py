@@ -26,6 +26,11 @@ from typing import Optional
 import requests
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from mindmap_markdown import (
+    MINDMAP_HIERARCHY_INSTRUCTION,
+    mindmap_has_required_hierarchy,
+    normalize_mindmap_list,
+)
 from stock_reference import build_stock_reference_prompt, build_stock_validation_section
 
 # ===== 加载 env.local 配置 =====
@@ -99,6 +104,10 @@ SUMMARY_PROOFREAD_ENABLE_THINKING = (
 )
 SUMMARY_PROOFREAD_TIMEOUT = max(60, int(_env.get("SUMMARY_PROOFREAD_TIMEOUT", "600")))
 SUMMARY_CHUNK_COOLDOWN_DELAY = max(0.0, float(_env.get("SUMMARY_CHUNK_COOLDOWN_DELAY", _env.get("COOLDOWN_DELAY", "0"))))
+SUMMARY_ENABLE_THINKING = (
+    _env.get("SUMMARY_ENABLE_THINKING", _env.get("QWEN_ORGANIZE_ENABLE_THINKING", "false")).strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 LLM_TIMEOUT = int(_env.get("LLM_TIMEOUT", "1800"))
 LLM_MAX_RETRIES = max(0, int(_env.get("LLM_MAX_RETRIES", "2")))
 LLM_RETRY_DELAY = max(0.0, float(_env.get("LLM_RETRY_DELAY", "3")))
@@ -130,9 +139,18 @@ LEGACY_PLACEHOLDERS = {
 }
 ALL_PLACEHOLDERS = list(PLACEHOLDERS.values()) + list(LEGACY_PLACEHOLDERS.values())
 
-if INCREMENTAL_STATE_ENABLED:
-    os.makedirs(STATE_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def _ensure_runtime_dirs() -> None:
+    """Create the state/output directories.
+
+    This is called from ``main()`` rather than at import time so that importing
+    the module (e.g. by the test suite, or on a non-Mac machine) has no
+    filesystem side effects. The default ``OUTPUT_DIR`` is resolved from
+    ``env.local`` and can point at a user home path that does not exist on the
+    machine doing the importing.
+    """
+    if INCREMENTAL_STATE_ENABLED:
+        os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def get_python_cmd():
@@ -609,6 +627,7 @@ def _run_chunked_llm(
             f"视频标题：{title}\n\n转录文本：\n{chunks[0]}",
             max_tokens=max_tokens,
             task_name=task_name,
+            enable_thinking=SUMMARY_ENABLE_THINKING,
         )
 
     print(
@@ -628,6 +647,7 @@ def _run_chunked_llm(
             ),
             max_tokens=max_tokens,
             task_name=f"{task_name} 分块 {index}/{len(chunks)}",
+            enable_thinking=SUMMARY_ENABLE_THINKING,
         )
         if partial and partial.content:
             partials.append(f"## 分块 {index}\n\n{partial.content.strip()}")
@@ -649,6 +669,7 @@ def _run_chunked_llm(
         ),
         max_tokens=max_tokens,
         task_name=f"{task_name} 综合",
+        enable_thinking=SUMMARY_ENABLE_THINKING,
     )
 
 
@@ -898,7 +919,7 @@ def _combined_summary_prompts(requested, transcript_text):
     instructions = {
         "one_line": "用一句中文概括全文，不超过 80 字；只写结论，不要标题、编号或解释。",
         "quick_summary": "用 5-8 条中文 Markdown 列表覆盖核心问题、关键事实、论证链条和结论。",
-        "mindmap": "使用 2 空格缩进的 Markdown 列表，层次清晰并覆盖全文核心结构。",
+        "mindmap": MINDMAP_HIERARCHY_INSTRUCTION,
         "structured_body": (
             "按内容选择自然结构，使用 Markdown 三级及以下标题；保留事实、因果、步骤、定义、例子、结论、"
             "行动建议和风险边界；把口语改成清晰书面表达。"
@@ -983,7 +1004,12 @@ def _parse_combined_summary(response, requested, transcript_text=""):
         )
         match = re.search(marker_pattern, response_text)
         if match and match.group(1).strip():
-            sections[key] = match.group(1).strip()
+            value = match.group(1).strip()
+            if key == "mindmap":
+                value = normalize_mindmap_list(value)
+                if not mindmap_has_required_hierarchy(value):
+                    continue
+            sections[key] = value
             continue
         label = SUMMARY_SECTION_LABELS[key]
         heading_match = re.search(
@@ -991,7 +1017,12 @@ def _parse_combined_summary(response, requested, transcript_text=""):
             response_text,
         )
         if heading_match and heading_match.group(1).strip():
-            sections[key] = heading_match.group(1).strip()
+            value = heading_match.group(1).strip()
+            if key == "mindmap":
+                value = normalize_mindmap_list(value)
+                if not mindmap_has_required_hierarchy(value):
+                    continue
+            sections[key] = value
     if "proofread" not in sections:
         recovered = _recover_unclosed_proofread(response, requested, transcript_text)
         if recovered:
@@ -1308,7 +1339,7 @@ def main():
     args = parser.parse_args()
     if args.output_dir:
         OUTPUT_DIR = _expand_path(args.output_dir)
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+    _ensure_runtime_dirs()
 
     # ===== 模式：仅补齐 LLM 后处理 =====
     if args.summary_only is not None:

@@ -16,6 +16,17 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from mindmap_markdown import (
+    MINDMAP_HIERARCHY_INSTRUCTION,
+    MINDMAP_SECTION_END,
+    MINDMAP_SECTION_START,
+    extract_mindmap_section,
+    extract_mindmap_contract,
+    mindmap_has_required_hierarchy,
+    normalize_mindmap_section,
+    replace_mindmap_section,
+)
+from note_filename import flag_enabled, parse_published_date, prepend_date_prefix, strip_date_prefix
 from stock_reference import build_stock_reference_prompt, build_stock_validation_section, sanitize_model_stock_codes
 
 
@@ -35,7 +46,11 @@ DEFAULTS = {
     "QWEN_ORGANIZE_MAX_RETRIES": "2",
     "QWEN_ORGANIZE_RETRY_DELAY": "3",
     "QWEN_ORGANIZE_COOLDOWN_DELAY": "",
+    "QWEN_ORGANIZE_ENABLE_THINKING": "false",
     "A_SHARE_TERMS_ENABLED": "false",
+    "DATE_IN_FILENAME": "false",
+    "QWEN_ORGANIZE_SHORT_OPUS_SKIP": "true",
+    "QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS": "1000",
     "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
 }
 
@@ -208,6 +223,9 @@ def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) ->
         "messages": messages,
         "temperature": 0.15,
     }
+    # MTPLX/Qwen supports an explicit reasoning switch. Keep it configurable;
+    # output structure is enforced separately instead of inferred from this flag.
+    payload["enable_thinking"] = str(cfg.get("QWEN_ORGANIZE_ENABLE_THINKING", "false")).strip().lower() in {"1", "true", "yes", "on"}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     api_key = cfg.get("DEFAULT_LLM_API_KEY", "")
@@ -424,7 +442,22 @@ def organize_chunk(title: str, source_path: str, chunk: str, index: int, total: 
 - 只输出 Markdown 正文，不要包含 YAML frontmatter。
 - 面向长期复习，保留关键概念、论证链条、数据、结论和待核验点。
 - 结构建议：`## 速读摘要`、`## 核心观点`、`## 思维导图`、`## 结构化笔记`、`## 关键概念`、`## 待核验`。
-- `## 思维导图` 使用 Markdown 缩进列表，覆盖当前分块的核心结构。
+- `## 思维导图` 必须是**多层缩进**的 Markdown 列表，体现主题之间的从属与层级，而不是把所有要点平铺在同一层。
+  顶层主题用一级 `-`，其下的子主题、要点用二级缩进（两个空格 + `-`），必要时继续加深缩进。
+  要求：每个顶层主题下**至少有两层**（即顶层 → 子主题 → 具体要点/数据），不要停在“顶层 + 一层要点”的浅结构。示例（三层）：
+  ```
+  - 市场状态
+    - 指数：主动回调
+      - 复刻 8 月 18-19 日节奏
+    - 量能：跌破 1.8 万亿
+      - 接近地量区间
+  - 板块方向
+    - 军工：地缘催化 + 低位
+      - 指数弱时为主线
+    - 科技（AI）：资本开支周期
+      - 博通指引 + 戴尔业绩
+  ```
+  输出前自检：若某个顶层主题下只有一层、没有更深的要点，请把它拆成“子主题 → 具体要点”两层。不要输出只有一层、没有缩进的列表。
 - 如果这是对话材料，提炼问题、结论、可沉淀知识和后续行动。
 - 如果这是论文材料，提炼摘要、方法、实验、贡献、局限和公式线索。
 - 分块之间可能包含少量重叠上下文；重叠部分仅用于衔接，不要重复沉淀为新信息。
@@ -464,7 +497,22 @@ def synthesize_text(title: str, source_path: str, joined: str, cfg: dict[str, st
 输出要求：
 - 只输出 Markdown 正文，不要 YAML frontmatter。
 - 推荐结构：`## 一句话概括`、`## 速读摘要`、`## 核心观点`、`## 思维导图`、`## 结构化笔记`、`## 关键概念`、`## 待核验`、`## 复习清单`。
-- `## 思维导图` 使用 Markdown 缩进列表，综合全文结构，合并分块导图并去重。
+- `## 思维导图` 必须是**多层缩进**的 Markdown 列表，综合全文结构、合并分块导图并去重，保留主题之间的从属层级，不要把所有要点平铺在同一层。
+  顶层主题用一级 `-`，子主题/要点用二级缩进（两个空格 + `-`），必要时继续加深。
+  要求：每个顶层主题下**至少有两层**（顶层 → 子主题 → 具体要点/数据），不要停在“顶层 + 一层要点”的浅结构。示例（三层）：
+  ```
+  - 市场状态
+    - 指数：主动回调
+      - 复刻 8 月 18-19 日节奏
+    - 量能：接近地量
+      - 跌破 1.8 万亿
+  - 板块方向
+    - 军工：地缘催化 + 低位
+      - 指数弱时为主线
+    - 科技（AI）：资本开支周期
+      - 博通指引 + 戴尔业绩
+  ```
+  输出前自检：若某个顶层主题下只有一层、没有更深的要点，请把它拆成“子主题 → 具体要点”两层。
 - 合并重复内容，保留关键数据、公式线索、结论和不确定性。
 - 分块之间可能包含少量重叠上下文；请去重后综合，不要把重叠内容重复写入。
 - 不要重新判断程序保存的 URL、作者、MID、发布时间或哈希是否合理。
@@ -498,6 +546,50 @@ def synthesize_chunks(title: str, source_path: str, chunk_notes: list[str], cfg:
     return synthesize_chunks(title, source_path, partials, cfg, source_type, depth + 1)
 
 
+def ensure_mindmap_hierarchy(markdown: str, cfg: dict[str, str]) -> str:
+    """Normalize a mind map and regenerate a shallow one from the full note once."""
+    normalized = normalize_mindmap_section(markdown)
+    mindmap = extract_mindmap_section(normalized)
+    if not mindmap or mindmap_has_required_hierarchy(mindmap):
+        return normalized
+
+    source_note = replace_mindmap_section(
+        normalized,
+        "（原思维导图层级不合格；请忽略此占位，并依据其他章节重新生成。）",
+    )
+    system = (
+        "你是本地知识库笔记整理助手。必须忠于给定笔记，不编造，不输出思考过程。"
+        "本次只重建思维导图；需要按语义重新组织主题、子主题和具体要点，而不是机械修改行首空格。"
+    )
+    user = f"""请依据下面的完整笔记，重新生成“思维导图”栏目。
+
+要求：
+- {MINDMAP_HIERARCHY_INSTRUCTION}
+- 可合并重复内容并补充必要的概括性父节点，但不得添加笔记中没有的事实、数字、人名或结论。
+- 严格使用下面的栏目边界；边界标记必须原样保留，标记外不要输出任何文字：
+{MINDMAP_SECTION_START}
+- 总主题
+  - 子主题
+    - 具体要点
+{MINDMAP_SECTION_END}
+
+完整笔记：
+
+{source_note}
+"""
+    repaired = extract_mindmap_contract(
+        call_chat_completion(
+            cfg,
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        )
+    )
+    if not repaired:
+        raise RuntimeError("思维导图重建未按栏目边界返回，已拒绝写入")
+    if not mindmap_has_required_hierarchy(repaired):
+        raise RuntimeError("思维导图重建后仍缺少三级层级，已拒绝写入")
+    return replace_mindmap_section(normalized, repaired)
+
+
 def load_manifest(path: pathlib.Path) -> dict[str, Any]:
     if not path.exists():
         return {"items": []}
@@ -523,6 +615,8 @@ def build_output_path(
     source_type: str,
     output_filename: str = "",
     source_id: str = "",
+    published: str = "",
+    date_in_filename: bool = False,
 ) -> pathlib.Path:
     prefix = {
         "pdf": "PAPER",
@@ -543,7 +637,10 @@ def build_output_path(
         "local-video": "VIDEO",
     }.get(source_type, "NOTE")
     suffix = f"_{source_id}" if source_type == "bilibili-opus" and source_id else ""
-    return output_path_for(output_dir, f"{prefix}-{slugify(title)}{suffix}.md", output_filename)
+    default_name = f"{prefix}-{slugify(title)}{suffix}.md"
+    if date_in_filename:
+        default_name = prepend_date_prefix(default_name, parse_published_date(published))
+    return output_path_for(output_dir, default_name, output_filename)
 
 
 def existing_bilibili_opus_output(
@@ -569,7 +666,9 @@ def existing_bilibili_opus_output(
         ):
             continue
         has_original = re.search(r"(?m)^##\s+原文抽取\s*$", body) is not None
-        candidates.append((has_original, path.name.startswith("BILI-OPUS-"), path.stat().st_mtime, path))
+        candidates.append(
+            (has_original, strip_date_prefix(path.name).startswith("BILI-OPUS-"), path.stat().st_mtime, path)
+        )
     if not candidates:
         return None
     return max(candidates, key=lambda item: item[:3])[3]
@@ -587,6 +686,9 @@ def organized_note_complete(
     except (OSError, UnicodeError):
         return False
     if str(meta.get("status") or "") != "organized":
+        return False
+    mindmap = extract_mindmap_section(body)
+    if mindmap and not mindmap_has_required_hierarchy(mindmap):
         return False
     if source_type == "bilibili-opus":
         original = original_payload_for_hash(body, source_type)
@@ -652,6 +754,126 @@ def demote_markdown_headings(markdown: str) -> str:
     return re.sub(r"(?m)^(#{2,5})(\s+)", r"#\1\2", markdown.strip())
 
 
+def short_opus_threshold_chars(cfg: dict[str, str]) -> int:
+    try:
+        return max(0, int(str(cfg.get("QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS", "1000")).strip() or 0))
+    except ValueError:
+        return 1000
+
+
+def short_opus_skip_enabled(cfg: dict[str, str]) -> bool:
+    return flag_enabled(cfg.get("QWEN_ORGANIZE_SHORT_OPUS_SKIP"))
+
+
+def write_short_opus_note(
+    draft_path: pathlib.Path,
+    output_dir: pathlib.Path,
+    cfg: dict[str, str],
+    output_filename: str = "",
+    planned_output: pathlib.Path | None = None,
+    omit_draft_path: bool = False,
+    progress_label: str = "",
+    title: str = "",
+    meta: dict[str, Any] | None = None,
+    body: str = "",
+    source_type: str = "bilibili-opus",
+    source_ref: str = "",
+    draft_hash: str = "",
+) -> tuple[pathlib.Path, dict[str, Any]]:
+    """Write an organized note for a short Bilibili Opus without calling the model.
+
+    When the source text is below ``QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS`` there is
+    little to restructure, so the note preserves the original image-text (and any
+    image analysis) verbatim instead of spending a model call on it.
+    """
+    meta = meta or {}
+    source_path = str(meta.get("source_path") or "")
+    source_url = str(meta.get("source_url") or "")
+    source_ref = source_ref or source_path or source_url or rel(draft_path)
+    output_path = planned_output or build_output_path(
+        output_dir,
+        title,
+        source_type,
+        output_filename,
+        str(meta.get("dynamic_id") or ""),
+        str(meta.get("published") or ""),
+        flag_enabled(cfg.get("DATE_IN_FILENAME")),
+    )
+    organized_meta = {
+        "title": title,
+        "type": note_type_for(source_type),
+        "source_type": source_type,
+        "source_path": source_path,
+        "source_url": source_url,
+        "created": today(),
+        "updated": today(),
+        "status": "organized",
+        "model": "",
+        "tags": ["organized/verbatim", f"source/{source_type}"],
+        "draft_hash": draft_hash,
+        "source_hash": meta.get("source_hash", ""),
+    }
+    for key in ("original_content_sha256", "original_content_chars"):
+        if meta.get(key) not in (None, ""):
+            organized_meta[key] = meta[key]
+    if not omit_draft_path:
+        organized_meta["draft_path"] = rel(draft_path)
+    for key in (
+        "dynamic_id",
+        "author",
+        "author_mid",
+        "published",
+        "opus_image_analysis",
+        "opus_image_analysis_status",
+        "time_warning",
+    ):
+        if meta.get(key) not in (None, ""):
+            organized_meta[key] = meta[key]
+    source_trace_lines = [
+        "## 来源追溯",
+        f"- 原始来源：`{source_ref}`",
+    ]
+    if not omit_draft_path:
+        source_trace_lines.insert(1, f"- 草稿：`{rel(draft_path)}`")
+    source_labels = {
+        "dynamic_id": "动态 ID",
+        "author": "作者/账号",
+        "author_mid": "作者 MID",
+        "published": "发布时间",
+    }
+    for key, label in source_labels.items():
+        if meta.get(key) not in (None, ""):
+            source_trace_lines.append(f"- {label}：`{meta[key]}`" if key.endswith("_id") or key == "author_mid" else f"- {label}：{meta[key]}")
+    source_trace = "\n\n".join([source_trace_lines[0], "\n".join(source_trace_lines[1:])])
+    notice = (
+        "## 原文保留\n\n"
+        f"正文少于 {short_opus_threshold_chars(cfg)} 字，未调用模型整理，直接保留原始图文。"
+    )
+    output_parts = [frontmatter(organized_meta), f"# {title}", source_trace, notice]
+    original = original_source_section(body, source_type)
+    if original:
+        output_parts.append(original)
+    image_analysis = image_analysis_source_section(body, source_type)
+    if image_analysis:
+        output_parts.append(image_analysis)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n\n".join(output_parts).rstrip() + "\n", encoding="utf-8")
+    if progress_label:
+        print(
+            f"{progress_label} 正文少于 {short_opus_threshold_chars(cfg)} 字，保留原始图文（未调用 Qwen）：{output_path.name}",
+            flush=True,
+        )
+    item = {
+        "organized_output_path": rel(output_path),
+        "organized_status": "organized",
+        "organized_at": now_iso(),
+        "organize_model": "",
+        "organize_error": "",
+        "draft_hash": draft_hash,
+    }
+    return output_path, item
+
+
 def organize_file(
     draft_path: pathlib.Path,
     output_dir: pathlib.Path,
@@ -671,6 +893,26 @@ def organize_file(
     model_source_ref = "B站图文动态（确定性来源元数据由程序保管）" if source_type == "bilibili-opus" else source_ref
     model_body = model_body_for_source(body, source_type)
     draft_hash = sha256_text(markdown)
+    if (
+        source_type == "bilibili-opus"
+        and short_opus_skip_enabled(cfg)
+        and len(model_body.strip()) < short_opus_threshold_chars(cfg)
+    ):
+        return write_short_opus_note(
+            draft_path,
+            output_dir,
+            cfg,
+            output_filename,
+            planned_output,
+            omit_draft_path,
+            progress_label,
+            title,
+            meta,
+            body,
+            source_type,
+            source_ref,
+            draft_hash,
+        )
     chunks = chunk_text(
         model_body,
         int(cfg["QWEN_ORGANIZE_MAX_CHARS"]),
@@ -683,9 +925,9 @@ def organize_file(
         chunk_notes.append(organize_chunk(title, model_source_ref, chunk, index, len(chunks), source_type, cfg))
     if progress_label:
         print(f"{progress_label} 正在合并结构化笔记...", flush=True)
-    organized_body = merge_duplicate_h2_sections(
+    organized_body = ensure_mindmap_hierarchy(merge_duplicate_h2_sections(
         normalize_markdown(synthesize_chunks(title, model_source_ref, chunk_notes, cfg, source_type))
-    )
+    ), cfg)
     stock_terms_enabled = str(cfg.get("A_SHARE_TERMS_ENABLED", "false")).lower() == "true"
     if source_type == "bilibili-opus":
         organized_body = sanitize_bilibili_time_hallucinations(
@@ -694,12 +936,17 @@ def organize_file(
             str(meta.get("time_warning") or "").strip().lower() == "true",
         )
     organized_body = sanitize_model_stock_codes(organized_body, body, stock_terms_enabled)
+    final_mindmap = extract_mindmap_section(organized_body)
+    if final_mindmap and not mindmap_has_required_hierarchy(final_mindmap):
+        raise RuntimeError("思维导图在后处理后丢失三级层级，已拒绝写入")
     output_path = planned_output or build_output_path(
         output_dir,
         title,
         source_type,
         output_filename,
         str(meta.get("dynamic_id") or ""),
+        str(meta.get("published") or ""),
+        flag_enabled(cfg.get("DATE_IN_FILENAME")),
     )
     organized_meta = {
         "title": title,
@@ -807,6 +1054,7 @@ def main() -> int:
     manifest_enabled = str(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")).strip().lower() not in {"1", "true", "yes", "on"}
     manifest = load_manifest(manifest_path) if manifest_enabled else {"items": []}
     output_dir = (ROOT / args.output_dir).resolve()
+    date_in_filename = flag_enabled(cfg.get("DATE_IN_FILENAME"))
 
     if args.source:
         sources = [(ROOT / source).resolve() for source in args.source]
@@ -843,7 +1091,13 @@ def main() -> int:
                     draft_path,
                 )
             planned_output = planned_output or build_output_path(
-                output_dir, title, source_type, args.output_filename, str(meta.get("dynamic_id") or "")
+                output_dir,
+                title,
+                source_type,
+                args.output_filename,
+                str(meta.get("dynamic_id") or ""),
+                str(meta.get("published") or ""),
+                date_in_filename,
             )
             manifest_item = find_manifest_item(manifest, draft_path)
             incoming_image_status = str(meta.get("opus_image_analysis_status") or "")

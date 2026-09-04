@@ -14,3 +14,8 @@ bili_cookies.txt
 *_cookies.txt
 *.log
 __pycache__/
+
+# pnpm session artifacts (project uses npm / package-lock.json)
+.pnpm-store/
+pnpm-lock.yaml
+pnpm-workspace.yaml

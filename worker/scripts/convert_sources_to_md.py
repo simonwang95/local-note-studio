@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from note_filename import flag_enabled, parse_published_date, prepend_date_prefix
+
 try:
     from pypdf import PdfReader
 except Exception:  # pragma: no cover - handled at runtime
@@ -97,6 +99,7 @@ DEFAULTS = {
     "WEB_DOWNLOAD_ASSETS": "true",
     "WEB_ASSET_MAX_BYTES": str(50 * 1024 * 1024),
     "ENABLE_OCR": "false",
+    "DATE_IN_FILENAME": "false",
     "OPUS_IMAGE_ANALYSIS": "off",
     "OPUS_IMAGE_ANALYSIS_CACHE_DIR": "",
     "OPUS_IMAGE_ANALYSIS_COOLDOWN_DELAY": "",
@@ -2177,7 +2180,10 @@ def convert_bilibili_opus(
             parsed["images"] = list(dict.fromkeys([*page_images, *parsed["images"]]))
     source_hash = bilibili_opus_source_hash(parsed, opus_id)
     title = parsed["title"]
-    out_path = output_path_for(output_dir, f"BILI-OPUS-{slugify(title, opus_id)}_{opus_id}.md", output_filename)
+    default_name = f"BILI-OPUS-{slugify(title, opus_id)}_{opus_id}.md"
+    if flag_enabled(cfg.get("DATE_IN_FILENAME")):
+        default_name = prepend_date_prefix(default_name, parse_published_date(parsed.get("published") or ""))
+    out_path = output_path_for(output_dir, default_name, output_filename)
     if should_skip_url(manifest, url, out_path, source_hash, overwrite, download_assets and bool(parsed["images"])):
         return out_path, {}, True
 

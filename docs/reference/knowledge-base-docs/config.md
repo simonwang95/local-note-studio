@@ -34,6 +34,10 @@
 | `QWEN_ORGANIZE_MAX_RETRIES` | `2` | Qwen 正式整理遇到 408/429/5xx 等临时错误时的重试次数 |
 | `QWEN_ORGANIZE_RETRY_DELAY` | `3` | Qwen 正式整理重试的初始等待秒数，后续指数退避 |
 | `QWEN_ORGANIZE_COOLDOWN_DELAY` | `60` | Qwen 批量正式整理每篇之间的冷却等待秒数；未配置时继承 `COOLDOWN_DELAY` |
+| `QWEN_ORGANIZE_ENABLE_THINKING` | `false` | 正式整理是否启用模型思考；默认关闭，导图层级由独立输出合同与校验保证 |
+| `DATE_IN_FILENAME` | `false` | 新整理笔记是否在默认文件名前添加可解析的发布日期前缀 |
+| `QWEN_ORGANIZE_SHORT_OPUS_SKIP` | `true` | 短 B站图文是否跳过模型整理并原样保留 |
+| `QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS` | `1000` | 判定短 B站图文的字符阈值；设为 `0` 可关闭按长度跳过 |
 | `QWEN_QUICKREAD_MAX_CHARS` | `128000` | PDF 速读时一次性喂给 Qwen 的最大抽取文本字符数；设为 `0` 表示不主动截断 |
 | `QWEN_QUICKREAD_MAX_TOKENS` | `80000` | PDF 速读请求的输出 token 预算 |
 | `QWEN_QUICKREAD_TIMEOUT_SECONDS` | `1200` | PDF 速读单次请求超时时间 |
@@ -58,6 +62,7 @@
 | `SUMMARY_CHUNK_CHARS` | `60000` | B 站整篇笔记单次整理的转录文本单块最大字符数 |
 | `SUMMARY_CHUNK_OVERLAP_CHARS` | `800` | B 站摘要/导图/校对分块之间的重叠上下文字符数 |
 | `SUMMARY_CHUNK_COOLDOWN_DELAY` | `60` | B 站摘要/导图/校对分块之间的冷却等待秒数；默认继承 `COOLDOWN_DELAY` |
+| `SUMMARY_ENABLE_THINKING` | `false` | B 站视频摘要和思维导图是否启用模型思考；未配置时沿用 `QWEN_ORGANIZE_ENABLE_THINKING` |
 | `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` | `12000` | 校对正文可与其余栏目放进同一次模型任务的最大转录字符数 |
 | `SUMMARY_PROOFREAD_CHUNK_CHARS` | `10000` | 长校对正文的单段字符数；分段结果按原顺序直接拼接，不再调用模型综合 |
 | `SUMMARY_PROOFREAD_ENABLE_THINKING` | `false` | 长校对分段是否启用模型推理；机械校对默认关闭以减少耗时和输出压力 |

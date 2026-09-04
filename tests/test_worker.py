@@ -35,6 +35,7 @@ converter = load_module("convert_sources_to_md_test", ROOT / "worker" / "scripts
 quickread = load_module("quick_read_pdf_test", ROOT / "worker" / "scripts" / "quick_read_pdf.py")
 organizer = load_module("qwen_organize_notes_test", ROOT / "worker" / "scripts" / "qwen_organize_notes.py")
 keyframes = sys.modules["video_keyframes"]
+mindmap_markdown = sys.modules["mindmap_markdown"]
 
 
 class RequestAndCommandContractTests(unittest.TestCase):
@@ -278,8 +279,11 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 + "\n\n<details>\n<summary>📄 原始字幕</summary>\n\n这是需要整理的原始字幕。\n\n</details>\n",
                 encoding="utf-8",
             )
+            mindmap_result = "- 总主题\n  - 子主题\n    - 具体要点"
             response = "\n\n".join(
-                f"[[LNS_SECTION:{key}]]\n{heading}结果\n[[/LNS_SECTION:{key}]]"
+                f"[[LNS_SECTION:{key}]]\n"
+                f"{mindmap_result if key == 'mindmap' else heading + '结果'}\n"
+                f"[[/LNS_SECTION:{key}]]"
                 for heading, key in sections
             )
             with (
@@ -294,7 +298,55 @@ class RequestAndCommandContractTests(unittest.TestCase):
             self.assertNotIn("【AI待处理", final)
             self.assertNotIn("原始字幕", final)
             for heading, _key in sections:
-                self.assertIn(f"{heading}结果", final)
+                if _key == "mindmap":
+                    self.assertIn("- 总主题\n  - 子主题\n    - 具体要点", final)
+                else:
+                    self.assertIn(f"{heading}结果", final)
+
+    def test_mindmap_parser_normalizes_mixed_indentation(self):
+        response = (
+            "[[LNS_SECTION:mindmap]]\n"
+            "* 总主题\n"
+            "    + 子主题\n"
+            "        1. 具体要点\n"
+            "[[/LNS_SECTION:mindmap]]"
+        )
+        sections = batch_transcriber._parse_combined_summary(response, ["mindmap"])
+        self.assertEqual(sections["mindmap"], "- 总主题\n  - 子主题\n    - 具体要点")
+
+    def test_mindmap_normalizer_repairs_real_one_space_child_indentation(self):
+        raw = "- 市场状态\n - 指数形态\n  - 复合震荡区间"
+        self.assertEqual(
+            mindmap_markdown.normalize_mindmap_list(raw),
+            "- 市场状态\n  - 指数形态\n    - 复合震荡区间",
+        )
+
+    def test_mindmap_parser_rejects_flat_list_for_targeted_retry(self):
+        response = (
+            "[[LNS_SECTION:mindmap]]\n"
+            "- 总主题\n- 子主题\n- 具体要点\n"
+            "[[/LNS_SECTION:mindmap]]"
+        )
+        self.assertEqual(batch_transcriber._parse_combined_summary(response, ["mindmap"]), {})
+
+    def test_video_summary_explicitly_passes_thinking_setting(self):
+        result = batch_transcriber.LLMResponse("ok", "stop")
+        with (
+            mock.patch.object(batch_transcriber, "SUMMARY_ENABLE_THINKING", False),
+            mock.patch.object(batch_transcriber, "_call_llm", return_value=result) as model,
+        ):
+            self.assertIs(
+                batch_transcriber._run_chunked_llm(
+                    "摘要",
+                    "标题",
+                    "短转录",
+                    "system",
+                    "chunk",
+                    "combine",
+                ),
+                result,
+            )
+        self.assertFalse(model.call_args.kwargs["enable_thinking"])
 
     def test_partial_combined_generation_keeps_missing_placeholders_and_raw_transcript(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -338,8 +390,11 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 + "\n\n<details>\n<summary>📄 原始字幕</summary>\n\n第一段。第二段。\n\n</details>\n",
                 encoding="utf-8",
             )
+            mindmap_result = "- 总主题\n  - 子主题\n    - 具体要点"
             derived = "\n\n".join(
-                f"[[LNS_SECTION:{key}]]\n{key}结果\n[[/LNS_SECTION:{key}]]"
+                f"[[LNS_SECTION:{key}]]\n"
+                f"{mindmap_result if key == 'mindmap' else key + '结果'}\n"
+                f"[[/LNS_SECTION:{key}]]"
                 for key in keys if key != "proofread"
             )
             proofread_responses = [
@@ -1513,6 +1568,82 @@ class BilibiliMetadataIsolationTests(unittest.TestCase):
         self.assertIn("Waller", synthesis_system)
         self.assertIn("待核验", synthesis_system)
 
+    def test_organizer_regenerates_flat_mindmap_from_full_note(self):
+        original = (
+            "## 思维导图\n\n"
+            "- 市场状态\n- 指数变化\n- 缩量回调\n"
+            "- 板块方向\n- 军工\n- 地缘催化\n\n"
+            "## 结构化笔记\n\n指数缩量回调，军工受地缘事件催化。"
+        )
+        repaired = (
+            "- 盘面与方向\n"
+            "  - 市场状态\n"
+            "    - 指数缩量回调\n"
+            "  - 板块方向\n"
+            "    - 军工受地缘事件催化"
+        )
+        response = (
+            f"{mindmap_markdown.MINDMAP_SECTION_START}\n"
+            f"{repaired}\n"
+            f"{mindmap_markdown.MINDMAP_SECTION_END}"
+        )
+        with mock.patch.object(organizer, "call_chat_completion", return_value=response) as model:
+            result = organizer.ensure_mindmap_hierarchy(original, organizer.DEFAULTS)
+        model.assert_called_once()
+        self.assertEqual(organizer.extract_mindmap_section(result), repaired)
+        self.assertTrue(mindmap_markdown.mindmap_has_required_hierarchy(repaired))
+        request = model.call_args.args[1][1]["content"]
+        self.assertIn("## 结构化笔记", request)
+        self.assertNotIn("- 市场状态\n- 指数变化\n- 缩量回调", request)
+        self.assertIn(mindmap_markdown.MINDMAP_SECTION_START, request)
+
+    def test_organizer_rejects_mindmap_without_section_contract(self):
+        original = "## 思维导图\n\n- 主题\n- 子主题\n- 具体要点\n\n## 正文\n\n材料"
+        unwrapped = "- 主题\n  - 子主题\n    - 具体要点"
+        with mock.patch.object(organizer, "call_chat_completion", return_value=unwrapped):
+            with self.assertRaisesRegex(RuntimeError, "未按栏目边界返回"):
+                organizer.ensure_mindmap_hierarchy(original, organizer.DEFAULTS)
+
+    def test_organizer_rejects_regenerated_flat_mindmap(self):
+        original = "## 思维导图\n\n- 主题\n- 子主题\n- 具体要点\n\n## 正文\n\n材料"
+        response = (
+            f"{mindmap_markdown.MINDMAP_SECTION_START}\n"
+            "- 主题\n- 子主题\n- 具体要点\n"
+            f"{mindmap_markdown.MINDMAP_SECTION_END}"
+        )
+        with mock.patch.object(organizer, "call_chat_completion", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "仍缺少三级层级"):
+                organizer.ensure_mindmap_hierarchy(original, organizer.DEFAULTS)
+
+    def test_stock_code_sanitizer_preserves_mindmap_indentation(self):
+        mindmap = (
+            "- 市场状态\n"
+            "  - 指数变化（002080.SH）  保持观察\n"
+            "    - 缩量回调"
+        )
+        sanitized = organizer.sanitize_model_stock_codes(mindmap, "来源没有股票代码", True)
+        self.assertEqual(
+            sanitized,
+            "- 市场状态\n  - 指数变化 保持观察\n    - 缩量回调",
+        )
+        self.assertTrue(mindmap_markdown.mindmap_has_required_hierarchy(sanitized))
+
+    def test_completed_note_with_flat_h3_mindmap_is_reprocessed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = pathlib.Path(temp) / "flat.md"
+            output.write_text(
+                "---\nstatus: organized\nsource_type: bilibili-opus\nsource_hash: same\n---\n\n"
+                "# 标题\n\n## Qwen 整理\n\n### 思维导图\n\n"
+                "- 市场状态\n - 指数形态\n - 复合震荡区间\n\n"
+                "### 结构化笔记\n\n正文\n\n## 原文抽取\n\n原文",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                organizer.extract_mindmap_section(output.read_text(encoding="utf-8")),
+                "- 市场状态\n - 指数形态\n - 复合震荡区间",
+            )
+            self.assertFalse(organizer.organized_note_complete(output, "bilibili-opus", "", "same"))
+
     def test_model_added_wrong_stock_suffixes_are_removed_and_reference_table_stays_correct(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
@@ -1533,6 +1664,7 @@ class BilibiliMetadataIsolationTests(unittest.TestCase):
                 "INDEX_DIR": str(root / "index"),
                 "QWEN_ORGANIZE_COOLDOWN_DELAY": "0",
                 "A_SHARE_TERMS_ENABLED": "true",
+                "QWEN_ORGANIZE_SHORT_OPUS_SKIP": "false",
             }
             wrong = (
                 "## 核心观点\n\n中材科技（002080.SH）、山东墨龙(002490.SH)、"
@@ -1614,6 +1746,7 @@ class BilibiliMetadataIsolationTests(unittest.TestCase):
                 "INDEX_DIR": str(root / "index"),
                 "QWEN_ORGANIZE_COOLDOWN_DELAY": "0",
                 "A_SHARE_TERMS_ENABLED": "false",
+                "QWEN_ORGANIZE_SHORT_OPUS_SKIP": "false",
             }
             captured = []
 
@@ -1647,6 +1780,74 @@ class BilibiliMetadataIsolationTests(unittest.TestCase):
             failed = final.replace("opus_image_analysis_status: complete", "opus_image_analysis_status: failed")
             output.write_text(failed, encoding="utf-8")
             self.assertFalse(organizer.organized_note_complete(output, "bilibili-opus", "vision", "abcdef"))
+
+    def test_short_opus_skips_model_and_preserves_original(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            draft = root / "short.md"
+            draft.write_text(
+                "---\n"
+                "title: 短动态\nsource_type: bilibili-opus\n"
+                "source_url: https://www.bilibili.com/opus/900\n"
+                "dynamic_id: 900\npublished: 2026-09-03T09:00:00+08:00\n"
+                "source_hash: short-hash\nopus_image_analysis: off\n"
+                "---\n\n# 短动态\n\n## 原文抽取\n\n今天盘面缩量，军工异动。\n",
+                encoding="utf-8",
+            )
+            cfg = {**organizer.DEFAULTS, "INDEX_DIR": str(root / "index")}
+            self.assertTrue(organizer.short_opus_skip_enabled(cfg))
+            with mock.patch.object(organizer, "call_chat_completion", side_effect=AssertionError("model must not run")):
+                output, item = organizer.organize_file(draft, root / "output", cfg, omit_draft_path=True)
+            final = output.read_text(encoding="utf-8")
+            self.assertIn("今天盘面缩量，军工异动。", final)
+            self.assertIn("## 原文抽取", final)
+            self.assertIn("未调用模型整理", final)
+            self.assertNotIn("## Qwen 整理", final)
+            meta, _body = organizer.parse_frontmatter(final)
+            self.assertEqual(meta["status"], "organized")
+            self.assertIn("organized/verbatim", meta["tags"])
+            self.assertEqual(item["organize_model"], "")
+            # The preserved note must be recognized as complete so a re-run skips it.
+            self.assertTrue(organizer.organized_note_complete(output, "bilibili-opus", "", "short-hash"))
+
+    def test_long_opus_still_calls_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            draft = root / "long.md"
+            long_text = "长文内容。" * 400  # well over the 1000-char threshold
+            draft.write_text(
+                "---\n"
+                "title: 长动态\nsource_type: bilibili-opus\n"
+                "source_url: https://www.bilibili.com/opus/901\n"
+                "dynamic_id: 901\nsource_hash: long-hash\nopus_image_analysis: off\n"
+                "---\n\n# 长动态\n\n## 原文抽取\n\n" + long_text + "\n",
+                encoding="utf-8",
+            )
+            cfg = {**organizer.DEFAULTS, "INDEX_DIR": str(root / "index")}
+            with mock.patch.object(organizer, "call_chat_completion", return_value="## 核心观点\n\n长文观点。") as model:
+                output, _item = organizer.organize_file(draft, root / "output", cfg, omit_draft_path=True)
+            self.assertTrue(model.called)
+            final = output.read_text(encoding="utf-8")
+            self.assertIn("## Qwen 整理", final)
+
+    def test_short_opus_skip_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            draft = root / "short2.md"
+            draft.write_text(
+                "---\n"
+                "title: 短动态2\nsource_type: bilibili-opus\n"
+                "source_url: https://www.bilibili.com/opus/902\n"
+                "dynamic_id: 902\nsource_hash: h2\nopus_image_analysis: off\n"
+                "---\n\n# 短动态2\n\n## 原文抽取\n\n短句。\n",
+                encoding="utf-8",
+            )
+            cfg = {**organizer.DEFAULTS, "INDEX_DIR": str(root / "index"), "QWEN_ORGANIZE_SHORT_OPUS_SKIP": "false"}
+            self.assertFalse(organizer.short_opus_skip_enabled(cfg))
+            with mock.patch.object(organizer, "call_chat_completion", return_value="## 核心观点\n\n短句观点。") as model:
+                output, _item = organizer.organize_file(draft, root / "output", cfg, omit_draft_path=True)
+            self.assertTrue(model.called)
+            self.assertIn("## Qwen 整理", output.read_text(encoding="utf-8"))
 
 
 class IntegrityTests(unittest.TestCase):

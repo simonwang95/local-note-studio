@@ -120,7 +120,10 @@ def sanitize_model_stock_codes(model_text: str, source_text: str, enabled: bool)
         sanitized,
         flags=re.IGNORECASE,
     )
-    sanitized = re.sub(r"[ \t]{2,}", " ", sanitized)
+    # Removing a parenthesized code can leave duplicate spaces inside prose.
+    # Collapse only whitespace between non-space characters: Markdown list
+    # indentation at the beginning of a line is structural and must survive.
+    sanitized = re.sub(r"(?m)(\S)[ \t]{2,}(?=\S)", r"\1 ", sanitized)
     return sanitized
 
 

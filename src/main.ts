@@ -75,6 +75,8 @@ type SavedSettings = {
   cooldownDelay: string;
   chunkChars: string;
   ocrResume: boolean;
+  dateInFilename: boolean;
+  enableThinking: boolean;
 };
 
 type WorkerLogPayload = {
@@ -195,6 +197,8 @@ const defaults: SavedSettings = {
   cooldownDelay: "",
   chunkChars: "",
   ocrResume: true,
+  dateInFilename: false,
+  enableThinking: false,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -349,6 +353,7 @@ app.innerHTML = `
           </div>
           <div class="actions">
             <button id="checkBilibiliAccess" type="button" class="secondary hidden">验证B站目标权限</button>
+            <button id="renameNotesDate" type="button" class="secondary hidden">补充文件名日期</button>
             <button id="runDry" type="button" class="secondary">预览命令</button>
             <button id="runTask" type="button">运行任务</button>
             <button id="cancelTask" type="button" class="danger" disabled>取消任务</button>
@@ -443,6 +448,16 @@ app.innerHTML = `
             <span>OCR 中断后续跑</span>
             <input id="ocrResume" type="checkbox" ${savedSettings.ocrResume ? "checked" : ""} />
           </label>
+          <label id="dateInFilenameField" class="checkbox-field hidden">
+            <span>文件名补充日期</span>
+            <input id="dateInFilename" type="checkbox" ${savedSettings.dateInFilename ? "checked" : ""} />
+          </label>
+          <p id="dateInFilenameNote" class="field-note full-row hidden">开启后，新整理笔记的文件名会以发布时间开头，例如 <code>2026-07-14-BILI-OPUS-标题_动态ID.md</code>；已带日期前缀的文件不会被重复添加。</p>
+          <label id="enableThinkingField" class="checkbox-field">
+            <span>启用思考</span>
+            <input id="enableThinking" type="checkbox" ${savedSettings.enableThinking ? "checked" : ""} />
+          </label>
+          <p id="enableThinkingNote" class="field-note full-row hidden">开启后，整理笔记时会启用模型思考（reasoning），通常会增加生成时间。思维导图层级由输出校验单独保证。</p>
           <label id="webCaptureModeField" class="hidden">
             网页采集方式
             <select id="webCaptureMode">
@@ -591,6 +606,7 @@ document.querySelector<HTMLButtonElement>("#retryFailed")?.addEventListener("cli
 document.querySelector<HTMLSelectElement>("#collectionSelect")?.addEventListener("change", syncSelectedCollection);
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
+document.querySelector<HTMLButtonElement>("#renameNotesDate")?.addEventListener("click", () => runRenameNotesDate());
 document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
 document.querySelector<HTMLButtonElement>("#copyOutputDir")?.addEventListener("click", () => copyPath(inputValue("outputDir")));
 document.querySelector<HTMLButtonElement>("#refreshManifests")?.addEventListener("click", () => refreshManifestStatus());
@@ -751,6 +767,8 @@ function payload(dryRun: boolean, retryFailed = false) {
     cooldown_delay: inputValue("cooldownDelay"),
     chunk_chars: inputValue("chunkChars"),
     ocr_resume: checkboxChecked("ocrResume"),
+    date_in_filename: checkboxChecked("dateInFilename"),
+    enable_thinking: checkboxChecked("enableThinking"),
     dry_run: dryRun,
   };
 }
@@ -987,6 +1005,49 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): 
   }
 }
 
+async function runRenameNotesDate(): Promise<void> {
+  if (isWorkerRunning) {
+    setState("已有任务正在运行");
+    return;
+  }
+  const outputDir = inputValue("outputDir");
+  if (!outputDir) {
+    setState("缺少输出目录");
+    setOutput("请先填写“本次输出目录”，再补充文件名日期。");
+    return;
+  }
+  if (
+    !window.confirm(
+      `将扫描输出目录并补充文件名日期：\n${outputDir}\n\n已带日期前缀的文件不会被改动；缺少可解析发布时间的文件会被跳过。确定继续吗？`,
+    )
+  ) {
+    return;
+  }
+  setWorkerRunning(true);
+  setState("正在补充文件名日期...");
+  setOutput("");
+  appendOutput("正在扫描输出目录并补充文件名日期...\n");
+  try {
+    const result = await invokeWorker({ task: "rename-notes-date", output_dir: outputDir });
+    if (!currentOutput().trim()) setOutput(result || "(worker 没有返回输出)");
+    setState("文件名日期补充完成");
+  } catch (error) {
+    const message = errorMessage(error);
+    if (message.startsWith("Task cancelled.")) {
+      appendOutput("\n任务已取消。\n");
+      setState("已取消");
+    } else if (currentOutput().trim()) {
+      appendOutput(`\n任务失败：${message}\n`);
+      setState("任务失败");
+    } else {
+      setOutput(message);
+      setState(error instanceof TauriRuntimeUnavailableError ? "浏览器预览" : "任务失败");
+    }
+  } finally {
+    setWorkerRunning(false);
+  }
+}
+
 async function invokeWorker(request: object): Promise<string> {
   if (!hasTauriRuntime()) {
     throw new TauriRuntimeUnavailableError(tauriRuntimeHint());
@@ -1160,6 +1221,29 @@ function hydrateTaskControls(): void {
     enableOcrField.classList.toggle("hidden", task !== "source-file");
   }
   document.querySelector<HTMLElement>("#ocrResumeField")?.classList.toggle("hidden", task !== "source-file");
+  const dateInFilenameField = document.querySelector<HTMLElement>("#dateInFilenameField");
+  if (dateInFilenameField) {
+    dateInFilenameField.classList.toggle("hidden", !["bilibili-opus", "bilibili-up-opus"].includes(task));
+  }
+  document.querySelector<HTMLElement>("#dateInFilenameNote")?.classList.toggle(
+    "hidden",
+    !["bilibili-opus", "bilibili-up-opus"].includes(task) || !checkboxChecked("dateInFilename"),
+  );
+  const enableThinkingField = document.querySelector<HTMLElement>("#enableThinkingField");
+  if (enableThinkingField) {
+    enableThinkingField.classList.toggle(
+      "hidden",
+      !["bilibili-url", "bilibili-favorite", "bilibili-opus", "bilibili-up-opus", "local-video", "web-url", "source-file", "ai-chat"].includes(task),
+    );
+  }
+  document.querySelector<HTMLElement>("#enableThinkingNote")?.classList.toggle(
+    "hidden",
+    !["bilibili-url", "bilibili-favorite", "bilibili-opus", "bilibili-up-opus", "local-video", "web-url", "source-file", "ai-chat"].includes(task) || !checkboxChecked("enableThinking"),
+  );
+  document.querySelector<HTMLElement>("#renameNotesDate")?.classList.toggle(
+    "hidden",
+    !["bilibili-opus", "bilibili-up-opus"].includes(task),
+  );
   document.querySelector<HTMLElement>("#webCaptureModeField")?.classList.toggle("hidden", task !== "web-url");
   document.querySelector<HTMLElement>("#browserExecutableField")?.classList.toggle(
     "hidden",
@@ -1240,6 +1324,14 @@ function bindSettingsPersistence(): void {
   ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
+  document.querySelector<HTMLInputElement>("#dateInFilename")?.addEventListener("change", () => {
+    hydrateTaskControls();
+    saveSettings();
+  });
+  document.querySelector<HTMLInputElement>("#enableThinking")?.addEventListener("change", () => {
+    hydrateTaskControls();
+    saveSettings();
+  });
 }
 
 function loadSettings(): SavedSettings {
@@ -1289,6 +1381,8 @@ function saveSettings(): void {
     cooldownDelay: inputValue("cooldownDelay"),
     chunkChars: inputValue("chunkChars"),
     ocrResume: checkboxChecked("ocrResume"),
+    dateInFilename: checkboxChecked("dateInFilename"),
+    enableThinking: checkboxChecked("enableThinking"),
   };
   localStorage.setItem(settingsKey, JSON.stringify(settings));
 }
@@ -1329,6 +1423,7 @@ function setWorkerRunning(running: boolean): void {
     "retryFailed",
     "runDry",
     "runTask",
+    "renameNotesDate",
     "refreshManifests",
     "clearHistory",
     "runtimeInstall",
@@ -1782,6 +1877,8 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
     stock_terms: "stockTerms",
     enable_ocr: "enableOcr",
     ocr_resume: "ocrResume",
+    date_in_filename: "dateInFilename",
+    enable_thinking: "enableThinking",
   };
   for (const [key, id] of Object.entries(booleans)) {
     const input = document.querySelector<HTMLInputElement>(`#${id}`);

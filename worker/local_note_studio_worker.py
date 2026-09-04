@@ -126,6 +126,8 @@ class TaskRequest:
     cooldown_delay: int = -1
     chunk_chars: int = 0
     ocr_resume: bool = True
+    date_in_filename: bool = False
+    enable_thinking: bool = False
     manifest_path: str = ""
     manifest_kind: str = ""
     manifest_action: str = ""
@@ -183,6 +185,8 @@ class TaskRequest:
             cooldown_delay=parse_optional_nonnegative_int(data.get("cooldown_delay")),
             chunk_chars=parse_int(data.get("chunk_chars"), 0),
             ocr_resume=parse_bool(data.get("ocr_resume", True)),
+            date_in_filename=parse_bool(data.get("date_in_filename")),
+            enable_thinking=parse_bool(data.get("enable_thinking")),
             manifest_path=str(data.get("manifest_path") or ""),
             manifest_kind=str(data.get("manifest_kind") or ""),
             manifest_action=str(data.get("manifest_action") or ""),
@@ -291,6 +295,10 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env["KEYFRAME_MANIFEST_ENABLED"] = "false" if req.incognito_mode else env.get("KEYFRAME_MANIFEST_ENABLED", "true")
     env["A_SHARE_TERMS_ENABLED"] = "true" if req.stock_terms else "false"
     env["ENABLE_OCR"] = "true" if req.enable_ocr else "false"
+    env["DATE_IN_FILENAME"] = "true" if req.date_in_filename else "false"
+    thinking = "true" if req.enable_thinking else "false"
+    env["QWEN_ORGANIZE_ENABLE_THINKING"] = thinking
+    env["SUMMARY_ENABLE_THINKING"] = thinking
     env["OPUS_IMAGE_ANALYSIS"] = req.opus_image_analysis
     state_root = pathlib.Path(env.get("LOCAL_NOTE_STUDIO_STATE_DIR") or app_root / "state")
     env["OPUS_IMAGE_ANALYSIS_CACHE_DIR"] = str(state_root / "opus-image-analysis-cache")
@@ -1033,6 +1041,13 @@ def command_for(req: TaskRequest) -> list[str]:
             "--output",
             str(cookie_path),
         ]
+    if req.task == "rename-notes-date":
+        if not req.output_dir:
+            raise ValueError("output_dir is required")
+        command = [*python_cmd(req, SCRIPTS_DIR / "rename_notes_date.py"), "--output-dir", req.output_dir]
+        if req.dry_run:
+            command.append("--dry-run")
+        return command
     if not req.source and req.task not in {"bilibili-favorite"}:
         raise ValueError("source is required")
     if not req.output_dir:
