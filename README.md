@@ -4,7 +4,7 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 
 它把内容采集、字幕或语音转写、OCR、AI 整理、任务恢复和结果校验集中在一个桌面工作区中。笔记、配置、任务记录、缓存与索引默认保存在本机；需要模型处理时，内容会发送到用户自行配置的 OpenAI 兼容 API。
 
-> 当前版本：`0.1.23`。项目仍处于内部测试阶段，现有 macOS 安装包采用临时签名，尚未完成 Developer ID 签名与 Apple 公证。
+> 当前版本：`0.1.26`。项目仍处于内部测试阶段，现有 macOS 安装包采用临时签名，尚未完成 Developer ID 签名与 Apple 公证。
 
 ## 界面预览
 
@@ -17,12 +17,24 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 - **多来源统一整理**：支持视频、网页、Office/PDF、图片、论文、AI 对话和本地媒体。
 - **结构化 Markdown 输出**：按任务保留来源信息、抽取原文或字幕，生成便于检索、引用和继续编辑的笔记。
 - **字幕与语音转写**：B 站任务可选择 yt-dlp 字幕、网页字幕或 ASR；本地媒体支持同目录字幕与 Whisper ASR。
+- **长视频分段校对**：默认在转写超过 12,000 字符时，将校对正文拆为每段最多 10,000 字符的无重叠分块，逐段校对后按顺序拼接；缺失的摘要栏目单独重试，保留已成功生成的栏目。
 - **OCR 与多模态识别**：可处理图片和扫描型 PDF，并支持中断后续跑。
 - **批量与增量处理**：支持收藏夹、系列、UP 主图文和本地目录批量任务；重复运行会识别已有完整结果。
-- **文件名日期前缀**：可为整理笔记的文件名补充发布日期前缀（`YYYY-MM-DD-`），并提供对已整理笔记目录的批量补全；幂等，重复运行安全。
-- **思考开关与导图校验**：整理笔记时可控制模型思考（reasoning）是否开启，默认关闭；思维导图会统一为 2 空格缩进，平铺或层级不足时会依据完整笔记独立重建，并在通过三级结构校验后才写入。
+- **文件名日期前缀**：通过“文件名补充日期”选项，为新整理笔记补充发布日期前缀（`YYYY-MM-DD-`）；“补充文件名日期”按钮可批量处理已有笔记目录，跳过已有日期前缀、缺少可解析发布日期或目标文件已存在的文件。
+- **思考开关与导图校验**：通用整理和视频摘要支持“启用思考”，默认关闭；思维导图统一为每层 2 空格缩进，并校验“主题 → 子主题 → 具体要点”三级结构。通用笔记的导图不合格时依据完整笔记单独重建，视频笔记则保留占位符供定向重试。
+- **短图文保留原文**：B 站图文动态正文默认少于 1,000 字符时跳过 Qwen 整理，保留原始图文并标记 `organized/verbatim`；阈值和开关可通过环境配置调整。
 - **可恢复的任务工作流**：提供实时日志、进度、取消、任务历史、失败项重试和输出完整性校验。
 - **本机运行时管理**：桌面应用可以安装和修复独立的 Python、`yt-dlp`、`ffmpeg`、Whisper 运行库、ASR 模型与 Pandoc，无需改动系统 Python。
+
+## 最近更新
+
+| 版本 | 主要变化 |
+| --- | --- |
+| `0.1.26` | 新增文件名日期补全、模型思考开关、短图文原文保留；统一思维导图层级校验，修复 A 股代码清理破坏 Markdown 缩进的问题。 |
+| `0.1.25` | 改进长视频分段校对、缺失栏目重试与失败状态报告，降低长正文生成不完整的问题。 |
+| `0.1.24` | 默认模型切换为 MTPLX Qwen3.8 27B；普通长度视频合并生成八个笔记栏目，通用整理扩大分块与综合窗口。 |
+
+各版本安装包、校验值与验证记录见 [macOS 发布说明](docs/release-macos.md)。
 
 ## 支持的任务
 
@@ -58,6 +70,8 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 4. 点击“安装/修复”，等待运行时、媒体工具和默认 ASR 模型安装完成。
 5. 切换到“校验”，点击“检查依赖”。
 6. 在“任务”中选择任务类型、输入源和输出目录，先“预览命令”，确认后运行。
+
+当前默认配置面向本机 MTPLX Qwen3.8 27B 服务：API Base 为 `http://127.0.0.1:8000/v1`，模型 ID 为 `mtplx-qwen38-27b-optimized-speed`，API Key 默认占位值为 `mtplx-local`。该服务需自行部署并启动，也可改填其他 OpenAI 兼容服务的地址、密钥和模型。升级时仅自动迁移完全匹配旧版 LM Studio 默认地址、密钥和模型的配置，自定义配置会保留。
 
 内部测试包尚未公证。请先通过可信渠道核对 SHA-256，再使用右键或 Control-click →“打开”。具体版本、校验值和升级方式见 [macOS 发布说明](docs/release-macos.md)。
 
@@ -109,6 +123,8 @@ npm run dev
 ```bash
 cp worker/env.example worker/env.local
 ```
+
+例如，短图文原文保留可通过 `QWEN_ORGANIZE_SHORT_OPUS_SKIP=false` 关闭，也可用 `QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS` 调整字符阈值（默认 `1000`，设为 `0` 同样关闭跳过逻辑）。长视频校对阈值和分块大小分别由 `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS`、`SUMMARY_PROOFREAD_CHUNK_CHARS` 控制；分段校对默认关闭思考，使用独立的 `SUMMARY_PROOFREAD_ENABLE_THINKING` 设置。完整示例见 [worker/env.example](worker/env.example)。
 
 ### 常用命令
 
@@ -177,6 +193,9 @@ local-note-studio/
 │       ├── bilibili/                  # 字幕发现、下载、ASR 与批量转写
 │       ├── convert_sources_to_md.py   # 网页、Office、PDF、图片等转 Markdown
 │       ├── qwen_organize_notes.py     # 通用 AI 笔记整理
+│       ├── mindmap_markdown.py         # 思维导图缩进归一化与三级结构校验
+│       ├── note_filename.py           # 发布日期解析与文件名日期前缀
+│       ├── rename_notes_date.py       # 已有笔记目录批量补充文件名日期
 │       ├── quick_read_pdf.py          # 论文速读与全文翻译
 │       ├── export_epub.py             # Markdown 目录导出 EPUB
 │       ├── export_bilibili_cookies.py # Chrome Profile 登录态导出
@@ -190,6 +209,7 @@ local-note-studio/
 │   ├── test_worker.py                 # Worker 任务合同测试
 │   ├── test_automation.py             # 自动化、锁与历史测试
 │   ├── test_note_retrieval.py         # 笔记索引与检索测试
+│   ├── test_note_filename.py          # 文件名日期与批量补全测试
 │   └── fixtures/                      # 测试输入与预期结果
 └── docs/                              # 项目文档
     ├── user-guide-zh.md               # 中文操作手册
