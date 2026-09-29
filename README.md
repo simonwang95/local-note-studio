@@ -4,7 +4,7 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 
 它把内容采集、字幕或语音转写、OCR、AI 整理、任务恢复和结果校验集中在一个桌面工作区中。笔记、配置、任务记录、缓存与索引默认保存在本机；需要模型处理时，内容会发送到用户自行配置的 OpenAI 兼容 API。
 
-> 当前版本：`0.1.26`。项目仍处于内部测试阶段，现有 macOS 安装包采用临时签名，尚未完成 Developer ID 签名与 Apple 公证。
+> 当前版本：`0.1.28`。项目仍处于内部测试阶段，现有 macOS 安装包采用临时签名，尚未完成 Developer ID 签名与 Apple 公证。
 
 ## 界面预览
 
@@ -17,7 +17,7 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 - **多来源统一整理**：支持视频、网页、Office/PDF、图片、论文、AI 对话和本地媒体。
 - **结构化 Markdown 输出**：按任务保留来源信息、抽取原文或字幕，生成便于检索、引用和继续编辑的笔记。
 - **字幕与语音转写**：B 站任务可选择 yt-dlp 字幕、网页字幕或 ASR；本地媒体支持同目录字幕与 Whisper ASR。
-- **长视频分段校对**：默认在转写超过 12,000 字符时，将校对正文拆为每段最多 10,000 字符的无重叠分块，逐段校对后按顺序拼接；缺失的摘要栏目单独重试，保留已成功生成的栏目。
+- **视频转写与校对质检**：Whisper 关闭跨窗口前文继承，对重复或漏转的可疑时间段有限重试，并缓存原文和时间戳。校对始终独立分段（默认 8,000 字符），每段带前后各最多 240 字符的只读原文，通过标点、重复和内容覆盖检查后再生成摘要；失败保留原文供重试。
 - **OCR 与多模态识别**：可处理图片和扫描型 PDF，并支持中断后续跑。
 - **批量与增量处理**：支持收藏夹、系列、UP 主图文和本地目录批量任务；重复运行会识别已有完整结果。
 - **文件名日期前缀**：通过“文件名补充日期”选项，为新整理笔记补充发布日期前缀（`YYYY-MM-DD-`）；“补充文件名日期”按钮可批量处理已有笔记目录，跳过已有日期前缀、缺少可解析发布日期或目标文件已存在的文件。
@@ -30,6 +30,8 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 
 | 版本 | 主要变化 |
 | --- | --- |
+| `0.1.28` | 校对默认分段和上限调整为 8,000 字符，减少模型调用与分段边界，保留前后文和质量检查。 |
+| `0.1.27` | 修复视频后半段转写退化与校对漏检，增加原文/时间戳缓存、异常段重试、独立校对和内容覆盖检查，纠正术语提示词。 |
 | `0.1.26` | 新增文件名日期补全、模型思考开关、短图文原文保留；统一思维导图层级校验，修复 A 股代码清理破坏 Markdown 缩进的问题。 |
 | `0.1.25` | 改进长视频分段校对、缺失栏目重试与失败状态报告，降低长正文生成不完整的问题。 |
 | `0.1.24` | 默认模型切换为 MTPLX Qwen3.8 27B；普通长度视频合并生成八个笔记栏目，通用整理扩大分块与综合窗口。 |
@@ -64,7 +66,7 @@ Local Note Studio 是一款 **local-first 的 macOS 桌面笔记整理工具**�
 
 安装与首次运行：
 
-1. 打开 DMG，将 **Local Note Studio** 拖入“应用程序”。
+1. 打开 DMG，将 **Local Note Studio** 拖到同一窗口中的 **Applications（应用程序）** 文件夹图标。
 2. 启动应用，在“配置”中保留推荐的“应用托管环境”。
 3. 填写 LLM API Base、API Key、模型名称和默认输出根目录。
 4. 点击“安装/修复”，等待运行时、媒体工具和默认 ASR 模型安装完成。
@@ -124,7 +126,7 @@ npm run dev
 cp worker/env.example worker/env.local
 ```
 
-例如，短图文原文保留可通过 `QWEN_ORGANIZE_SHORT_OPUS_SKIP=false` 关闭，也可用 `QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS` 调整字符阈值（默认 `1000`，设为 `0` 同样关闭跳过逻辑）。长视频校对阈值和分块大小分别由 `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS`、`SUMMARY_PROOFREAD_CHUNK_CHARS` 控制；分段校对默认关闭思考，使用独立的 `SUMMARY_PROOFREAD_ENABLE_THINKING` 设置。完整示例见 [worker/env.example](worker/env.example)。
+例如，短图文原文保留可通过 `QWEN_ORGANIZE_SHORT_OPUS_SKIP=false` 关闭，也可用 `QWEN_ORGANIZE_SHORT_OPUS_MAX_CHARS` 调整字符阈值（默认 `1000`，设为 `0` 同样关闭跳过逻辑）。视频始终先独立校对，分块大小由 `SUMMARY_PROOFREAD_CHUNK_CHARS` 控制（默认 `8000`，限制在 `500–8000`），旧 `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` 不再生效；分段校对默认关闭思考，使用独立的 `SUMMARY_PROOFREAD_ENABLE_THINKING` 设置。完整示例见 [worker/env.example](worker/env.example)。
 
 ### 常用命令
 
@@ -138,8 +140,12 @@ npm run check
 # 检查发布配置
 npm run release:check
 
-# 构建 .app 与 DMG
-npm run tauri:build
+# 构建 .app
+npm run tauri:build -- --bundles app
+
+# 从已构建的 .app 重打 APFS DMG，包含 Applications 拖放入口并挂载校验
+# 先推出 Finder 中打开的旧版同名安装盘
+npm run release:dmg
 ```
 
 更完整的源码环境说明见 [环境配置](docs/environment.md)，打包流程见 [macOS 发布说明](docs/release-macos.md)。
@@ -191,6 +197,7 @@ local-note-studio/
 │   └── scripts/                       # 具体内容处理脚本
 │       ├── run_bilibili_transcript.py # B 站和本地媒体任务入口
 │       ├── bilibili/                  # 字幕发现、下载、ASR 与批量转写
+│       ├── transcript_quality.py      # 转写/校对质量检查与私有诊断缓存
 │       ├── convert_sources_to_md.py   # 网页、Office、PDF、图片等转 Markdown
 │       ├── qwen_organize_notes.py     # 通用 AI 笔记整理
 │       ├── mindmap_markdown.py         # 思维导图缩进归一化与三级结构校验
@@ -203,10 +210,12 @@ local-note-studio/
 ├── scripts/                           # 项目级命令入口
 │   ├── dev-server.mjs                 # Vite 开发服务启动与清理
 │   ├── release_check.py               # 发布前一致性检查
+│   ├── package_dmg.py                 # APFS 安装盘、Applications 入口与挂载校验
 │   └── local-notes-*                  # 高级 CLI/MCP 启动包装器
 ├── tests/                             # 回归测试
 │   ├── test_p1.mjs                    # 前端状态与兼容性测试
 │   ├── test_worker.py                 # Worker 任务合同测试
+│   ├── test_transcript_quality.py     # 转写退化、校对覆盖及失败恢复测试
 │   ├── test_automation.py             # 自动化、锁与历史测试
 │   ├── test_note_retrieval.py         # 笔记索引与检索测试
 │   ├── test_note_filename.py          # 文件名日期与批量补全测试

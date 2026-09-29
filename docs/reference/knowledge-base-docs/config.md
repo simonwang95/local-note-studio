@@ -60,19 +60,22 @@
 | `LLM_TIMEOUT` | `1800` | B 站后处理单次 LLM 超时时间 |
 | `COOLDOWN_DELAY` | `60` | B 站批处理视频之间/模型后处理之间的冷却等待秒数 |
 | `SUMMARY_CHUNK_CHARS` | `60000` | B 站整篇笔记单次整理的转录文本单块最大字符数 |
-| `SUMMARY_CHUNK_OVERLAP_CHARS` | `800` | B 站摘要/导图/校对分块之间的重叠上下文字符数 |
+| `SUMMARY_CHUNK_OVERLAP_CHARS` | `800` | B 站衍生栏目摘要分块之间的重叠上下文字符数；不控制独立校对的只读前后文 |
 | `SUMMARY_CHUNK_COOLDOWN_DELAY` | `60` | B 站摘要/导图/校对分块之间的冷却等待秒数；默认继承 `COOLDOWN_DELAY` |
 | `SUMMARY_ENABLE_THINKING` | `false` | B 站视频摘要和思维导图是否启用模型思考；未配置时沿用 `QWEN_ORGANIZE_ENABLE_THINKING` |
-| `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` | `12000` | 校对正文可与其余栏目放进同一次模型任务的最大转录字符数 |
-| `SUMMARY_PROOFREAD_CHUNK_CHARS` | `10000` | 长校对正文的单段字符数；分段结果按原顺序直接拼接，不再调用模型综合 |
-| `SUMMARY_PROOFREAD_ENABLE_THINKING` | `false` | 长校对分段是否启用模型推理；机械校对默认关闭以减少耗时和输出压力 |
+| `SUMMARY_PROOFREAD_CHUNK_CHARS` | `8000` | 所有视频先独立校对；单段字符数限制在500–8000，较大旧配置收敛到8000；每段附带前后各最多240字符的只读原文，结果按原顺序直接拼接 |
+| `SUMMARY_PROOFREAD_ENABLE_THINKING` | `false` | 独立校对分段是否启用模型推理；默认关闭以减少耗时和输出压力 |
 | `SUMMARY_PROOFREAD_TIMEOUT` | `600` | 长校对分段的单次读取超时秒数 |
 | `ASR_ENGINE` | `whisper` | B 站字幕缺失时的 ASR 引擎，支持 `whisper` / `qwen3` |
 | `ASR_LOCAL_MODEL` | 空 | 本地 Whisper 或 Qwen3-ASR 模型路径 |
 | `ASR_PROGRESS_INTERVAL` | `30` | Whisper 转写进度提示间隔秒数 |
+| `TRANSCRIPT_CACHE_DIR` | 应用 `state/transcripts` | 保存ASR原文、时间戳、解码参数、异常段重试记录及整理前原文；桌面Worker随State目录设置，隐身模式不写此缓存 |
 | `PROOFREAD_DOMAINS` | `finance,computer,medical,legal,engineering` | AI 校对时重点关注的术语领域 |
 
 ## 配置原则
+
+- `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` 已废弃：短视频也先独立校对，再依据合格正文生成其余栏目。校对质量失败只重试该段一次，仍失败则保留占位符和原文。
+- Whisper 固定使用 `condition_on_previous_text=False` 防止错误向后续窗口传播。重复符号/短语和有声音却缺少时间轴文字的片段会按原时间范围重转一次；静音不触发漏转重试。此检查不能替代人工事实核验。
 
 - `env.local` 不应提交。
 - API key、cookie、收藏夹 ID、模型真实路径只放 `env.local`。

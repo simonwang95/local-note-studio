@@ -37,6 +37,10 @@ worker = load_worker()
 
 
 class ErrorClassificationTests(unittest.TestCase):
+    def test_explicit_asr_failure_wins_over_model_setup_logs(self):
+        error = RuntimeError("Whisper 模型加载完成，ASR质量检查失败：连续异常符号")
+        self.assertEqual(core.classify_error(error), ("ASR_FAILED", True))
+
     def test_llm_failure_wins_over_earlier_subtitle_log_text(self):
         error = RuntimeError("字幕转写成功，后续模型未返回校对正文")
         self.assertEqual(core.classify_error(error), ("LLM_FAILED", True))
@@ -258,7 +262,7 @@ class LockAndHistoryTests(unittest.TestCase):
             self.assertNotIn("cookie-secret", serialized)
             self.assertNotIn("api_key", serialized)
             self.assertNotIn("cookies", serialized)
-            self.assertEqual(store.list()[0]["worker_version"], "0.1.26")
+            self.assertEqual(store.list()[0]["worker_version"], core.WORKER_VERSION)
 
     def test_redaction_covers_provider_error_key_format(self):
         message = "Incorrect API key provided: sk-live-secret123456 url=https://example.com/?signature=signed-value"

@@ -645,7 +645,7 @@ transcribe_bilibili_url() {
 
         local q3_output="${task_cache_dir}/asr_transcript.txt"
         echo "   🎤 开始语音转文字..."
-        run_asr_transcribe "$audio_file" "$q3_output"
+        ASR_SOURCE_REF="$url" run_asr_transcribe "$audio_file" "$q3_output"
 
         if [ -f "$q3_output" ] && [ -s "$q3_output" ]; then
             TRANSCRIPT_SOURCE=$(head -1 "$q3_output")
@@ -834,7 +834,7 @@ transcribe_local_file() {
     echo "   🎤 $file_label: 开始语音转文字..."
     local q3_output="${work_dir}/transcript.txt"
     rm -f "$q3_output"
-    run_asr_transcribe "$audio_input" "$q3_output"
+    ASR_SOURCE_REF="$file_path" run_asr_transcribe "$audio_input" "$q3_output"
 
     if [ ! -f "$q3_output" ] || [ ! -s "$q3_output" ]; then
         echo "❌ $file_label: ASR 转录失败"

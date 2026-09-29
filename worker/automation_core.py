@@ -22,7 +22,7 @@ from typing import Any, Iterator
 
 
 RESULT_SCHEMA_VERSION = "1.0"
-WORKER_VERSION = "0.1.26"
+WORKER_VERSION = "0.1.28"
 PROFILE_SCHEMA_VERSION = "1.0"
 RULES_VERSION = "1.0"
 SECRET_KEYS = {
@@ -149,6 +149,7 @@ def classify_error(exc: BaseException) -> tuple[str, bool]:
         return "STATE_STORAGE_ERROR", True
     text = str(exc).lower()
     rules = (
+        (("asr质量检查失败", "asr 转录失败", "转录失败 -"), "ASR_FAILED", True),
         (("cookie", "未登录", "login"), "BILIBILI_AUTH_INVALID", True),
         (("412", "risk", "风控"), "BILIBILI_RATE_LIMITED", True),
         # Video commands retain earlier subtitle logs; prefer the actual downstream

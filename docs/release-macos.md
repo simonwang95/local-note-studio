@@ -21,7 +21,7 @@ The package is not completely self-contained:
 Recommended handoff steps:
 
 1. Send the matching DMG plus its SHA-256 checksum and this checklist. Do not send `worker/env.local`, cookies, indexes, or personal output data.
-2. Open the DMG, drag Local Note Studio to Applications, then launch it.
+2. Open the DMG, confirm that both Local Note Studio and the Applications folder shortcut are visible, drag the app onto Applications, then launch it.
 3. In “配置”, choose “应用托管环境”, enter the tester's API/model and output root, then click “安装/修复”.
 4. In “校验”, run “检查依赖” and confirm the managed runtime is complete.
 5. Start with a small public webpage or local document before testing account-bound Bilibili or long ASR workflows.
@@ -29,6 +29,27 @@ Recommended handoff steps:
 For an internal upgrade, quit Local Note Studio and replace the existing `/Applications/Local Note Studio.app` with the new copy from the DMG. Trashing or replacing only the `.app` preserves Application Support runtime/state and WebView settings. A complete reset is a separate operation and should not be used for normal upgrades.
 
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
+
+For the verified APFS packaging path, build the signed app with `npm run tauri:build -- --bundles app`, then run `npm run release:dmg` after ejecting any mounted image with the same output path. When only repackaging an existing signed app of the current version, the first command can be skipped. The packaging script stages both the app and an `Applications -> /Applications` symlink, creates an APFS image, verifies its checksum, mounts it read-only, verifies the drop target, strict app signature and all app file hashes, then replaces the artifact only after those checks pass. Do not create a release DMG from the app folder alone: that omits the drag-to-install destination.
+
+## 0.1.28 proofreading chunk size (2026-09-29)
+
+- Changes: proofreading defaults to 8,000 characters and permits 500–8,000, replacing the 3,000 default and 4,000 cap. Read-only neighboring raw context remains 240 characters per side; ordered joining, quality checks and one same-size retry remain in place. Existing explicit smaller overrides remain respected. Running tasks are unchanged; the new default applies to new tasks after updating the app.
+- Validation: frontend build/compatibility, 195 Python tests, 10 Rust tests and release configuration pass. The reported 15,259-character cached transcript splits into 7,996 / 7,262 characters with all non-whitespace source content preserved. No live-model regeneration was performed for this parameter-only change.
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.28_aarch64.dmg` (3,854,765 bytes).
+- SHA-256: `5b23708120c1174f44bf257e3850bb55a700c3b3534b81f3d407f61edc12f6fe`.
+- Packaging: the APFS DMG passed checksum and read-only mounted validation of the Applications shortcut, arm64 app version, strict signature and all app file hashes. Changed resources match source, and importing the packaged transcription module confirms the 8,000-character default. The installed 0.1.27 application is unchanged; install the update for new tasks to use this default.
+
+## 0.1.27 video transcript quality repair (2026-09-29)
+
+- Changes: independent Whisper windows, bounded retries of suspect audio spans, private raw/timestamp diagnostics, dedicated proofread chunks with quality retries, summaries generated from validated text, a final Worker quality gate, and corrected terminology prompts.
+- Compatibility: visible raw-subtitle and thinking options retain their meaning. `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` is retired; proofread chunks default to 3,000 characters and are clamped to 500–4,000. Non-incognito diagnostics are retained under Application Support `state/transcripts` until explicitly removed.
+- Validation: frontend build and compatibility checks, 195 Python tests, 10 Rust tests, shell syntax and release configuration checks pass. The APFS DMG passed checksum verification and read-only mounted validation of the arm64 app, strict deep ad-hoc signature, version, source hashes and absence of local config/bytecode.
+- Real-video acceptance: the reported 23-minute video completed fresh ASR, three proofread chunks and seven derived sections using the same Qwen model with thinking disabled. After manual semantic review, its note/assets were backed up and promoted; the comparison note was unchanged. Mechanical checks do not verify facts, every proper name or rhetorical meaning, and older notes are not automatically rewritten by this update.
+- Packaging correction: rebuilt the same application version with a visible `Applications -> /Applications` drop target, which was missing from the first 0.1.27 image. The mounted shortcut, strict signature and all app file hashes pass verification; app contents are unchanged.
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.27_aarch64.dmg` (3,853,890 bytes).
+- SHA-256: `6bf099ed18f273bc5f84c8bfc2590f68212b7ca5c64d61e35aa5e8ce4f3917b8` (replaces the first image checksum).
+- The application in `/Applications` has not been replaced; install this update to use the repaired workflow. Developer ID signing, notarization and clean-Mac acceptance remain separate gates.
 
 ## 0.1.26 internal Apple Silicon artifact (2026-09-04)
 

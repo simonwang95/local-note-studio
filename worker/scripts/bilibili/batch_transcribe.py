@@ -32,6 +32,7 @@ from mindmap_markdown import (
     normalize_mindmap_list,
 )
 from stock_reference import build_stock_reference_prompt, build_stock_validation_section
+from transcript_quality import proofread_errors, save_transcript_diagnostic
 
 # ===== 加载 env.local 配置 =====
 def _load_env_local():
@@ -93,11 +94,7 @@ SUMMARY_MAX_TOKENS = int(_env.get("SUMMARY_MAX_TOKENS", "80000"))
 SUMMARY_MAX_TOKENS_CAP = int(_env.get("SUMMARY_MAX_TOKENS_CAP", str(max(SUMMARY_MAX_TOKENS, 80000))))
 SUMMARY_CHUNK_CHARS = int(_env.get("SUMMARY_CHUNK_CHARS", "60000"))
 SUMMARY_CHUNK_OVERLAP_CHARS = int(_env.get("SUMMARY_CHUNK_OVERLAP_CHARS", _env.get("QWEN_ORGANIZE_OVERLAP_CHARS", "800")))
-SUMMARY_PROOFREAD_CHUNK_CHARS = max(1000, int(_env.get("SUMMARY_PROOFREAD_CHUNK_CHARS", "10000")))
-SUMMARY_PROOFREAD_SINGLE_PASS_CHARS = max(
-    SUMMARY_PROOFREAD_CHUNK_CHARS,
-    int(_env.get("SUMMARY_PROOFREAD_SINGLE_PASS_CHARS", "12000")),
-)
+SUMMARY_PROOFREAD_CHUNK_CHARS = max(500, min(8000, int(_env.get("SUMMARY_PROOFREAD_CHUNK_CHARS", "8000"))))
 SUMMARY_PROOFREAD_ENABLE_THINKING = (
     _env.get("SUMMARY_PROOFREAD_ENABLE_THINKING", "false").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -420,6 +417,12 @@ def apply_original_subtitle_preference(filepath):
     updated = _remove_original_subtitles_section(content)
     if updated == content:
         return False
+    transcript = _extract_transcript_text(content)
+    if transcript:
+        save_transcript_diagnostic("source", filepath + "\n" + transcript, {
+            "schema_version": 1, "note_path": os.path.abspath(filepath),
+            "model": SUMMARY_MODEL, "transcript": transcript,
+        })
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(updated)
     return True
@@ -705,26 +708,28 @@ def _build_domain_prompt(domains_str):
     """
     domain_map = {
         "finance": (
-            "6a) 金融领域：修正金融术语的语音识别错误，如「股权→债券」「期货→期权」"
-            "「量化→量价」「对冲→对充」「杠杆→钢杆」「IPO→I P O」等；"
+            "6a) 金融领域：仅在上下文明确时纠正同音错字，如「钢杆→杠杆」「做替→做T」；"
+            "股权与债券、期货与期权、量化与量价都是不同的合法概念，不得互相替换。"
+            "正T、倒T是日内交易顺序，不能擅自解释为做多或做空。"
+            "不能确认的公司简称、人名和材料名称保留原话并标注「待核验」，不要编造术语解释。"
             "保持「PE/VC/ROE/ROI/NPV/EBITDA」等缩写格式正确\n"
         ),
         "computer": (
-            "6b) 计算机领域：修正技术术语的识别错误，如「API→A P I」「SDK→S D K」"
-            "「Kubernetes→K 8 s」「Docker→道客」「Git→给特」「SQL→C Q L」"
-            "「JSON→J 桑」「RESTful→REST ful」「微服务→微浮物」「容器化→荣启华」等\n"
+            "6b) 计算机领域：在上下文明确时将拼读规范为API、SDK、SQL、JSON等；"
+            "保留Docker、Git、Kubernetes、RESTful、微服务、容器化等正确写法，"
+            "不要将正确术语改为中文同音字，不补写未出现的产品版本。\n"
         ),
         "medical": (
             "6c) 医学领域：修正医学术语的识别错误，如药名、疾病名、解剖学术语等；"
             "保持「CT/MRI/DNA/RNA」等缩写格式正确\n"
         ),
         "legal": (
-            "6d) 法律领域：修正法律术语的识别错误，如「合同法→和同法」「仲裁→中才」"
-            "「知识产权→知识产全」「法人→发人」等\n"
+            "6d) 法律领域：上下文明确时修正同音错字，例如「和同法→合同法」「知识产全→知识产权」；"
+            "不得改变法律主体、义务、条件或责任范围。\n"
         ),
         "engineering": (
-            "6e) 工程领域：修正工程术语的识别错误，如「架构→加购」「模块→磨快」"
-            "「耦合→偶合」「并发→病发」「冗余→绒余」等\n"
+            "6e) 工程领域：依据上下文核对架构、模块、耦合、并发、冗余等术语；"
+            "不把正确术语改为同音词，无法确认时标注待核验。\n"
         ),
     }
 
@@ -838,6 +843,9 @@ def _can_remove_original_subtitles(content):
     if any(placeholder in content for placeholder in ALL_PLACEHOLDERS):
         return False
     generated_content = _content_before_raw_transcript(content)
+    proofread = re.search(r"(?ms)^##\s+校对正文\s*$\n(.*?)(?=^##\s+|\Z)", generated_content)
+    if proofread and proofread_errors(proofread.group(1)):
+        return False
     return any(
         _section_has_generated_content(generated_content, section_title)
         for section_title in ("结构化正文", "校对正文")
@@ -926,10 +934,15 @@ def _combined_summary_prompts(requested, transcript_text):
         ),
         "quotes": "提取 5-10 条最值得复看或引用的原话/关键判断句，用 Markdown 列表；不要编造时间戳。",
         "review": "生成 6-12 条问题、判断点、操作项或待查证事项，用 Markdown 列表。",
-        "terms": "去重提取术语、专名、概念或缩写，每条使用「术语：解释」格式；没有时明确说明。",
+        "terms": "去重提取术语、专名、概念或缩写，每条使用「术语：解释」格式；没有时明确说明。疑似ASR错词或标注待核验的名称只能列为待核验，不得杜撰定义。",
         "proofread": (
             "输出完整校对文本：只修正明显 ASR 同音错字、断句和标点，适度去除口语填充词；"
-            "严禁删改实质内容或改变原意。"
+            "严禁删改实质内容或改变原意。必须从头到尾补齐中文标点并按语义分段；"
+            "不能只校对前半段，不能直接复制后半段无标点原文。去除机械重复和连续异常符号，"
+            "保留全部观点、例子、数字、条件、否定及风险边界。听不清的词标注「待核验」，"
+            "不能凭常识补写缺失的论述。保留反问、疑问和否定的语气，不能把批评某种做法的反问改成要求照做的指令。"
+            "同一实体的不同同音写法能确认则统一，不能确认则保留并标注待核验。"
+            "不能仅补标点而保留上下文已明确的同音错字。每个自然段建议100–250字。"
         ),
     }
     if "proofread" in requested:
@@ -947,6 +960,7 @@ def _combined_summary_prompts(requested, transcript_text):
     contract = _summary_output_contract(requested)
     system_prompt = (
         "你是本地知识库视频笔记整理助手。必须忠于转录文本，不编造，不输出思考过程。"
+        "判断、预测和交易建议均是讲者观点，不得改写为已证实事实；待核验的名称和内容须保留不确定性。"
         "请在一次回答中完成全部指定栏目，每个栏目只出现一次。\n\n"
         f"栏目要求：\n{requested_rules}\n\n"
         "严格使用下面的边界标记返回内容；标记必须原样保留，标记外不要输出任何文字：\n"
@@ -1028,6 +1042,13 @@ def _parse_combined_summary(response, requested, transcript_text=""):
         if recovered:
             sections["proofread"] = recovered
             print("   🩹 模型正常结束但漏写校对正文结束标记；已通过长度和句末校验安全恢复")
+    if "proofread" in sections:
+        errors = proofread_errors(sections["proofread"], transcript_text)
+        if isinstance(response, LLMResponse) and response.finish_reason == "length":
+            errors.append("模型因输出长度结束")
+        if errors:
+            print("   ⚠️ 校对正文质量检查未通过：" + "；".join(errors))
+            sections.pop("proofread")
     return sections
 
 
@@ -1049,7 +1070,7 @@ def _run_summary_sections(label, title, transcript_text, requested):
 
 
 def _run_chunked_proofread(label, title, transcript_text):
-    """Generate long proofread chunks and join them without a lossy synthesis call."""
+    """Proofread independently, retry failed chunks once, then join losslessly."""
     chunks = _chunk_text_with_overlap(
         transcript_text,
         max_chars=SUMMARY_PROOFREAD_CHUNK_CHARS,
@@ -1069,26 +1090,41 @@ def _run_chunked_proofread(label, title, transcript_text):
     for index, chunk in enumerate(chunks, 1):
         if index > 1:
             _wait_between_llm_calls("下一段校对")
-        response = _call_llm(
-            system_prompt,
-            (
+        proofread = ""
+        for attempt in range(2):
+            if attempt:
+                _wait_between_llm_calls("质量未通过的校对段重试")
+            user_prompt = (
                 f"视频标题：{title}\n\n"
                 f"校对分段：{index}/{len(chunks)}\n"
                 "说明：各段没有重叠，请完整校对当前段，不要概括或省略。\n\n"
+                "以下前后文只用于判断指代和句子语气，不得输出到本段：\n"
+                f"只读前文：{chunks[index - 2][-240:] if index > 1 else '无'}\n"
+                f"只读后文：{chunks[index][:240] if index < len(chunks) else '无'}\n\n"
                 f"{chunk_instruction}\n\n"
                 f"转录文本分段：\n{chunk}"
-            ),
-            max_tokens=SUMMARY_MAX_TOKENS,
-            task_name=f"校对正文 {label} 分段 {index}/{len(chunks)}",
-            enable_thinking=SUMMARY_PROOFREAD_ENABLE_THINKING,
-            timeout=SUMMARY_PROOFREAD_TIMEOUT,
-        )
-        parsed = _parse_combined_summary(response, ["proofread"], chunk)
-        proofread = parsed.get("proofread", "").strip()
+            )
+            if attempt:
+                user_prompt += "\n\n上次未通过质量检查。请重新完整校对本段，检查标点、重复、漏段和边界标记；不要缩写。"
+            response = _call_llm(
+                system_prompt, user_prompt,
+                max_tokens=SUMMARY_MAX_TOKENS,
+                task_name=f"校对正文 {label} 分段 {index}/{len(chunks)} 尝试{attempt + 1}",
+                enable_thinking=SUMMARY_PROOFREAD_ENABLE_THINKING,
+                timeout=SUMMARY_PROOFREAD_TIMEOUT,
+            )
+            parsed = _parse_combined_summary(response, ["proofread"], chunk)
+            proofread = parsed.get("proofread", "").strip()
+            if proofread:
+                break
         if not proofread:
-            raise RuntimeError(f"校对正文分段 {index}/{len(chunks)} 未返回完整栏目")
+            raise RuntimeError(f"校对正文分段 {index}/{len(chunks)} 两次未通过完整性/质量检查")
         proofread_parts.append(proofread)
-    return "\n\n".join(proofread_parts)
+    joined = "\n\n".join(proofread_parts)
+    errors = proofread_errors(joined, transcript_text)
+    if errors:
+        raise RuntimeError("校对拼接后质量检查失败：" + "；".join(errors))
+    return joined
 
 
 def _replace_requested_sections(content, sections):
@@ -1128,13 +1164,10 @@ def generate_summary(filepath, progress_label=None):
         content = f.read()
 
     if not any(ph in content for ph in ALL_PLACEHOLDERS):
-        if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
-            updated = _remove_original_subtitles_section(content)
-            if updated != content:
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(updated)
-                return True
-        return False
+        proofread = re.search(r"(?ms)^##\s+校对正文\s*$\n(.*?)(?=^##\s+|\Z)", _content_before_raw_transcript(content))
+        if proofread and proofread_errors(proofread.group(1)):
+            raise RuntimeError("已有校对正文未通过质量检查，需依据原始转写重新校对")
+        return apply_original_subtitle_preference(filepath)
 
     title = ""
     for line in content.splitlines():
@@ -1151,24 +1184,38 @@ def generate_summary(filepath, progress_label=None):
         return False
 
     requested_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in requested)
-    print(f"   🚀 {label}: 单次整理 {requested_labels}...")
-    deferred_proofread = (
-        "proofread" in requested
-        and len(transcript_text) > SUMMARY_PROOFREAD_SINGLE_PASS_CHARS
-    )
-    primary_requested = [key for key in requested if key != "proofread"] if deferred_proofread else list(requested)
+    print(f"   🚀 {label}: 整理 {requested_labels}...")
+    cache = save_transcript_diagnostic("source", filepath + "\n" + transcript_text, {
+        "schema_version": 1, "note_path": os.path.abspath(filepath),
+        "model": SUMMARY_MODEL, "transcript": transcript_text,
+    })
+    if cache:
+        print(f"   🗂️ 整理前原文缓存: {cache}")
+    primary_requested = [key for key in requested if key != "proofread"]
     sections = {}
     completed_model_call = False
 
-    if deferred_proofread:
-        print(
-            f"   📚 {label}: 校对正文输入 {len(transcript_text)} 字，超过单次阈值 "
-            f"{SUMMARY_PROOFREAD_SINGLE_PASS_CHARS}；摘要栏目仍合并一次，校对正文单独分段"
-        )
+    if "proofread" in requested:
+        # Derived notes must not amplify an uncorrected or failed transcript.
+        try:
+            sections["proofread"] = _run_chunked_proofread(label, title, transcript_text)
+            completed_model_call = True
+        except Exception as exc:
+            print(f"   ⚠️ {label}: 分段校对失败，保留原文与占位符：{exc}")
+            return False
+    else:
+        existing = re.search(r"(?ms)^## 校对正文\s*\n(.*?)(?=^## |\Z)", content)
+        if existing and not any(ph in existing.group(1) for ph in ALL_PLACEHOLDERS):
+            candidate = re.sub(r"(?m)^---\s*$", "", existing.group(1)).strip()
+            if not proofread_errors(candidate, transcript_text):
+                sections["proofread"] = candidate
+    summary_input = sections.get("proofread") or transcript_text
 
     if primary_requested:
+        if completed_model_call:
+            _wait_between_llm_calls("校对后摘要栏目")
         try:
-            sections.update(_run_summary_sections(label, title, transcript_text, primary_requested))
+            sections.update(_run_summary_sections(label, title, summary_input, primary_requested))
             completed_model_call = True
         except Exception as exc:
             print(f"   ⚠️ {label}: 整篇笔记生成失败: {exc}")
@@ -1179,20 +1226,9 @@ def generate_summary(filepath, progress_label=None):
             missing_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in primary_missing)
             print(f"   🔁 {label}: 仅重试缺失栏目：{missing_labels}")
             try:
-                sections.update(_run_summary_sections(label, title, transcript_text, primary_missing))
+                sections.update(_run_summary_sections(label, title, summary_input, primary_missing))
             except Exception as exc:
                 print(f"   ⚠️ {label}: 缺失栏目补偿失败: {exc}")
-
-    if deferred_proofread:
-        if completed_model_call:
-            _wait_between_llm_calls("分段校对正文")
-        try:
-            proofread = _run_chunked_proofread(label, title, transcript_text)
-            completed_model_call = True
-            if proofread:
-                sections["proofread"] = proofread
-        except Exception as exc:
-            print(f"   ⚠️ {label}: 分段校对正文生成失败: {exc}")
 
     if not sections and not completed_model_call:
         return False
@@ -1202,7 +1238,7 @@ def generate_summary(filepath, progress_label=None):
     if missing:
         print(f"   ⚠️ {label}: 模型未返回栏目，将保留占位符以便重试：{'、'.join(missing)}")
     if sections:
-        print(f"   ✅ {label}: 单次整理已写入 {len(sections)}/{len(requested)} 个栏目")
+        print(f"   ✅ {label}: 整理已写入 {sum(key in sections for key in requested)}/{len(requested)} 个栏目")
 
     if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
         updated = _remove_original_subtitles_section(content)

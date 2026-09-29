@@ -81,7 +81,8 @@ BILIBILI_OUTPUT_DIR="notes/Net/BiliBili" $PY scripts/run_bilibili_transcript.py 
 - 桌面应用的“字幕/转录优先级”下拉框会覆盖上述环境变量：`yt-dlp` 字幕优先、网页播放器字幕优先、ASR 语音转写优先。
 - `VIDEO_MANIFEST_ENABLED=true` 时默认写入 `indexes/video-manifest.json`；命令行 `--no-video-manifest` 优先级更高。
 - Qwen reasoning 模型建议沿用旧项目参数：`SUMMARY_MAX_TOKENS=80000`、`LLM_TIMEOUT=1800`。
-- 一句话、摘要、思维导图、结构化正文、金句、复习清单、术语和校对默认合并到一个模型任务。转录超过 `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` 时，七个整理栏目仍合并一次，接近原文长度的校对正文按 `SUMMARY_PROOFREAD_CHUNK_CHARS` 分段、关闭 thinking 并确定性拼接，避免长输出提前结束；缺失的非校对栏目只定向补偿，不重做成功栏目。只有整理输入超过 `SUMMARY_CHUNK_CHARS` 时才使用带 overlap 的摘要分块与最终综合。
+- 所有视频先独立生成校对正文，按 `SUMMARY_PROOFREAD_CHUNK_CHARS`（默认8000，范围500–8000）无重叠分段，默认关闭 thinking。在上限附近优先寻找换行或中文句末标点；每段附带相邻原文前后各最多240字符，仅用于理解、不输出，结果按顺序拼接。每段及拼接结果检查异常符号、循环重复、长中文无标点和原文局部覆盖率；失败段以原大小重试一次，仍失败则停止摘要生成并保留原文和占位符，当前不会自动细分失败段。七个衍生栏目依据通过检查的校对正文合并生成，缺失栏目只定向补偿。只有摘要输入超过 `SUMMARY_CHUNK_CHARS` 时才使用带 overlap 的摘要分块与最终综合。旧 `SUMMARY_PROOFREAD_SINGLE_PASS_CHARS` 不再生效。
+- Whisper 关闭前文继承，对机械重复和有声音但无转写的时间段最多重试一次；重试限定在受影响的时间范围，不替换其他段。原始结果、分段时间戳、重试和质量错误保存在应用 `state/transcripts/asr`；整理前文字保存在 `state/transcripts/source`。正文隐藏原始字幕时仍保留后台缓存，隐身模式例外。
 - `--dry-run` 只打印命令，不执行。
 - 无 `--limit` 的收藏夹模式会运行本仓库完整批处理；建议日常增量先使用 `--limit 1` 或小批量验证。
 

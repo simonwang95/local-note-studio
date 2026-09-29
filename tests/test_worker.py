@@ -39,6 +39,13 @@ mindmap_markdown = sys.modules["mindmap_markdown"]
 
 
 class RequestAndCommandContractTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patch = mock.patch.dict(os.environ, {"TRANSCRIPT_CACHE_DIR": temp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def base(self, task: str, source: str = "source"):
         return worker.TaskRequest(task=task, source=source, output_dir="/tmp/local-note-output", python_bin="python3")
 
@@ -258,7 +265,7 @@ class RequestAndCommandContractTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(note.read_text(encoding="utf-8"), original)
 
-    def test_video_note_generation_combines_all_sections_into_one_model_task(self):
+    def test_video_note_proofreads_first_then_summarizes_validated_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             note = pathlib.Path(temp_dir) / "video.md"
             sections = [
@@ -289,12 +296,17 @@ class RequestAndCommandContractTests(unittest.TestCase):
             with (
                 mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
                 mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
+                mock.patch.object(batch_transcriber, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0),
+                mock.patch.object(batch_transcriber, "_run_chunked_proofread", return_value="校对正文结果") as proofread,
                 mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=response) as model_task,
             ):
                 self.assertTrue(batch_transcriber.generate_summary(str(note)))
 
             final = note.read_text(encoding="utf-8")
             model_task.assert_called_once()
+            proofread.assert_called_once()
+            self.assertEqual(model_task.call_args.args[2], "校对正文结果")
+            self.assertNotIn("[[LNS_SECTION:proofread]]", model_task.call_args.args[3])
             self.assertNotIn("【AI待处理", final)
             self.assertNotIn("原始字幕", final)
             for heading, _key in sections:
@@ -410,7 +422,6 @@ class RequestAndCommandContractTests(unittest.TestCase):
             with (
                 mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
                 mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
-                mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_SINGLE_PASS_CHARS", 5),
                 mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_CHUNK_CHARS", 5),
                 mock.patch.object(batch_transcriber, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0),
                 mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=derived) as combined,
@@ -445,8 +456,8 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(model.call_args.kwargs["timeout"], 321)
 
     def test_normally_finished_unclosed_proofread_is_safely_recovered(self):
-        transcript = "这是完整正文。" * 10
-        body = "这是校对正文。" * 10
+        transcript = "".join(f"这是第{i}部分的完整正文。" for i in range(10))
+        body = "".join(f"这是第{i}部分的校对正文。" for i in range(10))
         response = batch_transcriber.LLMResponse(
             "[[LNS_SECTION:proofread]]\n" + body,
             finish_reason="stop",
@@ -1924,6 +1935,12 @@ class IntegrityTests(unittest.TestCase):
         remove = worker.TaskRequest(task="bilibili-url", keep_original_subtitles=False)
         self.assertEqual(worker.validate_markdown_output(path, keep), [])
         self.assertTrue(any("仍含原始字幕" in item for item in worker.validate_markdown_output(path, remove)))
+
+    def test_final_video_gate_rejects_unpunctuated_proofread(self):
+        path = self.root / "bad-video.md"
+        path.write_text("---\nsource_path: /media/video.mp4\n---\n\n## 校对正文\n\n" + "投资需要研究实际经营情况" * 25)
+        errors = worker.validate_markdown_output(path, worker.TaskRequest(task="local-video"))
+        self.assertTrue(any("没有标点" in item for item in errors))
 
     def test_paper_requires_full_translation(self):
         path = self.root / "paper.md"

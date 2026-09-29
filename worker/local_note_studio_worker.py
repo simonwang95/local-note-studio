@@ -40,6 +40,7 @@ from automation_core import (
     state_dir as automation_state_dir,
     utc_now,
 )
+from scripts.transcript_quality import proofread_errors
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -301,6 +302,7 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env["SUMMARY_ENABLE_THINKING"] = thinking
     env["OPUS_IMAGE_ANALYSIS"] = req.opus_image_analysis
     state_root = pathlib.Path(env.get("LOCAL_NOTE_STUDIO_STATE_DIR") or app_root / "state")
+    env["TRANSCRIPT_CACHE_DIR"] = str(state_root / "transcripts")
     env["OPUS_IMAGE_ANALYSIS_CACHE_DIR"] = str(state_root / "opus-image-analysis-cache")
     env["WEB_CAPTURE_MODE"] = req.web_capture_mode if req.web_capture_mode in {"static", "browser"} else "static"
     env["BROWSER_EXECUTABLE"] = req.browser_executable
@@ -2257,6 +2259,9 @@ def validate_markdown_output(path: pathlib.Path, req: TaskRequest) -> list[str]:
 
     raw_subtitle = re.search(r"(?m)^(?:##\s+原始字幕|<summary>📄\s*原始字幕</summary>)", markdown) is not None
     if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
+        proofread = re.search(r"(?ms)^##\s+校对正文\s*$\n(.*?)(?=^##\s+|\Z)", markdown)
+        if proofread:
+            errors.extend("校对正文：" + error for error in proofread_errors(proofread.group(1)))
         if req.keep_original_subtitles and not raw_subtitle:
             errors.append("界面要求保留原始字幕，但输出中缺少原始字幕")
         if not req.keep_original_subtitles and raw_subtitle:

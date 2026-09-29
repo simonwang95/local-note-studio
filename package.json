@@ -1,6 +1,6 @@
 {
   "name": "local-note-studio",
-  "version": "0.1.26",
+  "version": "0.1.28",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "release:check": "npm run check && python3 scripts/release_check.py"
+    "release:check": "npm run check && python3 scripts/release_check.py",
+    "release:dmg": "python3 scripts/package_dmg.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
