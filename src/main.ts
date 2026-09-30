@@ -5,12 +5,22 @@ import { createAppTabs } from "./app-shell";
 import { ManifestViewStateStore } from "./manifest-state";
 import {
   clearRecentValues,
+  createDesktopProfile,
   createHistoryEntry,
+  deleteCredentials,
+  deleteDesktopProfile,
+  exportDesktopProfile,
+  importedDesktopProfile,
   historyReplayRequest,
+  hasCredentialReference,
+  loadCredentials,
+  loadDesktopProfiles,
   loadTaskHistory,
+  loadQueue,
   loadRecentValues,
-  migrateRuntimePreference,
   noChangesStatusLabel,
+  moveQueueEntry,
+  queueDuplicate,
   filterTaskHistory,
   pathDialogDefault,
   rememberRecentValue,
@@ -19,11 +29,19 @@ import {
   removeHistoryEntry,
   runtimeSelectionPayload,
   saveTaskHistory,
+  saveCredentials,
+  saveDesktopProfiles,
+  saveQueue,
+  renameDesktopProfile,
   taskResultFromLog,
   upsertHistoryEntry,
   type ProgressEvent,
   type TaskHistoryEntry,
   type TaskHistoryStatus,
+  type DesktopProfile,
+  type DesktopProfiles,
+  type QueueEntry,
+  type QueueStatus,
   type RecentValueKind,
 } from "./p1";
 import "./styles.css";
@@ -77,6 +95,18 @@ type SavedSettings = {
   ocrResume: boolean;
   dateInFilename: boolean;
   enableThinking: boolean;
+  videoOutputMode: "full" | "transcription-only";
+  proofreadChunkChars: string;
+  proofreadTimeoutSeconds: string;
+  proofreadRetryCount: string;
+  proofreadCooldownDelay: string;
+  proofreadEnableThinking: boolean;
+  summaryChunkChars: string;
+  summaryTimeoutSeconds: string;
+  summaryRetryCount: string;
+  summaryCooldownDelay: string;
+  summaryEnableThinking: boolean;
+  continueQueueAfterFailure: boolean;
 };
 
 type WorkerLogPayload = {
@@ -90,6 +120,13 @@ const cookiePermissionNoticeKey = "local-note-studio.cookie-permission-notice.v1
 let isWorkerRunning = false;
 let workerLogListenerReady: Promise<void> | null = null;
 let taskHistory = loadTaskHistory();
+let desktopProfiles: DesktopProfiles;
+let currentProfile: DesktopProfile;
+let queueEntries: QueueEntry[] = loadQueue();
+let queueRunning = false;
+let queuePaused = false;
+let continueQueueAfterFailure = true;
+let savedSettings: SavedSettings;
 let activeHistoryEntry: TaskHistoryEntry | null = null;
 let historyFilter: TaskHistoryStatus | "all" = "all";
 const appTabKey = "local-note-studio.active-tab.v1";
@@ -199,6 +236,18 @@ const defaults: SavedSettings = {
   ocrResume: true,
   dateInFilename: false,
   enableThinking: false,
+  videoOutputMode: "full",
+  proofreadChunkChars: "8000",
+  proofreadTimeoutSeconds: "600",
+  proofreadRetryCount: "1",
+  proofreadCooldownDelay: "0",
+  proofreadEnableThinking: false,
+  summaryChunkChars: "",
+  summaryTimeoutSeconds: "",
+  summaryRetryCount: "",
+  summaryCooldownDelay: "",
+  summaryEnableThinking: false,
+  continueQueueAfterFailure: true,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -207,7 +256,9 @@ if (!app) {
   throw new Error("missing #app");
 }
 
-const savedSettings = loadSettings();
+desktopProfiles = loadDesktopProfiles(readLegacySettings());
+currentProfile = desktopProfiles.profiles.find((profile) => profile.id === desktopProfiles.activeId) || desktopProfiles.profiles[0];
+savedSettings = { ...defaults, ...currentProfile.settings, ...loadCredentials(currentProfile.credentialRef) } as SavedSettings;
 
 app.innerHTML = `
   <section class="shell">
@@ -244,6 +295,21 @@ app.innerHTML = `
             <span class="step">1</span><h2>运行环境配置</h2>
           </div>
         </div>
+        <div class="profile-toolbar">
+          <label>配置档案
+            <select id="profileSelect">${desktopProfiles.profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === currentProfile.id ? "selected" : ""}>${escapeHtml(profile.name)}</option>`).join("")}</select>
+          </label>
+          <div class="actions profile-actions">
+            <button id="profileCreate" type="button" class="secondary">新建</button>
+            <button id="profileCopy" type="button" class="secondary">复制</button>
+            <button id="profileRename" type="button" class="secondary">重命名</button>
+            <button id="profileDelete" type="button" class="secondary">删除</button>
+            <button id="profileExport" type="button" class="secondary">导出</button>
+            <button id="profileImport" type="button" class="secondary">导入</button>
+            <input id="profileImportFile" type="file" accept="application/json,.json" hidden />
+          </div>
+        </div>
+        <p class="field-note">档案保存运行时、模型、ASR、Cookie 引用、输出目录与阶段参数。API Key、Cookie 路径和浏览器 Profile 单独存放，导出文件不包含这些字段。</p>
         <div class="form-grid compact">
           <label>
             运行时后端
@@ -396,6 +462,13 @@ app.innerHTML = `
                 .join("")}
             </select>
           </label>
+          <label id="videoOutputModeField" class="hidden">
+            视频输出合同
+            <select id="videoOutputMode">
+              <option value="full" ${savedSettings.videoOutputMode === "full" ? "selected" : ""}>完整整理笔记</option>
+              <option value="transcription-only" ${savedSettings.videoOutputMode === "transcription-only" ? "selected" : ""}>仅转写（保留原文字幕）</option>
+            </select>
+          </label>
           <label id="favoriteLimitField" class="hidden">
             <span id="batchLimitLabel">批量处理数量（0=全部）</span>
             <input id="favoriteLimit" type="number" min="0" step="1" value="${escapeHtml(savedSettings.favoriteLimit)}" placeholder="1" />
@@ -493,8 +566,30 @@ app.innerHTML = `
             <label>模型冷却（秒）<input id="cooldownDelay" type="number" min="0" value="${escapeHtml(savedSettings.cooldownDelay)}" placeholder="留空用默认值；0 为不等待" /></label>
             <label>分块字符数<input id="chunkChars" type="number" min="0" value="${escapeHtml(savedSettings.chunkChars)}" placeholder="使用稳定默认值" /></label>
           </div>
-          <p class="field-note">该值会覆盖当前任务的 Qwen 整理、PDF、速读和摘要分块冷却。UP 主图文批量仅在两次实际 Qwen 整理之间等待；首篇、末篇和已跳过条目不额外等待。</p>
+          <h3 id="videoProofreadTitle">视频校对</h3>
+          <div id="videoProofreadFields" class="form-grid compact advanced-grid">
+            <label>校对段长（字符，500–8000）<input id="proofreadChunkChars" type="number" min="500" max="8000" value="${escapeHtml(savedSettings.proofreadChunkChars)}" /></label>
+            <label>超时（秒，至少 60）<input id="proofreadTimeoutSeconds" type="number" min="60" value="${escapeHtml(savedSettings.proofreadTimeoutSeconds)}" /></label>
+            <label>质量重试次数<input id="proofreadRetryCount" type="number" min="0" max="5" value="${escapeHtml(savedSettings.proofreadRetryCount)}" /></label>
+            <label>模型冷却（秒）<input id="proofreadCooldownDelay" type="number" min="0" value="${escapeHtml(savedSettings.proofreadCooldownDelay)}" /></label>
+            <label class="checkbox-field"><span>校对阶段启用思考</span><input id="proofreadEnableThinking" type="checkbox" ${savedSettings.proofreadEnableThinking ? "checked" : ""} /></label>
+          </div>
+          <h3 id="videoSummaryTitle">视频摘要</h3>
+          <div id="videoSummaryFields" class="form-grid compact advanced-grid">
+            <label>段长（字符）<input id="summaryChunkChars" type="number" min="1" value="${escapeHtml(savedSettings.summaryChunkChars)}" placeholder="沿用通用分块；空值用默认" /></label>
+            <label>超时（秒）<input id="summaryTimeoutSeconds" type="number" min="60" value="${escapeHtml(savedSettings.summaryTimeoutSeconds)}" placeholder="沿用通用超时；空值用默认" /></label>
+            <label>重试次数<input id="summaryRetryCount" type="number" min="0" value="${escapeHtml(savedSettings.summaryRetryCount)}" placeholder="沿用通用重试；0 表示关闭" /></label>
+            <label>模型冷却（秒）<input id="summaryCooldownDelay" type="number" min="0" value="${escapeHtml(savedSettings.summaryCooldownDelay)}" placeholder="沿用通用冷却；0 表示不等待" /></label>
+            <label class="checkbox-field"><span>摘要阶段启用思考</span><input id="summaryEnableThinking" type="checkbox" ${savedSettings.summaryEnableThinking ? "checked" : ""} /></label>
+          </div>
+          <p class="field-note">空值沿用通用设置或 Worker 默认值；重试和冷却中的显式 0 表示关闭。校对默认 8000 字符，前后文各最多 240 字符只用于校验，不计入段长；输出 token 预算仍由模型端设置控制。</p>
         </details>
+        <section class="queue-panel">
+          <div class="panel-header compact-header"><h3>本地串行队列</h3><div class="actions"><button id="queueAdd" type="button" class="secondary">当前任务入队</button><button id="queueStart" type="button">开始/继续</button><button id="queuePause" type="button" class="secondary">暂停调度</button></div></div>
+          <label class="checkbox-field"><span>单项失败后继续运行后续项</span><input id="continueQueueAfterFailure" type="checkbox" ${savedSettings.continueQueueAfterFailure ? "checked" : ""} /></label>
+          <p id="queueNotice" class="field-note">队列以档案引用凭据，保存入队时的参数快照；同一来源与输出目录不会重复入队。重启后需手动确认恢复中断项。</p>
+          <div id="queueList" class="history-list"></div>
+        </section>
       </section>
 
       <section id="progressPanel" class="panel hidden">
@@ -578,6 +673,7 @@ try {
   hydrateTaskOutput();
   bindSettingsPersistence();
   renderHistory();
+  renderQueue();
 } catch (error) {
   setState("界面数据恢复失败");
   setOutput(`本地界面数据恢复失败，但依赖检查和任务按钮仍可使用。\n${errorMessage(error)}\n`);
@@ -606,6 +702,10 @@ document.querySelector<HTMLButtonElement>("#retryFailed")?.addEventListener("cli
 document.querySelector<HTMLSelectElement>("#collectionSelect")?.addEventListener("change", syncSelectedCollection);
 document.querySelector<HTMLButtonElement>("#runDry")?.addEventListener("click", () => runTask(true));
 document.querySelector<HTMLButtonElement>("#runTask")?.addEventListener("click", () => runTask(false));
+document.querySelector<HTMLButtonElement>("#queueAdd")?.addEventListener("click", enqueueCurrentTask);
+document.querySelector<HTMLButtonElement>("#queueStart")?.addEventListener("click", () => void startQueue());
+document.querySelector<HTMLButtonElement>("#queuePause")?.addEventListener("click", pauseQueue);
+document.querySelector<HTMLInputElement>("#continueQueueAfterFailure")?.addEventListener("change", saveSettings);
 document.querySelector<HTMLButtonElement>("#renameNotesDate")?.addEventListener("click", () => runRenameNotesDate());
 document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("click", () => cancelWorker());
 document.querySelector<HTMLButtonElement>("#copyOutputDir")?.addEventListener("click", () => copyPath(inputValue("outputDir")));
@@ -642,6 +742,14 @@ document.querySelector<HTMLButtonElement>("#deleteOutputDirRecent")?.addEventLis
 document.querySelector<HTMLButtonElement>("#clearOutputDirRecent")?.addEventListener("click", () => clearRecentPathList("outputDir"));
 document.querySelector<HTMLButtonElement>("#deleteSourceRecent")?.addEventListener("click", () => deleteCurrentRecentPath("source"));
 document.querySelector<HTMLButtonElement>("#clearSourceRecent")?.addEventListener("click", () => clearRecentPathList("source"));
+document.querySelector<HTMLSelectElement>("#profileSelect")?.addEventListener("change", (event) => switchProfile((event.currentTarget as HTMLSelectElement).value));
+document.querySelector<HTMLButtonElement>("#profileCreate")?.addEventListener("click", () => createProfile(false));
+document.querySelector<HTMLButtonElement>("#profileCopy")?.addEventListener("click", () => createProfile(true));
+document.querySelector<HTMLButtonElement>("#profileRename")?.addEventListener("click", renameProfile);
+document.querySelector<HTMLButtonElement>("#profileDelete")?.addEventListener("click", deleteProfile);
+document.querySelector<HTMLButtonElement>("#profileExport")?.addEventListener("click", exportProfile);
+document.querySelector<HTMLButtonElement>("#profileImport")?.addEventListener("click", () => document.querySelector<HTMLInputElement>("#profileImportFile")?.click());
+document.querySelector<HTMLInputElement>("#profileImportFile")?.addEventListener("change", (event) => void importProfile(event.currentTarget as HTMLInputElement));
 
 if (!hasTauriRuntime()) {
   setState("浏览器预览");
@@ -662,11 +770,11 @@ function checkboxChecked(id: string): boolean {
   return Boolean(document.querySelector<HTMLInputElement>(`#${id}`)?.checked);
 }
 
-function setInputValue(id: string, value: string): void {
+function setInputValue(id: string, value: string, notify = true): void {
   const input = document.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`);
   if (!input) return;
   input.value = value;
-  input.dispatchEvent(new Event("input", { bubbles: true }));
+  if (notify) input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function recentOptions(kind: RecentValueKind): string {
@@ -769,6 +877,18 @@ function payload(dryRun: boolean, retryFailed = false) {
     ocr_resume: checkboxChecked("ocrResume"),
     date_in_filename: checkboxChecked("dateInFilename"),
     enable_thinking: checkboxChecked("enableThinking"),
+    video_output_mode: inputValue("videoOutputMode") || "full",
+    proofread_chunk_chars: inputValue("proofreadChunkChars") || "8000",
+    proofread_timeout_seconds: inputValue("proofreadTimeoutSeconds") || "600",
+    proofread_retry_count: inputValue("proofreadRetryCount") || "1",
+    proofread_cooldown_delay: inputValue("proofreadCooldownDelay") || "0",
+    proofread_enable_thinking: checkboxChecked("proofreadEnableThinking"),
+    summary_chunk_chars: inputValue("summaryChunkChars"),
+    summary_timeout_seconds: inputValue("summaryTimeoutSeconds"),
+    summary_retry_count: inputValue("summaryRetryCount"),
+    summary_cooldown_delay: inputValue("summaryCooldownDelay"),
+    summary_enable_thinking: checkboxChecked("summaryEnableThinking"),
+    desktop_profile_id: currentProfile.id,
     dry_run: dryRun,
   };
 }
@@ -914,32 +1034,38 @@ function updateBatchResult(text: string): void {
   document.querySelector<HTMLButtonElement>("#retryFailed")?.classList.toggle("hidden", data.failed <= 0);
 }
 
-async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): Promise<void> {
+async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string, requestOverride?: Record<string, unknown>): Promise<void> {
   if (isWorkerRunning) return;
   saveSettings();
-  const task = currentTask();
-  if (retryFailed && task === "bilibili-favorite" && checkboxChecked("incognitoMode")) {
+  const task = (String(requestOverride?.task || currentTask())) as TaskType;
+  if (retryFailed && task === "bilibili-favorite" && Boolean(requestOverride?.incognito_mode ?? checkboxChecked("incognitoMode"))) {
     setState("隐身模式不读取失败状态");
     setOutput("“只重试失败项”依赖上次保存的 B站批量失败状态。请关闭隐身模式后再重试。\n");
     return;
   }
-  if (!inputValue("outputDir")) {
+  if (!String(requestOverride?.output_dir || inputValue("outputDir"))) {
     setState("缺少输出目录");
     setOutput("请先填写默认输出根目录，或手动填写本次输出目录。");
     return;
   }
-  if (!inputValue("source") && task !== "bilibili-favorite") {
+  if (!String(requestOverride?.source || inputValue("source")) && task !== "bilibili-favorite") {
     setState("缺少输入源");
     setOutput("请填写 URL、文件路径或目录路径。");
     return;
   }
-  if (task === "bilibili-favorite" && !String((payload(false) as { collection_id?: string }).collection_id || "")) {
+  if (task === "bilibili-favorite" && !String(requestOverride?.collection_id || (payload(false) as { collection_id?: string }).collection_id || "")) {
     setState("未选择收藏夹/系列");
     setOutput("请先点击“读取列表”，然后选择一个收藏夹或系列。");
     return;
   }
 
-  const request = payload(dryRun, retryFailed);
+  const request = { ...payload(dryRun, retryFailed), ...(requestOverride || {}) } as Record<string, unknown>;
+  const credentialProfileId = String(request.desktop_profile_id || currentProfile.id);
+  const credentialProfile = desktopProfiles.profiles.find((profile) => profile.id === credentialProfileId);
+  const credentials = credentialProfile ? loadCredentials(credentialProfile.credentialRef) : {};
+  request.api_key = credentials.apiKey || "";
+  request.cookies = credentials.cookies || "";
+  request.browser_profile = credentials.chromeProfile || "";
   rememberTaskPath("outputDir");
   if (inputValue("source")) rememberTaskPath("source");
   if (!dryRun) {
@@ -958,15 +1084,17 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string): 
     updateBatchResult(result || currentOutput());
     const taskResult = taskResultFromLog(result || currentOutput());
     if (taskResult) renderOutputs(taskResult.outputs);
+    const taskFailedPartially = taskResult?.status === "partial_failed" || taskResult?.status === "failed" || Number(taskResult?.counts?.failed || 0) > 0;
     if (activeHistoryEntry) {
-      activeHistoryEntry.status = "completed";
+      activeHistoryEntry.status = taskFailedPartially ? "failed" : "completed";
+      if (taskFailedPartially) activeHistoryEntry.error = `部分失败：${Number(taskResult?.counts?.failed || 0)} 项未完成`;
       activeHistoryEntry.outputs = taskResult?.outputs ?? [];
     }
     setState(
       dryRun
         ? "预览完成"
-        : taskResult?.status === "partial_failed"
-          ? "部分完成"
+        : taskFailedPartially
+          ? "部分失败"
           : taskResult?.status === "no_changes"
             ? noChangesStatusLabel(taskResult)
             : "任务完成",
@@ -1180,6 +1308,18 @@ function hydrateTaskOutput(): void {
 function hydrateTaskControls(): void {
   const task = currentTask();
   hydrateSubtitleStrategy(task);
+  const isVideoTask = ["bilibili-url", "bilibili-favorite", "local-video"].includes(task);
+  document.querySelector<HTMLElement>("#videoOutputModeField")?.classList.toggle("hidden", !isVideoTask);
+  document.querySelector<HTMLElement>("#videoProofreadTitle")?.classList.toggle("hidden", !isVideoTask);
+  document.querySelector<HTMLElement>("#videoProofreadFields")?.classList.toggle("hidden", !isVideoTask);
+  document.querySelector<HTMLElement>("#videoSummaryTitle")?.classList.toggle("hidden", !isVideoTask);
+  document.querySelector<HTMLElement>("#videoSummaryFields")?.classList.toggle("hidden", !isVideoTask);
+  const transcriptionOnly = isVideoTask && inputValue("videoOutputMode") === "transcription-only";
+  const keepSubtitles = document.querySelector<HTMLInputElement>("#keepOriginalSubtitles");
+  if (keepSubtitles) {
+    if (transcriptionOnly) keepSubtitles.checked = true;
+    keepSubtitles.disabled = transcriptionOnly;
+  }
   const favoriteLimitField = document.querySelector<HTMLElement>("#favoriteLimitField");
   if (favoriteLimitField) {
     favoriteLimitField.classList.toggle("hidden", !["bilibili-favorite", "bilibili-up-opus"].includes(task));
@@ -1303,6 +1443,15 @@ function bindSettingsPersistence(): void {
     "retryCount",
     "cooldownDelay",
     "chunkChars",
+    "videoOutputMode",
+    "proofreadChunkChars",
+    "proofreadTimeoutSeconds",
+    "proofreadRetryCount",
+    "proofreadCooldownDelay",
+    "summaryChunkChars",
+    "summaryTimeoutSeconds",
+    "summaryRetryCount",
+    "summaryCooldownDelay",
   ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", saveSettings);
   }
@@ -1311,6 +1460,10 @@ function bindSettingsPersistence(): void {
     saveSettings();
   });
   document.querySelector<HTMLSelectElement>("#webCaptureMode")?.addEventListener("change", hydrateTaskControls);
+  document.querySelector<HTMLSelectElement>("#videoOutputMode")?.addEventListener("change", () => {
+    hydrateTaskControls();
+    saveSettings();
+  });
   for (const id of [
     "extractKeyframes",
     "dialogueDetection",
@@ -1321,6 +1474,9 @@ function bindSettingsPersistence(): void {
     "stockTerms",
     "enableOcr",
     "ocrResume",
+    "proofreadEnableThinking",
+    "summaryEnableThinking",
+    "continueQueueAfterFailure",
   ]) {
     document.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("change", saveSettings);
   }
@@ -1334,15 +1490,13 @@ function bindSettingsPersistence(): void {
   });
 }
 
-function loadSettings(): SavedSettings {
+function readLegacySettings(): Record<string, unknown> {
   try {
     const raw = localStorage.getItem(settingsKey);
     const stored = raw ? JSON.parse(raw) : {};
-    const parsed = migrateRuntimePreference(stored);
-    if (raw && JSON.stringify(parsed) !== JSON.stringify(stored)) localStorage.setItem(settingsKey, JSON.stringify(parsed));
-    return { ...defaults, ...parsed };
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
   } catch {
-    return defaults;
+    return {};
   }
 }
 
@@ -1383,8 +1537,354 @@ function saveSettings(): void {
     ocrResume: checkboxChecked("ocrResume"),
     dateInFilename: checkboxChecked("dateInFilename"),
     enableThinking: checkboxChecked("enableThinking"),
+    videoOutputMode: (inputValue("videoOutputMode") || defaults.videoOutputMode) as "full" | "transcription-only",
+    proofreadChunkChars: inputValue("proofreadChunkChars") || defaults.proofreadChunkChars,
+    proofreadTimeoutSeconds: inputValue("proofreadTimeoutSeconds") || defaults.proofreadTimeoutSeconds,
+    proofreadRetryCount: inputValue("proofreadRetryCount") || defaults.proofreadRetryCount,
+    proofreadCooldownDelay: inputValue("proofreadCooldownDelay") || defaults.proofreadCooldownDelay,
+    proofreadEnableThinking: checkboxChecked("proofreadEnableThinking"),
+    summaryChunkChars: inputValue("summaryChunkChars"),
+    summaryTimeoutSeconds: inputValue("summaryTimeoutSeconds"),
+    summaryRetryCount: inputValue("summaryRetryCount"),
+    summaryCooldownDelay: inputValue("summaryCooldownDelay"),
+    summaryEnableThinking: checkboxChecked("summaryEnableThinking"),
+    continueQueueAfterFailure: checkboxChecked("continueQueueAfterFailure"),
   };
-  localStorage.setItem(settingsKey, JSON.stringify(settings));
+  savedSettings = settings;
+  currentProfile.settings = { ...settings };
+  currentProfile.updatedAt = new Date().toISOString();
+  desktopProfiles = { ...desktopProfiles, profiles: desktopProfiles.profiles.map((profile) => profile.id === currentProfile.id ? currentProfile : profile) };
+  saveCredentials(currentProfile.credentialRef, { apiKey: settings.apiKey, cookies: settings.cookies, chromeProfile: settings.chromeProfile });
+  saveDesktopProfiles(desktopProfiles);
+}
+
+function applySavedSettings(settings: SavedSettings): void {
+  const textFields: Record<string, keyof SavedSettings> = {
+    runtimeBackend: "runtimeBackend", condaEnv: "condaEnv", condaBin: "condaBin", pythonBin: "pythonBin",
+    apiBase: "apiBase", apiKey: "apiKey", model: "model", asrModel: "asrModel", cookies: "cookies",
+    chromeProfile: "chromeProfile", outputRoot: "outputRoot", favoriteLimit: "favoriteLimit",
+    videoOutputMode: "videoOutputMode", timeoutSeconds: "timeoutSeconds", retryCount: "retryCount",
+    cooldownDelay: "cooldownDelay", chunkChars: "chunkChars", proofreadChunkChars: "proofreadChunkChars",
+    proofreadTimeoutSeconds: "proofreadTimeoutSeconds", proofreadRetryCount: "proofreadRetryCount",
+    proofreadCooldownDelay: "proofreadCooldownDelay", summaryChunkChars: "summaryChunkChars",
+    summaryTimeoutSeconds: "summaryTimeoutSeconds", summaryRetryCount: "summaryRetryCount",
+    summaryCooldownDelay: "summaryCooldownDelay", browserExecutable: "browserExecutable",
+  };
+  for (const [id, key] of Object.entries(textFields)) setInputValue(id, String(settings[key] ?? ""), false);
+  const selects: Record<string, keyof SavedSettings> = {
+    subtitleStrategy: "subtitleStrategy", webCaptureMode: "webCaptureMode",
+  };
+  for (const [id, key] of Object.entries(selects)) setInputValue(id, String(settings[key] ?? ""), false);
+  const checks: Record<string, keyof SavedSettings> = {
+    extractKeyframes: "extractKeyframes", dialogueDetection: "dialogueDetection", keepOriginalSubtitles: "keepOriginalSubtitles",
+    recursiveSearch: "recursiveSearch", overwriteOutputs: "overwriteOutputs", incognitoMode: "incognitoMode",
+    stockTerms: "stockTerms", enableOcr: "enableOcr", ocrResume: "ocrResume", dateInFilename: "dateInFilename",
+    enableThinking: "enableThinking", proofreadEnableThinking: "proofreadEnableThinking",
+    summaryEnableThinking: "summaryEnableThinking", continueQueueAfterFailure: "continueQueueAfterFailure",
+  };
+  for (const [id, key] of Object.entries(checks)) {
+    const input = document.querySelector<HTMLInputElement>(`#${id}`);
+    if (input) input.checked = Boolean(settings[key]);
+  }
+  const select = document.querySelector<HTMLSelectElement>("#collectionSelect");
+  if (select) {
+    select.innerHTML = settings.collectionId
+      ? `<option value="${escapeHtml(settings.collectionId)}" data-type="${escapeHtml(settings.collectionType)}" data-mid="${escapeHtml(settings.collectionMid)}">${escapeHtml(settings.collectionId)}（重新读取列表可查看名称）</option>`
+      : '<option value="">请先读取列表</option>';
+    select.value = settings.collectionId;
+    select.dataset.type = settings.collectionType;
+    select.dataset.id = settings.collectionId;
+    select.dataset.mid = settings.collectionMid;
+  }
+  hydrateRuntimeControls();
+  hydrateTaskControls();
+  hydrateTaskOutput();
+  // Persist only after every field is hydrated, never a mixture of two profiles.
+  saveSettings();
+}
+
+function switchProfile(id: string): void {
+  if (isWorkerRunning || queueRunning) {
+    setState("任务运行期间不能切换配置档案");
+    const selector = document.querySelector<HTMLSelectElement>("#profileSelect");
+    if (selector) selector.value = currentProfile.id;
+    return;
+  }
+  saveSettings();
+  const next = desktopProfiles.profiles.find((profile) => profile.id === id);
+  if (!next) return;
+  currentProfile = next;
+  desktopProfiles = { ...desktopProfiles, activeId: id };
+  saveDesktopProfiles(desktopProfiles);
+  savedSettings = { ...defaults, ...currentProfile.settings, ...loadCredentials(currentProfile.credentialRef) } as SavedSettings;
+  applySavedSettings(savedSettings);
+  setState(`已切换配置档案：${currentProfile.name}`);
+}
+
+function renderProfileSelector(): void {
+  const selector = document.querySelector<HTMLSelectElement>("#profileSelect");
+  if (!selector) return;
+  selector.innerHTML = desktopProfiles.profiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === currentProfile.id ? "selected" : ""}>${escapeHtml(profile.name)}</option>`).join("");
+}
+
+function createProfile(copy: boolean): void {
+  if (isWorkerRunning || queueRunning) return;
+  saveSettings();
+  const name = window.prompt(copy ? "为副本命名" : "新配置档案名称", copy ? `${currentProfile.name} 副本` : "新配置");
+  if (!name?.trim()) return;
+  desktopProfiles = createDesktopProfile(desktopProfiles, name, copy ? currentProfile : undefined);
+  currentProfile = desktopProfiles.profiles.find((profile) => profile.id === desktopProfiles.activeId)!;
+  savedSettings = { ...defaults, ...currentProfile.settings, ...loadCredentials(currentProfile.credentialRef) } as SavedSettings;
+  renderProfileSelector();
+  applySavedSettings(savedSettings);
+  setState(`已${copy ? "复制" : "创建"}配置档案：${currentProfile.name}`);
+}
+
+function renameProfile(): void {
+  const name = window.prompt("配置档案新名称", currentProfile.name);
+  if (!name?.trim()) return;
+  desktopProfiles = renameDesktopProfile(desktopProfiles, currentProfile.id, name);
+  currentProfile = desktopProfiles.profiles.find((profile) => profile.id === currentProfile.id)!;
+  renderProfileSelector();
+}
+
+function deleteProfile(): void {
+  if (isWorkerRunning || queueRunning) return;
+  const referenced = queueEntries.some((entry) => entry.profileId === currentProfile.id && ["waiting", "interrupted", "failed"].includes(entry.status));
+  if (referenced) {
+    setState("该档案仍被待运行/失败队列项引用；先移除或重试这些队列项");
+    return;
+  }
+  if (!window.confirm(`删除配置档案“${currentProfile.name}”？历史记录会保留，但之后将无法使用它的凭据引用。`)) return;
+  try {
+    const credentialRef = currentProfile.credentialRef;
+    desktopProfiles = deleteDesktopProfile(desktopProfiles, currentProfile.id);
+    deleteCredentials(credentialRef);
+    currentProfile = desktopProfiles.profiles.find((profile) => profile.id === desktopProfiles.activeId)!;
+    savedSettings = { ...defaults, ...currentProfile.settings, ...loadCredentials(currentProfile.credentialRef) } as SavedSettings;
+    renderProfileSelector();
+    applySavedSettings(savedSettings);
+    setState("配置档案已删除");
+  } catch (error) { setState(errorMessage(error)); }
+}
+
+function exportProfile(): void {
+  const blob = new Blob([exportDesktopProfile(currentProfile)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${currentProfile.name.replace(/[^\p{L}\p{N}_-]+/gu, "_") || "profile"}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  setState("配置档案已导出（不含凭据）");
+}
+
+async function importProfile(input: HTMLInputElement): Promise<void> {
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    const imported = importedDesktopProfile(await file.text());
+    const name = window.prompt("导入档案名称", imported.name) || imported.name;
+    if (!name.trim()) return;
+    desktopProfiles = createDesktopProfile(desktopProfiles, name);
+    currentProfile = desktopProfiles.profiles.find((profile) => profile.id === desktopProfiles.activeId)!;
+    currentProfile.settings = imported.settings;
+    desktopProfiles.profiles = desktopProfiles.profiles.map((profile) => profile.id === currentProfile.id ? currentProfile : profile);
+    saveDesktopProfiles(desktopProfiles);
+    savedSettings = { ...defaults, ...currentProfile.settings, ...loadCredentials(currentProfile.credentialRef) } as SavedSettings;
+    renderProfileSelector();
+    applySavedSettings(savedSettings);
+    setState("配置档案已导入；请在本机补齐凭据");
+  } catch (error) { setState(`导入失败：${errorMessage(error)}`); }
+  finally { input.value = ""; }
+}
+
+function enqueueCurrentTask(): void {
+  if (isWorkerRunning || queueRunning) {
+    setState("当前 Worker 正在运行；完成后可继续入队");
+    return;
+  }
+  saveSettings();
+  const request = payload(false) as Record<string, unknown>;
+  const task = String(request.task || "");
+  if (!String(request.output_dir || "").trim()) {
+    setState("缺少输出目录，无法入队");
+    return;
+  }
+  if (!String(request.source || "").trim() && task !== "bilibili-favorite") {
+    setState("缺少输入源，无法入队");
+    return;
+  }
+  if (task === "bilibili-favorite" && !String(request.collection_id || "")) {
+    setState("未选择收藏夹/系列，无法入队");
+    return;
+  }
+  const safeRequest = { ...request };
+  delete safeRequest.api_key;
+  delete safeRequest.cookies;
+  delete safeRequest.browser_profile;
+  safeRequest.dry_run = false;
+  if (queueDuplicate(queueEntries, safeRequest)) {
+    setState("该来源与输出目录已在队列中");
+    return;
+  }
+  const entry: QueueEntry = {
+    id: `queue-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    request: safeRequest,
+    profileId: currentProfile.id,
+    status: "waiting",
+    addedAt: new Date().toISOString(),
+  };
+  queueEntries = [...queueEntries, entry];
+  saveQueue(queueEntries);
+  renderQueue();
+  setState(`已加入串行队列（${queueEntries.filter((item) => item.status === "waiting").length} 项等待）`);
+}
+
+function renderQueue(): void {
+  const target = document.querySelector<HTMLElement>("#queueList");
+  if (!target) return;
+  target.innerHTML = queueEntries.length ? queueEntries.map((entry, index) => {
+    const request = entry.request;
+    const source = String(request.source || request.collection_id || "");
+    const profile = desktopProfiles.profiles.find((item) => item.id === entry.profileId);
+    const task = String(request.task || "unknown");
+    const waitingIndexes = queueEntries.flatMap((item, position) => item.status === "waiting" ? [position] : []);
+    const waitingSlot = waitingIndexes.indexOf(index);
+    const movable = entry.status === "waiting" && !queueRunning;
+    return `<article class="history-item">
+      <div><span class="status ${entry.status}">${queueStatusLabels[entry.status]}</span><strong>${escapeHtml(taskLabels[task as TaskType] || task)}</strong><small>${escapeHtml(profile?.name || "配置档案缺失")} · ${escapeHtml(source)} · ${escapeHtml(String(request.output_dir || ""))}</small>${entry.error ? `<small class="error-text">${escapeHtml(entry.error)}</small>` : ""}</div>
+      <div class="row-actions">
+        ${movable ? `<button type="button" class="secondary" data-queue-action="up" data-id="${entry.id}" ${waitingSlot <= 0 ? "disabled" : ""}>上移</button><button type="button" class="secondary" data-queue-action="down" data-id="${entry.id}" ${waitingSlot === waitingIndexes.length - 1 ? "disabled" : ""}>下移</button>` : ""}
+        ${entry.status === "failed" || entry.status === "interrupted" ? `<button type="button" class="secondary" data-queue-action="retry" data-id="${entry.id}">重试</button>` : ""}
+        ${entry.status !== "running" ? `<button type="button" class="secondary danger-outline" data-queue-action="remove" data-id="${entry.id}">移除</button>` : ""}
+      </div>
+    </article>`;
+  }).join("") : '<p class="empty-state">队列为空。先填写任务，再点击“当前任务入队”。</p>';
+  target.querySelectorAll<HTMLButtonElement>("button[data-queue-action]").forEach((button) => button.addEventListener("click", () => {
+    const id = button.dataset.id || "";
+    const action = button.dataset.queueAction;
+    if (action === "up" || action === "down") queueEntries = moveQueueEntry(queueEntries, id, action === "up" ? -1 : 1);
+    else if (action === "retry") queueEntries = queueEntries.map((entry) => entry.id === id && ["failed", "interrupted", "cancelled"].includes(entry.status) ? { ...entry, status: "waiting", error: undefined, endedAt: undefined } : entry);
+    else if (action === "remove") queueEntries = queueEntries.filter((entry) => entry.id !== id || entry.status === "running");
+    saveQueue(queueEntries);
+    renderQueue();
+  }));
+}
+
+function pauseQueue(): void {
+  queuePaused = true;
+  const notice = document.querySelector<HTMLElement>("#queueNotice");
+  if (notice) notice.textContent = queueRunning ? "已请求暂停：当前任务结束后将停止启动下一项。" : "调度已暂停；点击“开始/继续”启动等待项。";
+  if (!queueRunning) setState("队列调度已暂停");
+}
+
+async function startQueue(): Promise<void> {
+  if (queueRunning || isWorkerRunning) {
+    setState("已有 Worker 或队列正在运行");
+    return;
+  }
+  const interrupted = queueEntries.filter((entry) => entry.status === "interrupted");
+  if (interrupted.length) {
+    const resume = window.confirm(`发现 ${interrupted.length} 个上次关闭时中断的队列项。\n\n确认后将这些项改为等待并从头重新执行；不会把它们当作已完成。`);
+    if (!resume) return;
+    queueEntries = queueEntries.map((entry) => entry.status === "interrupted" ? { ...entry, status: "waiting", error: undefined } : entry);
+    saveQueue(queueEntries);
+  }
+  if (!queueEntries.some((entry) => entry.status === "waiting")) {
+    setState("队列中没有等待项");
+    return;
+  }
+  queuePaused = false;
+  queueRunning = true;
+  const continueOnFailure = checkboxChecked("continueQueueAfterFailure");
+  const notice = document.querySelector<HTMLElement>("#queueNotice");
+  if (notice) notice.textContent = continueOnFailure ? "串行运行中；单项失败后继续后续项。" : "串行运行中；单项失败后暂停后续项。";
+  renderQueue();
+  try {
+    while (!queuePaused) {
+      const entry = queueEntries.find((item) => item.status === "waiting");
+      if (!entry) break;
+      const profile = desktopProfiles.profiles.find((item) => item.id === entry.profileId);
+      if (!profile || !hasCredentialReference(profile.credentialRef)) {
+        updateQueueEntry(entry.id, { status: "failed", error: "配置档案或凭据引用已失效；请修复档案后重试或移除此项。", endedAt: new Date().toISOString() });
+        if (!continueOnFailure) break;
+        continue;
+      }
+      const credentials = loadCredentials(profile.credentialRef);
+      const request: Record<string, unknown> = {
+        ...entry.request,
+        desktop_profile_id: profile.id,
+        api_key: credentials.apiKey || "",
+        cookies: credentials.cookies || "",
+        browser_profile: credentials.chromeProfile || "",
+        dry_run: false,
+      };
+      updateQueueEntry(entry.id, { status: "running", startedAt: new Date().toISOString(), endedAt: undefined, error: undefined });
+      const history = createHistoryEntry(String(request.task || "unknown"), request);
+      entry.historyId = history.id;
+      taskHistory = upsertHistoryEntry(taskHistory, history);
+      saveTaskHistory(taskHistory);
+      saveQueue(queueEntries);
+      activeHistoryEntry = history;
+      setWorkerRunning(true);
+      setState(`队列运行中：${taskLabels[String(request.task || "") as TaskType] || String(request.task || "")}`);
+      setOutput("");
+      appendOutput("队列任务已启动，日志会实时追加到这里。\n");
+      let failed = false;
+      let cancelled = false;
+      try {
+        const output = await invokeWorker(request);
+        if (!currentOutput().trim()) setOutput(output || "(worker 没有返回输出)");
+        updateBatchResult(output || currentOutput());
+        const result = taskResultFromLog(output || currentOutput());
+        if (result) renderOutputs(result.outputs);
+        failed = result?.status === "partial_failed" || Number(result?.counts?.failed || 0) > 0 || result?.status === "failed";
+        history.status = failed ? "failed" : "completed";
+        history.outputs = result?.outputs || [];
+        if (failed) history.error = `部分失败：${Number(result?.counts?.failed || 0)} 项未完成`;
+        setState(failed ? "队列任务部分失败" : result?.status === "no_changes" ? noChangesStatusLabel(result) : "队列任务完成");
+      } catch (error) {
+        const message = errorMessage(error);
+        cancelled = message.startsWith("Task cancelled.");
+        failed = true;
+        history.status = cancelled ? "cancelled" : "failed";
+        history.error = message;
+        if (currentOutput().trim()) appendOutput(`\n队列任务失败：${message}\n`);
+        else setOutput(message);
+        setState(cancelled ? "队列任务已取消" : "队列任务失败");
+      } finally {
+        history.log = currentOutput();
+        history.endedAt = new Date().toISOString();
+        taskHistory = upsertHistoryEntry(taskHistory, history);
+        saveTaskHistory(taskHistory);
+        activeHistoryEntry = null;
+        updateQueueEntry(entry.id, { status: history.status === "completed" ? "completed" : history.status === "cancelled" ? "cancelled" : "failed", error: history.error, historyId: history.id, endedAt: new Date().toISOString() });
+        setWorkerRunning(false);
+        renderHistory();
+      }
+      if (cancelled) {
+        queuePaused = true;
+        break;
+      }
+      if (failed && !continueOnFailure) {
+        queuePaused = true;
+        break;
+      }
+    }
+  } finally {
+    queueRunning = false;
+    if (isWorkerRunning) setWorkerRunning(false);
+    saveQueue(queueEntries);
+    renderQueue();
+    if (notice) notice.textContent = queuePaused ? "调度已暂停；等待项会保留。" : "队列运行结束。已完成项不会在重启后重复执行。";
+  }
+}
+
+function updateQueueEntry(id: string, patch: Partial<QueueEntry>): void {
+  queueEntries = queueEntries.map((entry) => entry.id === id ? { ...entry, ...patch } : entry);
+  saveQueue(queueEntries);
+  renderQueue();
 }
 
 function setOutput(text: string): void {
@@ -1795,6 +2295,10 @@ const historyStatusLabels: Record<TaskHistoryStatus, string> = {
   interrupted: "已中断",
 };
 
+const queueStatusLabels: Record<QueueStatus, string> = {
+  waiting: "等待中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
+};
+
 function renderHistory(): void {
   const target = document.querySelector<HTMLElement>("#historyList");
   if (!target) return;
@@ -1810,7 +2314,8 @@ function renderHistory(): void {
             <div class="row-actions">
               <button type="button" class="secondary" data-history-action="log" data-id="${entry.id}">查看日志</button>
               ${entry.outputs.length ? `<button type="button" class="secondary" data-history-action="outputs" data-id="${entry.id}">查看 ${entry.outputs.length} 个输出</button>` : ""}
-              <button type="button" class="secondary" data-history-action="rerun" data-id="${entry.id}">${entry.status === "failed" ? "重试" : "重新运行"}</button>
+              <button type="button" class="secondary" data-history-action="rerun-current" data-id="${entry.id}">用当前配置重跑</button>
+              <button type="button" class="secondary" data-history-action="rerun-snapshot" data-id="${entry.id}">按历史参数重跑</button>
               <button type="button" class="secondary danger-outline" data-history-action="delete" data-id="${entry.id}">删除记录</button>
             </div>
           </article>`;
@@ -1829,9 +2334,18 @@ function renderHistory(): void {
         setState(`已显示历史输出（${entry.outputs.length} 个文件）`);
       } else if (button.dataset.historyAction === "delete") {
         deleteHistoryEntry(entry);
+      } else if (button.dataset.historyAction === "rerun-current") {
+        const replay = historyReplayRequest(entry.request);
+        applyHistoryRequest(replay);
+        void runTask(false, entry.status === "failed" || Boolean(entry.request.retry_failed), entry.id, replay);
       } else {
-        applyHistoryRequest(entry.request);
-        void runTask(false, entry.status === "failed" || Boolean(entry.request.retry_failed), entry.id);
+        const profileId = String(entry.request.desktop_profile_id || "");
+        const historicalProfile = desktopProfiles.profiles.find((profile) => profile.id === profileId);
+        if (!historicalProfile || !hasCredentialReference(historicalProfile.credentialRef)) {
+          setState("历史配置或凭据引用已失效；请先修复档案，或使用当前配置重跑");
+          return;
+        }
+        void runTask(false, entry.status === "failed" || Boolean(entry.request.retry_failed), entry.id, entry.request);
       }
     });
   });
@@ -1863,6 +2377,15 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
     retry_count: "retryCount",
     cooldown_delay: "cooldownDelay",
     chunk_chars: "chunkChars",
+    video_output_mode: "videoOutputMode",
+    proofread_chunk_chars: "proofreadChunkChars",
+    proofread_timeout_seconds: "proofreadTimeoutSeconds",
+    proofread_retry_count: "proofreadRetryCount",
+    proofread_cooldown_delay: "proofreadCooldownDelay",
+    summary_chunk_chars: "summaryChunkChars",
+    summary_timeout_seconds: "summaryTimeoutSeconds",
+    summary_retry_count: "summaryRetryCount",
+    summary_cooldown_delay: "summaryCooldownDelay",
   };
   for (const [key, id] of Object.entries(mappings)) {
     if (replayRequest[key] !== undefined) setInputValue(id, String(replayRequest[key]));
@@ -1879,6 +2402,8 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
     ocr_resume: "ocrResume",
     date_in_filename: "dateInFilename",
     enable_thinking: "enableThinking",
+    proofread_enable_thinking: "proofreadEnableThinking",
+    summary_enable_thinking: "summaryEnableThinking",
   };
   for (const [key, id] of Object.entries(booleans)) {
     const input = document.querySelector<HTMLInputElement>(`#${id}`);

@@ -341,6 +341,8 @@ run_asr_transcribe() {
     local audio_file="$1"
     local output_file="$2"
     local engine="${ASR_ENGINE:-qwen3}"
+    TRANSCRIPT_TIMING_FILE="${output_file}.segments.json"
+    rm -f "$TRANSCRIPT_TIMING_FILE"
     audio_file=$(normalize_existing_path "$audio_file")
 
     export HF_HOME="$MODEL_CACHE_DIR"
@@ -387,11 +389,11 @@ run_asr_transcribe() {
 
         if [ "$transcribe_py" = "conda" ]; then
             conda run --no-capture-output -n "$CONDA_ENV" python3 -u "$wh_script" \
-                --audio "$audio_file" --output-file "$output_file" \
+                --audio "$audio_file" --output-file "$output_file" --segments-output "$TRANSCRIPT_TIMING_FILE" \
                 --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}" "${progress_arg[@]}"
         else
             "$transcribe_py" "$wh_script" \
-                --audio "$audio_file" --output-file "$output_file" \
+                --audio "$audio_file" --output-file "$output_file" --segments-output "$TRANSCRIPT_TIMING_FILE" \
                 --model-path "$model_path" "${lang_arg[@]}" "${prompt_arg[@]}" "${progress_arg[@]}"
         fi
 
@@ -491,6 +493,25 @@ transcribe_bilibili_url() {
     echo "📅 发布: $UPLOAD_DATE_FORMATTED"
     echo "⏱️  时长: $DURATION"
 
+    local final_outdir="${OUTPUT_DIR}"
+    local SAFE_TITLE;  SAFE_TITLE=$(echo "$TITLE" | to_safe_name)
+    local AUTHOR_SAFE; AUTHOR_SAFE=$(echo "$AUTHOR" | to_safe_name)
+    local OUTPUT_FILE
+    if [ -n "${OUTPUT_FILENAME:-}" ]; then
+        OUTPUT_FILE=$(custom_markdown_path "$final_outdir") || return 1
+    else
+        OUTPUT_FILE="${final_outdir}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.md"
+    fi
+
+    local EXISTING_FILE="${VIDEO_TRANSACTION_FINAL_DIR:-$final_outdir}/$(basename "$OUTPUT_FILE")"
+    if [ -f "$EXISTING_FILE" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
+        echo "⏭️  已存在同名笔记，跳过转录: $OUTPUT_FILE"
+        echo "   如需重写，请勾选“覆盖同名文件”或传入 --overwrite。"
+        echo "SKIPPED_EXISTING_MARKDOWN_PATH:$EXISTING_FILE"
+        return 0
+    fi
+
+    TRANSCRIPT_TIMING_FILE=""
     local VIDEO_SAFE_ID; VIDEO_SAFE_ID=$(printf "%s" "${VIDEO_ID:-bilibili}" | to_safe_name)
     local task_cache_dir="${CACHE_DIR}/bilibili_work_${VIDEO_SAFE_ID}_${$}_${RANDOM}"
     mkdir -p "$task_cache_dir"
@@ -569,6 +590,7 @@ transcribe_bilibili_url() {
         if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
             echo "✅ CC字幕下载成功"
             TRANSCRIPT_SOURCE="B站CC字幕"
+            TRANSCRIPT_TIMING_FILE="$sub_file"
             TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
         else
             echo "⚠️  CC字幕下载失败..."
@@ -588,6 +610,7 @@ transcribe_bilibili_url() {
         if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
             echo "✅ AI字幕下载成功"
             TRANSCRIPT_SOURCE="B站AI字幕 ($AI_LANG)"
+            TRANSCRIPT_TIMING_FILE="$sub_file"
             TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
         else
             echo "⚠️  AI字幕下载失败..."
@@ -606,7 +629,8 @@ transcribe_bilibili_url() {
             if [ -n "$sub_file" ] && [ -s "$sub_file" ]; then
                 echo "✅ 兜底成功！AI字幕已下载（$try_lang）"
                 TRANSCRIPT_SOURCE="B站AI字幕 ($try_lang)"
-                TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
+                TRANSCRIPT_TIMING_FILE="$sub_file"
+            TRANSCRIPT_TEXT=$(sed '/^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/d' "$sub_file" | sed '/^[0-9]*$/d' | sed '/^$/d')
                 break
             fi
         done
@@ -666,22 +690,6 @@ transcribe_bilibili_url() {
     local final_outdir="${OUTPUT_DIR}"
     mkdir -p "$final_outdir"
 
-    local SAFE_TITLE;  SAFE_TITLE=$(echo "$TITLE" | to_safe_name)
-    local AUTHOR_SAFE; AUTHOR_SAFE=$(echo "$AUTHOR" | to_safe_name)
-    local OUTPUT_FILE
-    if [ -n "${OUTPUT_FILENAME:-}" ]; then
-        OUTPUT_FILE=$(custom_markdown_path "$final_outdir") || return 1
-    else
-        OUTPUT_FILE="${final_outdir}/${SAFE_TITLE}_${AUTHOR_SAFE}_${UPLOAD_DATE_FORMATTED}_${VIDEO_ID}.md"
-    fi
-
-    if [ -f "$OUTPUT_FILE" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
-        echo "⏭️  已存在同名笔记，跳过转录: $OUTPUT_FILE"
-        echo "   如需重写，请勾选“覆盖同名文件”或传入 --overwrite。"
-        echo "SKIPPED_EXISTING_MARKDOWN_PATH:$OUTPUT_FILE"
-        return 0
-    fi
-
     write_output_file "$OUTPUT_FILE" "$TITLE" "$url" "$AUTHOR" "$UPLOAD_DATE_FORMATTED" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT_SIMPLIFIED"
 
     echo ""
@@ -696,6 +704,7 @@ transcribe_local_file() {
     local file_index="${2:-}"
     local file_total="${3:-}"
     LOCAL_ITEM_STATUS="processing"
+    TRANSCRIPT_TIMING_FILE=""
 
     cleanup_temp
 
@@ -737,13 +746,14 @@ transcribe_local_file() {
 
     # 去重：已有 Markdown 时直接返回，避免重复执行 Whisper/ASR。
     local EXISTING
+    local EXISTING_DIR="${VIDEO_TRANSACTION_FINAL_DIR:-$LOCAL_OUT}"
     if [ -n "$CUSTOM_OUTPUT" ]; then
-        EXISTING="$CUSTOM_OUTPUT"
+        EXISTING="${EXISTING_DIR}/$(basename "$CUSTOM_OUTPUT")"
         if [ ! -f "$EXISTING" ]; then
             EXISTING=""
         fi
     else
-        EXISTING=$(find "$LOCAL_OUT" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
+        EXISTING=$(find "$EXISTING_DIR" -maxdepth 1 -name "${SAFE_NAME}_*.md" -type f 2>/dev/null | head -1)
     fi
     if [ -n "$EXISTING" ] && [ "$OVERWRITE_OUTPUT" != "true" ]; then
         LOCAL_ITEM_STATUS="skipped"
@@ -764,6 +774,7 @@ transcribe_local_file() {
         if [ -n "$subtitle_text" ]; then
             local subtitle_output="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
             echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
+            TRANSCRIPT_TIMING_FILE="$subtitle_file"
             write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "本地SRT字幕" "$subtitle_text"
             LOCAL_ITEM_STATUS="created"
             echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
@@ -946,6 +957,13 @@ $text
 </details>
 EOF
     fi
+    if [ -n "${TRANSCRIPT_TIMING_FILE:-}" ] && [ -s "$TRANSCRIPT_TIMING_FILE" ]; then
+        run_python "$SCRIPT_DIR/../transcript_timing.py" --note "$out" --source "$TRANSCRIPT_TIMING_FILE"
+        case "$TRANSCRIPT_TIMING_FILE" in
+            *.segments.json) rm -f "$TRANSCRIPT_TIMING_FILE" ;;
+        esac
+    fi
+
 }
 
 # ===== 主入口 =====

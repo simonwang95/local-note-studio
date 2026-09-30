@@ -75,9 +75,12 @@ def base_request(profile: AutomationProfile, caller: str) -> dict[str, Any]:
         "extract_keyframes": profile.extract_keyframes,
         "dialogue_detection": profile.dialogue_detection,
         "keep_original_subtitles": profile.keep_original_subtitles,
-        "timeout_seconds": profile.timeout_seconds,
+        # Zero in older Agent Profiles means inherit the Worker default. The
+        # current Worker request contract reserves explicit zero for invalid
+        # timeout/chunk values and represents an inherited value as blank.
+        "timeout_seconds": profile.timeout_seconds if profile.timeout_seconds > 0 else "",
         "retry_count": profile.retry_count,
-        "chunk_chars": profile.chunk_chars,
+        "chunk_chars": profile.chunk_chars if profile.chunk_chars > 0 else "",
         "opus_image_analysis": profile.opus_image_analysis,
         "lock_timeout_seconds": profile.lock_timeout_seconds,
         "execution_timeout_seconds": profile.execution_timeout_seconds,

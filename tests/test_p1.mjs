@@ -139,4 +139,134 @@ assert.deepEqual(manifestViews.get("/tmp/source-manifest.json"), { open: true, f
 manifestViews.keepOpen("/tmp/source-manifest.json", "attention");
 assert.deepEqual(manifestViews.get("/tmp/source-manifest.json"), { open: true, filter: "attention" });
 
+const profiles = history.loadDesktopProfiles({
+  runtimePreferenceConfirmed: true,
+  apiKey: "do-not-export-api-key",
+  cookies: "/private/cookies.txt",
+  chromeProfile: "/private/chrome/Profile 1",
+  model: "local-model",
+  outputRoot: "/notes/main",
+});
+const defaultProfile = profiles.profiles[0];
+assert.equal(defaultProfile.name, "默认");
+assert.equal(defaultProfile.settings.apiKey, undefined);
+assert.equal(defaultProfile.settings.cookies, undefined);
+assert.deepEqual(history.loadCredentials(defaultProfile.credentialRef), {
+  apiKey: "do-not-export-api-key",
+  cookies: "/private/cookies.txt",
+  chromeProfile: "/private/chrome/Profile 1",
+});
+assert.equal(history.hasCredentialReference(defaultProfile.credentialRef), true);
+const exportedProfile = history.exportDesktopProfile(defaultProfile);
+assert.equal(exportedProfile.includes("do-not-export-api-key"), false);
+assert.equal(exportedProfile.includes("/private/cookies.txt"), false);
+assert.equal(exportedProfile.includes("/private/chrome"), false);
+assert.equal(history.importedDesktopProfile(exportedProfile).settings.outputRoot, "/notes/main");
+let profileState = history.createDesktopProfile(profiles, "第二套", defaultProfile);
+const copiedProfile = profileState.profiles.find((item) => item.id === profileState.activeId);
+assert.equal(history.loadCredentials(copiedProfile.credentialRef).apiKey, "do-not-export-api-key");
+profileState = history.renameDesktopProfile(profileState, copiedProfile.id, "重命名档案");
+assert.equal(profileState.profiles.find((item) => item.id === copiedProfile.id).name, "重命名档案");
+
+const queued = {
+  id: "queue-running",
+  profileId: defaultProfile.id,
+  status: "running",
+  addedAt: "2026-09-29T00:00:00Z",
+  request: { task: "local-video", source: "/media/a.mp4", output_dir: "/notes/video", api_key: "private", cookies: "/private/cookies.txt" },
+};
+history.saveQueue([queued, {
+  ...queued,
+  id: "queue-waiting",
+  status: "waiting",
+  request: { ...queued.request, source: "/media/b.mp4" },
+}, {
+  ...queued,
+  id: "queue-waiting-2",
+  status: "waiting",
+  request: { ...queued.request, source: "/media/c.mp4" },
+}]);
+const restoredQueue = history.loadQueue();
+assert.equal(restoredQueue[0].status, "interrupted");
+assert.equal(restoredQueue[0].request.api_key, undefined);
+assert.equal(restoredQueue[0].request.cookies, undefined);
+assert.equal(restoredQueue[1].status, "waiting");
+assert.equal(history.queueDuplicate(restoredQueue, { source: "/media/a.mp4", output_dir: "/notes/video" }).id, "queue-running");
+assert.equal(history.queueDuplicate(restoredQueue, { source: "/media/d.mp4", output_dir: "/notes/video", output_filename: "same.md" }), undefined);
+const namedConflict = history.loadQueue();
+namedConflict.push({ ...restoredQueue[1], id: "same-name", request: { ...restoredQueue[1].request, source: "/media/c.mp4", output_filename: "same.md" } });
+assert.equal(history.queueDuplicate(namedConflict, { source: "/media/d.mp4", output_dir: "/notes/video", output_filename: "SAME.md" }).id, "same-name");
+assert.deepEqual(history.moveQueueEntry(restoredQueue, "queue-waiting-2", -1).map((item) => item.id), ["queue-running", "queue-waiting-2", "queue-waiting"]);
+assert.equal(history.historyReplayRequest({ task: "local-video", desktop_profile_id: defaultProfile.id }).desktop_profile_id, undefined);
+
 console.log(`frontend history compatibility: ok (${pathToFileURL(sourceUrl.pathname).pathname})`);
+
+// Execute the actual form hydration/switch handlers with synchronous input autosave.
+// This catches persisted mixtures of two profiles, beyond storage-helper coverage.
+const { default: vm } = await import("node:vm");
+const mainSource = fs.readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const mainAst = ts.createSourceFile("main.ts", mainSource, ts.ScriptTarget.Latest, true);
+const handlerNames = new Set(["inputValue", "checkboxChecked", "setInputValue", "escapeHtml", "saveSettings", "applySavedSettings", "switchProfile"]);
+const handlers = mainAst.statements.filter((statement) => ts.isFunctionDeclaration(statement) && handlerNames.has(statement.name?.text));
+assert.equal(handlers.length, handlerNames.size);
+const defaultsDeclaration = mainAst.statements.filter(ts.isVariableStatement)
+  .flatMap((statement) => [...statement.declarationList.declarations])
+  .find((declaration) => declaration.name.getText(mainAst) === "defaults");
+assert.ok(defaultsDeclaration?.initializer);
+const fields = new Map();
+let profileContext;
+let profileWrites = 0;
+const fakeDocument = {
+  querySelector(selector) {
+    if (!fields.has(selector)) fields.set(selector, {
+      value: "", checked: false, dataset: {}, selectedOptions: [],
+      dispatchEvent() { profileContext.saveSettings(); },
+      set innerHTML(html) {
+        // Model replacement of the selected collection option, including its owner.
+        const mid = /data-mid="([^"]*)"/.exec(html)?.[1] || "";
+        this.selectedOptions = [{ dataset: { mid } }];
+      },
+    });
+    return fields.get(selector);
+  },
+};
+profileContext = vm.createContext({
+  document: fakeDocument, Event: class Event {},
+  hydrateRuntimeControls() {}, hydrateTaskControls() {}, hydrateTaskOutput() {}, setState() {},
+  saveCredentials: history.saveCredentials, loadCredentials: history.loadCredentials,
+  saveDesktopProfiles(state) { profileWrites += 1; history.saveDesktopProfiles(state); },
+});
+vm.runInContext(ts.transpileModule(`
+  const defaults = ${defaultsDeclaration.initializer.getText(mainAst)};
+  const first = {id:'first',name:'First',credentialRef:'first-cred',settings:{...defaults,overwriteOutputs:true,enableThinking:true,stockTerms:true,collectionType:'favorite',collectionId:'A',collectionMid:'10',proofreadCooldownDelay:'7'}};
+  const second = {id:'second',name:'Second',credentialRef:'second-cred',settings:{...defaults,overwriteOutputs:false,enableThinking:false,stockTerms:false,collectionType:'series',collectionId:'B',collectionMid:'20',proofreadCooldownDelay:'0'}};
+  let desktopProfiles = {schemaVersion:1,activeId:'first',profiles:[first,second]};
+  let currentProfile = first;
+  let savedSettings = first.settings;
+  let isWorkerRunning = false;
+  let queueRunning = false;
+  ${handlers.map((handler) => handler.getText(mainAst)).join("\n")}
+  function profileSnapshot() { return JSON.parse(JSON.stringify(desktopProfiles)); }
+  function initializeForm() { applySavedSettings(savedSettings); }
+`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, profileContext);
+history.saveCredentials("second-cred", { apiKey: "second-secret", cookies: "/second/cookies.txt", chromeProfile: "" });
+profileContext.initializeForm();
+assert.equal(profileWrites, 1, "hydration must autosave only after every field is restored");
+profileContext.switchProfile("second");
+const switched = profileContext.profileSnapshot();
+const restoredSecond = history.loadDesktopProfiles({}).profiles.find((profile) => profile.id === "second");
+assert.equal(switched.activeId, "second");
+for (const key of ["overwriteOutputs", "enableThinking", "stockTerms"]) {
+  assert.equal(fakeDocument.querySelector(`#${key}`).checked, false);
+  assert.equal(restoredSecond.settings[key], false, `${key} must survive reload`);
+}
+assert.equal(restoredSecond.settings.collectionId, "B");
+assert.equal(restoredSecond.settings.collectionType, "series");
+assert.equal(restoredSecond.settings.collectionMid, "20");
+assert.equal(restoredSecond.settings.proofreadCooldownDelay, "0");
+assert.equal(history.loadCredentials(restoredSecond.credentialRef).apiKey, "second-secret");
+profileContext.switchProfile("first");
+assert.equal(fakeDocument.querySelector("#overwriteOutputs").checked, true);
+assert.equal(fakeDocument.querySelector("#collectionSelect").value, "A");
+assert.equal(fakeDocument.querySelector("#proofreadCooldownDelay").value, "7");
+console.log("desktop profile switching and atomic hydration: ok");

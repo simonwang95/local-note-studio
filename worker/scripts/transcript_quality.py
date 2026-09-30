@@ -83,3 +83,18 @@ def save_transcript_diagnostic(kind: str, identity: str, payload: dict) -> str:
         if os.path.exists(temporary):
             os.unlink(temporary)
     return str(path)
+
+
+def load_transcript_diagnostic(kind: str, identity: str) -> dict | None:
+    """Read a previously saved private diagnostic/checkpoint, unless incognito."""
+    if os.environ.get("LOCAL_NOTE_STUDIO_INCOGNITO", "").lower() == "true":
+        return None
+    state = Path(os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR") or
+                 Path.home() / "Library/Application Support/Local Note Studio/state")
+    root = Path(os.environ.get("TRANSCRIPT_CACHE_DIR") or state / "transcripts") / kind
+    path = root / f"{hashlib.sha256(identity.encode('utf-8')).hexdigest()}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None

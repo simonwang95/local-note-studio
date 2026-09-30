@@ -402,6 +402,44 @@ button.danger:disabled {
   margin-top: 14px;
 }
 
+.profile-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 16px 0 8px;
+}
+
+.profile-toolbar > label {
+  flex: 1;
+  max-width: 320px;
+}
+
+.profile-actions {
+  justify-content: flex-end;
+}
+
+.advanced-options h3 {
+  margin: 18px 0 2px;
+  font-size: 14px;
+}
+
+.queue-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #eadfd2;
+}
+
+.queue-panel .panel-header {
+  margin: 0;
+}
+
+.queue-panel h3 {
+  margin: 0;
+}
+
 .compact-header {
   margin-bottom: 10px;
 }
@@ -589,6 +627,16 @@ progress {
 .status.running {
   background: #dfeaf7;
   color: #315f8c;
+}
+
+.status.waiting {
+  background: #ece7df;
+  color: #665a4d;
+}
+
+.status.cancelled {
+  background: #e5e3df;
+  color: #625d56;
 }
 
 .manifest-card {
@@ -814,9 +862,19 @@ pre {
   }
 
   .panel-header,
-  .log-header {
+  .log-header,
+  .profile-toolbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .profile-toolbar > label {
+    width: 100%;
+    max-width: none;
+  }
+
+  .profile-actions {
+    justify-content: flex-start;
   }
 
   .input-row {
