@@ -1,5 +1,7 @@
 # macOS Release Checklist
 
+Current internal release: 0.1.29 (2026-10-04), containing the P0/P1 workflow fixes and P2 T-118 cache maintenance and task diagnostics. The Apple Silicon app/DMG passed release checks, read-only mounting, packaged Worker acceptance and an isolated native desktop smoke test. Normal upgrades preserve evidence and retention settings; automatic cleanup remains off unless explicitly configured. Developer ID signing, notarization and independent clean-Mac acceptance remain open public-release gates.
+
 The release build produces both `Local Note Studio.app` and a DMG. The app bundle contains the worker source but no mutable Python environment or model weights.
 
 ## Internal tester handoff
@@ -31,6 +33,17 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
 For the verified APFS packaging path, build the signed app with `npm run tauri:build -- --bundles app`, then run `npm run release:dmg` after ejecting any mounted image with the same output path. When only repackaging an existing signed app of the current version, the first command can be skipped. The packaging script stages both the app and an `Applications -> /Applications` symlink, creates an APFS image, verifies its checksum, mounts it read-only, verifies the drop target, strict app signature and all app file hashes, then replaces the artifact only after those checks pass. Do not create a release DMG from the app folder alone: that omits the drag-to-install destination.
+
+## 0.1.29 workflow, cache maintenance and diagnostics (2026-10-04)
+
+- Changes: completion contracts and transactional video publication, resumable proofreading and bounded quality subdivision, effective stage parameters, content review/timing, desktop profiles and serial queues, plus T-118 inventory, reference-protected cleanup previews, retention and redacted diagnostic exports. Automatic cleanup is disabled by default; viable recovery, referenced materials and unknown legacy provenance are protected. Diagnostic audit events are counted separately and retained.
+- Validation: `npm run release:check` passes the production frontend, both frontend regressions, 281 Python tests, 11 Rust tests and release consistency checks. Shell syntax and whitespace checks also pass.
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.29_aarch64.dmg` (3,922,766 bytes).
+- SHA-256: `258c6840a3ca65a3ff5e45dfc286707b381c3439b329a3a721c1b12b55428c09`.
+- Packaging: APFS checksum and read-only mount validation passed for the Applications shortcut, arm64/version metadata, strict deep ad-hoc signature and all signed app file hashes. All 37 configured Worker resources match source; embedded JS/CSS match the current frontend build; no local credentials/configuration or Python bytecode is bundled.
+- Packaged acceptance: [verify_packaged_p2.py](../scripts/verify_packaged_p2.py) passed against both the signed app and read-only mounted DMG. Each run used 18 real Worker stdin requests with isolated fixture state, testing five categories, exact cleanup bytes, new queue references after preview, changed fingerprints, an external-process lock, recent-cache retention, recovery/audit retention and three export privacy choices. Source, notes, assets, model sentinels and the sealed app remained unchanged. The image was detached after verification.
+- Native acceptance: a copied app with a separate test bundle identifier and ad-hoc signature launched with an explicit temporary app-data root and existing Python. Its actual WebView/desktop bridge displayed protected recovery, unknown metrics and a one-file/750-byte cleanup preview; the downloaded JSON contained no fixture original, full paths or credentials. See [acceptance details and boundaries](acceptance-0.1.29.md). This same-machine smoke test does not close independent GUI/clean-Mac or live-model task-matrix gates.
+- The installed application was not replaced. No model calls, runtime downloads, Developer ID signing or notarization were performed for this acceptance.
 
 ## 0.1.28 proofreading chunk size (2026-09-29)
 

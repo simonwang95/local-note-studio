@@ -34,6 +34,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from note_filename import flag_enabled, parse_published_date, prepend_date_prefix
+from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_cache_hit, record_retry
 
 try:
     from pypdf import PdfReader
@@ -377,6 +378,7 @@ class ChatCompletionResult:
     completion_tokens: int
 
 
+@diagnostic_stage("conversion_model")
 def _chat_completion(
     cfg: dict[str, str],
     messages: list[dict[str, Any]],
@@ -400,29 +402,40 @@ def _chat_completion(
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     timeout = timeout_seconds if timeout_seconds is not None else int(cfg["QWEN_PDF_POLISH_TIMEOUT_SECONDS"])
+    call_id = begin_model_call("conversion_model", cfg.get("DEFAULT_LLM_MODEL"), config={"timeout_seconds": timeout, "max_tokens": max_tokens})
+    call_usage = None
+    call_status = "failed"
+    call_reason = "response"
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"LLM connection failed: {exc.reason}") from exc
-
-    try:
-        choice = data["choices"][0]
-        message = choice["message"]
-        raw_content = message.get("content")
-        content = raw_content if isinstance(raw_content, str) else ""
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
-        return ChatCompletionResult(
-            content=content.strip(),
-            finish_reason=str(choice.get("finish_reason") or "").strip(),
-            completion_tokens=completion_tokens,
-        )
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError("unexpected LLM response contract") from exc
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            call_reason = "http"
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            call_reason = "transport"
+            raise RuntimeError(f"LLM connection failed: {exc.reason}") from exc
+        try:
+            call_usage = data.get("usage") if isinstance(data, dict) else None
+            choice = data["choices"][0]
+            message = choice["message"]
+            raw_content = message.get("content")
+            content = raw_content if isinstance(raw_content, str) else ""
+            usage = call_usage if isinstance(call_usage, dict) else {}
+            completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
+            call_status = "completed" if content.strip() else "failed"
+            call_reason = None if content.strip() else "empty_content"
+            return ChatCompletionResult(
+                content=content.strip(),
+                finish_reason=str(choice.get("finish_reason") or "").strip(),
+                completion_tokens=completion_tokens,
+            )
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("unexpected LLM response contract") from exc
+    finally:
+        finish_model_call(call_id, "conversion_model", call_status, usage=call_usage, reason=call_reason)
 
 
 def call_chat_completion(
@@ -571,6 +584,8 @@ def opus_image_cache_path(
 def load_opus_image_analysis_cache(
     cfg: dict[str, str], image_hash: str, mode: str, context_hash: str = ""
 ) -> dict[str, str] | None:
+    if parse_bool(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")) or parse_bool(os.environ.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")):
+        return None
     path = opus_image_cache_path(cfg, image_hash, mode, context_hash)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -593,8 +608,22 @@ def load_opus_image_analysis_cache(
 def save_opus_image_analysis_cache(
     cfg: dict[str, str], image_hash: str, mode: str, context_hash: str, result: dict[str, str]
 ) -> None:
+    if parse_bool(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")) or parse_bool(os.environ.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false")):
+        return
     path = opus_image_cache_path(cfg, image_hash, mode, context_hash)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    previous = {}
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(old, dict) and isinstance(old.get("cache_metadata"), dict):
+            previous = old["cache_metadata"]
+    except (OSError, ValueError):
+        pass
+    timestamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    run_id = os.environ.get("LOCAL_NOTE_STUDIO_RUN_ID") or None
+    references = [item for item in previous.get("references", []) if isinstance(item, dict)]
+    if run_id and {"type": "run", "id": run_id} not in references:
+        references.append({"type": "run", "id": run_id})
     payload = {
         "schema_version": OPUS_IMAGE_CACHE_SCHEMA_VERSION,
         "rules_version": OPUS_IMAGE_ANALYSIS_RULES_VERSION,
@@ -603,6 +632,13 @@ def save_opus_image_analysis_cache(
         "model": str(cfg.get("DEFAULT_LLM_MODEL") or ""),
         "context_hash": context_hash,
         "result": result,
+        "cache_metadata": {
+            "schema_version": 1, "category": "disposable_cache", "kind": "opus-image-analysis-cache",
+            "run_id": run_id, "task": os.environ.get("LOCAL_NOTE_STUDIO_TASK") or "bilibili-opus",
+            "source_ref": os.environ.get("LOCAL_NOTE_STUDIO_SOURCE_REF") or None,
+            "status": "completed", "created_at": previous.get("created_at") or timestamp,
+            "updated_at": timestamp, "references": references,
+        },
     }
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -656,6 +692,7 @@ def _vision_result(content: str) -> dict[str, str]:
     return result
 
 
+@diagnostic_stage("opus_image_analysis")
 def analyze_opus_image(
     path: pathlib.Path,
     image_hash: str,
@@ -677,6 +714,7 @@ def analyze_opus_image(
     timeout_seconds = opus_image_analysis_timeout_seconds(cfg)
     cached = load_opus_image_analysis_cache(cfg, image_hash, mode, context_hash)
     if cached is not None:
+        record_cache_hit("opus_image_analysis", "disposable_cache")
         return cached, True, False, 0.0, {
             "finish_reason": "cache",
             "completion_tokens": 0,
@@ -793,6 +831,7 @@ JSON 字段必须为：
             retry_reasons.append(retry_reason)
             diagnostics["retry_reasons"] = list(retry_reasons)
             if attempt == 0:
+                record_retry("opus_image_analysis", retry_reason)
                 print(
                     f"图片分析响应不可用（{retry_reason}），将在模型冷却后自动重试 1/1",
                     file=sys.stderr,

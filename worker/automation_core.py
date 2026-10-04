@@ -22,7 +22,7 @@ from typing import Any, Iterator
 
 
 RESULT_SCHEMA_VERSION = "1.0"
-WORKER_VERSION = "0.1.28"
+WORKER_VERSION = "0.1.29"
 PROFILE_SCHEMA_VERSION = "1.0"
 RULES_VERSION = "1.0"
 SECRET_KEYS = {
@@ -35,7 +35,11 @@ SECRET_KEYS = {
     "secret",
 }
 PUBLIC_NUMERIC_DIAGNOSTIC_KEYS = {
+    "prompt_tokens",
     "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "cached_tokens",
     "max_tokens",
 }
 OMITTED_CONTRACT_KEYS = {
@@ -92,6 +96,8 @@ def redact_text(value: str) -> str:
         r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+",
         r"(?i)((?:api[\s_-]?key|token|password|secret)(?:\s+provided)?\s*[:=]\s*)[^\s,;]+",
         r"(?i)(SESSDATA|bili_jct|DedeUserID|buvid3)=([^;\s]+)",
+        r"(?im)(\b(?:set-cookie|cookie)\s*:\s*)[^\r\n]+",
+        r"(?m)^((?:#HttpOnly_)?[^\t\r\n]+\t(?:TRUE|FALSE)\t[^\t\r\n]*\t(?:TRUE|FALSE)\t\d+\t[^\t\r\n]+\t)[^\r\n]+",
         r"(?i)\bsk-[A-Za-z0-9_-]{8,}\b",
     )
     for pattern in patterns:
@@ -109,7 +115,7 @@ def sanitize_mapping(value: Any) -> Any:
             key = str(raw_key)
             lowered = key.lower()
             if lowered in PUBLIC_NUMERIC_DIAGNOSTIC_KEYS:
-                if isinstance(item, (int, float)) and not isinstance(item, bool):
+                if item is None or (isinstance(item, (int, float)) and not isinstance(item, bool)):
                     clean[key] = item
                 continue
             if lowered in OMITTED_CONTRACT_KEYS or any(secret in lowered for secret in SECRET_KEYS):
@@ -405,6 +411,11 @@ class HistoryStore:
         retry_of: str | None = None,
     ) -> None:
         clean = sanitize_mapping(request)
+        # Keep source identity independent of text redaction (a valid filename
+        # may itself contain a string resembling an API key).
+        original = asdict(request) if is_dataclass(request) else request
+        if isinstance(original, dict):
+            clean["source_ref"] = stable_source_ref(str(original.get("source") or ""))
         with self._connect() as connection:
             connection.execute(
                 """

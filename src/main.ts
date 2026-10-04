@@ -4,6 +4,19 @@ import { open, type OpenDialogOptions } from "@tauri-apps/plugin-dialog";
 import { createAppTabs } from "./app-shell";
 import { ManifestViewStateStore } from "./manifest-state";
 import {
+  cacheBytes,
+  cacheCategoryLabels,
+  cacheMetric,
+  cachePreviewConfirmation,
+  cacheReferences,
+  cacheRetentionDays,
+  cacheSourceMatches,
+  filterCacheItems,
+  type CacheCategory,
+  type CacheInventory,
+  type CachePreview,
+} from "./cache-maintenance";
+import {
   clearRecentValues,
   createDesktopProfile,
   createHistoryEntry,
@@ -131,6 +144,11 @@ let activeHistoryEntry: TaskHistoryEntry | null = null;
 let historyFilter: TaskHistoryStatus | "all" = "all";
 const appTabKey = "local-note-studio.active-tab.v1";
 const manifestViewState = new ManifestViewStateStore();
+let cacheInventory: CacheInventory | null = null;
+let cachePreview: CachePreview | null = null;
+let cacheBusy = false;
+let cacheReferencesReady: Promise<void> = Promise.resolve();
+let cacheReferencesError = "";
 
 const taskLabels: Record<TaskType, string> = {
   "bilibili-url": "B站单链接",
@@ -637,6 +655,39 @@ app.innerHTML = `
           <div id="manifestSummary" class="summary-chips"></div>
           <div id="manifestList" class="manifest-list"><p class="empty-state">点击“重新检查”，查看视频、文档、论文和 B站批次的处理记录。</p></div>
         </section>
+
+        <section class="panel cache-panel">
+          <div class="panel-header">
+            <div><span class="step">3</span><h2>缓存管理与任务诊断</h2></div>
+            <button id="refreshCache" type="button" class="secondary">刷新缓存</button>
+          </div>
+          <p class="manifest-help">查看原文证据、ASR 诊断、检查点和恢复材料。运行、排队及待恢复任务的引用由 Worker 保护；清理预览会列出具体文件。无法确认来源的旧材料会保留，并标明保护原因。</p>
+          <p id="cacheNotice" class="field-note" role="status">自动清理默认关闭；刷新后显示已保存的策略。缺失诊断指标会标为“未知”。</p>
+          <p id="cacheReferencesNotice" class="field-note" role="status"></p>
+          <div id="cacheSummary" class="summary-chips"></div>
+          <div class="form-grid compact cache-controls">
+            <label>查看类别<select id="cacheCategoryFilter"><option value="all">全部类别</option>${Object.entries(cacheCategoryLabels).map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</select></label>
+            <label>任务 / 来源筛选<input id="cacheSourceFilter" placeholder="来源、任务类型、路径或状态" /></label>
+          </div>
+          <div id="cacheList" class="cache-list"><p class="empty-state">点击“刷新缓存”查看本机材料和占用。</p></div>
+          <details class="cache-maintenance-options" open>
+            <summary>保留策略与清理</summary>
+            <fieldset class="cache-categories"><legend>参与清理的类别</legend>${Object.entries(cacheCategoryLabels).map(([value, label]) => `<label class="check"><input type="checkbox" data-cache-category="${value}" ${value === "disposable_cache" ? "checked" : ""} /> ${label}</label>`).join("")}</fieldset>
+            <div class="form-grid compact">
+              <label>保留最近天数<input id="cacheRetentionDays" type="number" min="0" max="3650" step="1" value="30" /></label>
+              <label class="check"><input id="cacheAutoEnabled" type="checkbox" /> 启用自动清理（默认关闭）</label>
+            </div>
+            <p class="field-note">保留期限只作用于勾选的类别。自动清理在新任务开始前检查，运行和恢复引用始终优先。</p>
+            <div class="actions"><button id="cacheSavePolicy" type="button" class="secondary">保存保留策略</button><button id="cachePreviewClean" type="button" class="secondary">预览清理</button><button id="cacheClean" type="button" class="secondary danger-outline" disabled>清理预览中的文件</button></div>
+            <div id="cachePreviewList" class="cache-preview" aria-live="polite"></div>
+          </details>
+          <details class="cache-diagnostics" open>
+            <summary>任务诊断与导出</summary>
+            <div id="cacheDiagnosticList"><p class="empty-state">刷新后查看阶段耗时、模型调用、tokens、重试原因和缓存命中。</p></div>
+            <div class="cache-export-options"><label class="check"><input id="cacheIncludeOriginal" type="checkbox" /> 导出包含原文</label><label class="check"><input id="cacheIncludePaths" type="checkbox" /> 导出包含完整路径</label><button id="cacheExport" type="button" class="secondary">导出诊断 JSON</button></div>
+            <p class="field-note">默认导出脱敏诊断。原文和完整路径仅在勾选后包含；API Key、Cookie 内容始终移除。</p>
+          </details>
+        </section>
       </section>
       </div>
 
@@ -711,6 +762,14 @@ document.querySelector<HTMLButtonElement>("#cancelTask")?.addEventListener("clic
 document.querySelector<HTMLButtonElement>("#copyOutputDir")?.addEventListener("click", () => copyPath(inputValue("outputDir")));
 document.querySelector<HTMLButtonElement>("#refreshManifests")?.addEventListener("click", () => refreshManifestStatus());
 document.querySelector<HTMLButtonElement>("#clearHistory")?.addEventListener("click", clearHistory);
+document.querySelector<HTMLButtonElement>("#refreshCache")?.addEventListener("click", () => void refreshCacheInventory());
+document.querySelector<HTMLSelectElement>("#cacheCategoryFilter")?.addEventListener("change", renderCacheInventory);
+document.querySelector<HTMLInputElement>("#cacheSourceFilter")?.addEventListener("input", renderCacheInventory);
+document.querySelector<HTMLButtonElement>("#cacheSavePolicy")?.addEventListener("click", () => void saveCachePolicy());
+document.querySelector<HTMLButtonElement>("#cachePreviewClean")?.addEventListener("click", () => void previewCacheCleanup());
+document.querySelector<HTMLButtonElement>("#cacheClean")?.addEventListener("click", () => void cleanCachePreview());
+document.querySelector<HTMLButtonElement>("#cacheExport")?.addEventListener("click", () => void exportCacheDiagnostics());
+document.querySelectorAll<HTMLInputElement>("[data-cache-category], #cacheRetentionDays, #cacheAutoEnabled").forEach((control) => control.addEventListener("change", invalidateCachePreview));
 document.querySelector<HTMLSelectElement>("#historyFilter")?.addEventListener("change", (event) => {
   historyFilter = (event.currentTarget as HTMLSelectElement).value as TaskHistoryStatus | "all";
   renderHistory();
@@ -758,6 +817,7 @@ if (!hasTauriRuntime()) {
   setState("准备检查依赖...");
   setOutput("应用已启动，正在自动检查运行环境...\n");
   window.setTimeout(() => {
+    scheduleCacheReferences();
     void runEnvironmentCheck();
   }, 100);
 }
@@ -1035,7 +1095,7 @@ function updateBatchResult(text: string): void {
 }
 
 async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string, requestOverride?: Record<string, unknown>): Promise<void> {
-  if (isWorkerRunning) return;
+  if (isWorkerRunning || cacheBusy) return;
   saveSettings();
   const task = (String(requestOverride?.task || currentTask())) as TaskType;
   if (retryFailed && task === "bilibili-favorite" && Boolean(requestOverride?.incognito_mode ?? checkboxChecked("incognitoMode"))) {
@@ -1070,8 +1130,10 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string, r
   if (inputValue("source")) rememberTaskPath("source");
   if (!dryRun) {
     activeHistoryEntry = createHistoryEntry(task, request as Record<string, unknown>, retryOf);
+    request.run_id = activeHistoryEntry.id;
+    activeHistoryEntry.request.run_id = activeHistoryEntry.id;
     taskHistory = upsertHistoryEntry(taskHistory, activeHistoryEntry);
-    saveTaskHistory(taskHistory);
+    persistTaskHistory();
     renderHistory();
   }
   setWorkerRunning(true);
@@ -1079,6 +1141,7 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string, r
   setOutput("");
   appendOutput(dryRun ? "正在生成命令预览...\n" : "任务已启动，日志会实时追加到这里。\n");
   try {
+    await syncCacheReferences();
     const result = await invokeWorker(request);
     if (!currentOutput().trim()) setOutput(result || "(worker 没有返回输出)");
     updateBatchResult(result || currentOutput());
@@ -1125,7 +1188,7 @@ async function runTask(dryRun: boolean, retryFailed = false, retryOf?: string, r
       activeHistoryEntry.log = currentOutput();
       activeHistoryEntry.endedAt = new Date().toISOString();
       taskHistory = upsertHistoryEntry(taskHistory, activeHistoryEntry);
-      saveTaskHistory(taskHistory);
+      persistTaskHistory();
       activeHistoryEntry = null;
       renderHistory();
     }
@@ -1189,6 +1252,197 @@ async function invokeWorkerQuiet(request: object): Promise<string> {
     throw new TauriRuntimeUnavailableError(tauriRuntimeHint());
   }
   return invoke<string>("run_worker", { request: JSON.stringify(request) });
+}
+
+function cacheNotice(message: string): void {
+  const notice = document.querySelector<HTMLElement>("#cacheNotice");
+  if (notice) notice.textContent = message;
+}
+
+async function invokeCache<T>(action: string, options: object = {}): Promise<T> {
+  const result = await invokeWorkerQuiet({
+    task: "cache-manage",
+    ...runtimeSelectionPayload((inputValue("runtimeBackend") || "managed") as "managed" | "conda", inputValue("condaEnv"), inputValue("condaBin")),
+    python_bin: inputValue("pythonBin"),
+    cache_action: action,
+    cache_options: options,
+  });
+  const data = taskResultFromLog(result);
+  if (!data || !data.details?.cache || data.status === "failed") throw new Error(data?.error?.message || "Worker 未返回可识别的缓存结果");
+  return data.details.cache as T;
+}
+
+function persistTaskQueue(): void {
+  saveQueue(queueEntries);
+  scheduleCacheReferences();
+}
+
+function persistTaskHistory(): void {
+  saveTaskHistory(taskHistory);
+  scheduleCacheReferences();
+}
+
+function scheduleCacheReferences(): void {
+  invalidateCachePreview();
+  if (!hasTauriRuntime()) return;
+  const references = cacheReferences(queueEntries, taskHistory);
+  // Keep snapshots in order. Failed synchronization never writes an empty registry:
+  // the Worker retains its last references, and a new snapshot can retry later.
+  cacheReferencesReady = cacheReferencesReady.catch(() => {}).then(async () => {
+    try {
+      await invokeCache("references", references);
+      cacheReferencesError = "";
+    } catch (error) {
+      cacheReferencesError = `引用同步未完成：${errorMessage(error)}。Worker 保留上次引用；同步成功前无法清理。`;
+      throw error;
+    } finally {
+      const notice = document.querySelector<HTMLElement>("#cacheReferencesNotice");
+      if (notice) notice.textContent = cacheReferencesError;
+    }
+  });
+  void cacheReferencesReady.catch(() => {});
+}
+
+async function syncCacheReferences(): Promise<void> {
+  scheduleCacheReferences();
+  await cacheReferencesReady;
+}
+
+function selectedCacheCategories(): CacheCategory[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement>("[data-cache-category]:checked"))
+    .map((input) => input.dataset.cacheCategory as CacheCategory);
+}
+
+function invalidateCachePreview(): void {
+  cachePreview = null;
+  const preview = document.querySelector<HTMLElement>("#cachePreviewList");
+  if (preview?.textContent) preview.textContent = "设置或任务引用已变化，请重新预览后再清理。";
+  updateCacheButtons();
+}
+
+function updateCacheButtons(): void {
+  for (const id of ["refreshCache", "cacheSavePolicy", "cachePreviewClean", "cacheExport"]) {
+    const button = document.querySelector<HTMLButtonElement>(`#${id}`);
+    if (button) button.disabled = cacheBusy;
+  }
+  const clean = document.querySelector<HTMLButtonElement>("#cacheClean");
+  if (clean) clean.disabled = cacheBusy || isWorkerRunning || queueRunning || Boolean(cacheReferencesError) || !cachePreview?.candidate_count;
+}
+
+async function cacheOperation(operation: () => Promise<void>): Promise<void> {
+  if (cacheBusy) return;
+  cacheBusy = true;
+  updateCacheButtons();
+  try { await operation(); }
+  catch (error) { cacheNotice(`缓存操作未完成：${errorMessage(error)}`); }
+  finally { cacheBusy = false; updateCacheButtons(); }
+}
+
+function applyCachePolicy(data: CacheInventory): void {
+  setInputValue("cacheRetentionDays", String(data.policy.retention_days), false);
+  const auto = document.querySelector<HTMLInputElement>("#cacheAutoEnabled");
+  if (auto) auto.checked = data.policy.auto_enabled;
+  document.querySelectorAll<HTMLInputElement>("[data-cache-category]").forEach((input) => { input.checked = data.policy.categories.includes(input.dataset.cacheCategory as CacheCategory); });
+}
+
+async function refreshCacheInventory(): Promise<void> {
+  await cacheOperation(async () => {
+    cacheNotice("正在读取缓存与诊断...");
+    try { await syncCacheReferences(); } catch { /* Inventory remains readable; cleanup stays disabled. */ }
+    cacheInventory = await invokeCache<CacheInventory>("inventory");
+    applyCachePolicy(cacheInventory);
+    renderCacheInventory();
+    cacheNotice(`缓存已刷新。自动清理${cacheInventory.policy.auto_enabled ? "已启用" : "关闭"}，保留最近 ${cacheInventory.policy.retention_days} 天。`);
+  });
+}
+
+function cacheTime(value: string | undefined): string {
+  if (!value) return "未知";
+  const time = new Date(value);
+  return Number.isNaN(time.getTime()) ? value : time.toLocaleString();
+}
+
+function renderCacheInventory(): void {
+  if (!cacheInventory) return;
+  const summary = document.querySelector<HTMLElement>("#cacheSummary");
+  if (summary) summary.innerHTML = `<span>缓存材料 ${cacheInventory.summary.total_count} 项 · ${cacheBytes(cacheInventory.summary.total_bytes)}</span><span>引用保护 ${cacheInventory.summary.protected_count} 项 · ${cacheBytes(cacheInventory.summary.protected_bytes)}</span><span>诊断审计保留 ${cacheMetric(cacheInventory.summary.diagnostics_count)} 项 · ${cacheBytes(cacheInventory.summary.diagnostics_bytes)}（暂不支持清理）</span>${Object.entries(cacheInventory.summary.by_category || {}).map(([category, usage]) => `<span>${escapeHtml(cacheCategoryLabels[category as CacheCategory] || category)} ${cacheMetric(usage?.count)} 项 · ${cacheBytes(usage?.size_bytes)}</span>`).join("")}`;
+  const items = filterCacheItems(cacheInventory.items, inputValue("cacheCategoryFilter") || "all", inputValue("cacheSourceFilter"));
+  const list = document.querySelector<HTMLElement>("#cacheList");
+  if (list) {
+    list.innerHTML = items.length ? items.map((item) => `<article class="cache-item">
+      <div class="cache-item-heading"><strong>${escapeHtml(cacheCategoryLabels[item.category] || item.category)}</strong><span class="status ${item.protected ? "interrupted" : "completed"}">${item.protected ? "引用保护" : "可参与清理"}</span><span>${cacheBytes(item.size_bytes)}</span></div>
+      <div class="cache-item-meta"><span>状态：${escapeHtml(item.status || "未知")}</span><span>任务：${escapeHtml(item.task || "未知")}</span><span>创建：${escapeHtml(cacheTime(item.created_at))}</span><span>更新：${escapeHtml(cacheTime(item.modified_at))}</span></div>
+      <p>来源：${escapeHtml(item.source_ref || "未知")}</p><p class="cache-path">${escapeHtml(item.path)}</p>
+      <p class="field-note">引用：${escapeHtml(item.references?.length ? item.references.map(cacheMetric).join("；") : "无")}${item.protection_reasons?.length ? ` · ${escapeHtml(item.protection_reasons.join("；"))}` : ""}</p>
+      <button type="button" class="secondary" data-cache-reveal="${encodeURIComponent(item.path)}">${item.category === "failed_recovery" ? "定位失败恢复材料" : "Finder 中显示"}</button>
+    </article>`).join("") : '<p class="empty-state">当前筛选条件下没有缓存材料。</p>';
+    list.querySelectorAll<HTMLButtonElement>("[data-cache-reveal]").forEach((button) => button.addEventListener("click", () => {
+      const path = decodeURIComponent(button.dataset.cacheReveal || "");
+      if (path) void invoke("reveal_path", { path }).catch((error) => cacheNotice(`定位失败：${errorMessage(error)}`));
+    }));
+  }
+  const diagnosticList = document.querySelector<HTMLElement>("#cacheDiagnosticList");
+  const sourceFilter = inputValue("cacheSourceFilter");
+  const diagnostics = (cacheInventory.diagnostics || []).filter((item) => cacheSourceMatches([item.run_id, item.task, item.source_ref, item.status], sourceFilter));
+  if (diagnosticList) diagnosticList.innerHTML = diagnostics.length ? diagnostics.map((item) => `<article class="cache-diagnostic-item">
+    <strong>${escapeHtml(taskLabels[item.task as TaskType] || item.task || "任务未知")} · ${escapeHtml(item.status || "状态未知")}</strong><p>${escapeHtml(item.source_ref || "来源未知")}</p>
+    <p class="field-note">${escapeHtml(cacheTime(item.started_at))} → ${escapeHtml(cacheTime(item.finished_at))}</p>
+    <dl class="cache-metrics">${Object.entries({ "总耗时（秒）": item.duration_seconds, "阶段耗时（秒）": item.stage_durations, "模型调用总次数": item.model_calls, "LLM 调用次数": item.llm_calls, "ASR 调用次数": item.asr_calls, "输入 tokens": item.prompt_tokens, "输出 tokens": item.completion_tokens, "总 tokens": item.total_tokens, "推理 tokens": item.reasoning_tokens, "重试原因": item.retries, "缓存命中": item.cache_hits, "生效配置": item.effective_config }).map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(cacheMetric(value))}</dd></div>`).join("")}</dl>
+  </article>`).join("") : '<p class="empty-state">没有可用的任务诊断。阶段耗时、模型调用次数、tokens、重试原因、缓存命中及生效配置：未知。</p>';
+}
+
+async function saveCachePolicy(): Promise<void> {
+  await cacheOperation(async () => {
+    const categories = selectedCacheCategories();
+    if (!categories.length) throw new Error("请至少选择一个缓存类别");
+    const retentionDays = cacheRetentionDays(inputValue("cacheRetentionDays"));
+    const policy = await invokeCache<CacheInventory["policy"]>("policy", { auto_enabled: checkboxChecked("cacheAutoEnabled"), retention_days: retentionDays, categories });
+    if (cacheInventory) cacheInventory.policy = policy;
+    invalidateCachePreview();
+    cacheNotice(`保留策略已保存：自动清理${policy.auto_enabled ? "已启用" : "关闭"}，保留最近 ${policy.retention_days} 天，适用于 ${categories.map((category) => cacheCategoryLabels[category]).join("、")}。`);
+  });
+}
+
+async function previewCacheCleanup(): Promise<void> {
+  await cacheOperation(async () => {
+    await syncCacheReferences();
+    const categories = selectedCacheCategories();
+    if (!categories.length) throw new Error("请至少选择一个缓存类别");
+    const olderThanDays = cacheRetentionDays(inputValue("cacheRetentionDays"));
+    cachePreview = await invokeCache<CachePreview>("preview", { categories, older_than_days: olderThanDays });
+    const preview = document.querySelector<HTMLElement>("#cachePreviewList");
+    if (preview) preview.innerHTML = `<p><strong>可清理 ${cachePreview.candidate_count} 项 · ${cacheBytes(cachePreview.total_bytes)}</strong>；跳过 ${cachePreview.skipped.length} 项。预览有效至 ${escapeHtml(cacheTime(cachePreview.expires_at))}。</p>${cachePreview.candidates.length ? `<ul>${cachePreview.candidates.map((item) => `<li>${escapeHtml(item.path)} · ${cacheBytes(item.size_bytes)}</li>`).join("")}</ul>` : ""}`;
+    cacheNotice("清理预览已生成；引用保护材料不会删除。确认具体文件后可手动清理。");
+  });
+}
+
+async function cleanCachePreview(): Promise<void> {
+  const preview = cachePreview;
+  if (!preview?.candidate_count || isWorkerRunning || queueRunning || cacheBusy) return;
+  if (!window.confirm(cachePreviewConfirmation(preview))) return;
+  await cacheOperation(async () => {
+    await syncCacheReferences();
+    const result = await invokeCache<{ deleted: unknown[]; skipped: unknown[]; deleted_bytes: number }>("clean", { preview_id: preview.preview_id });
+    cachePreview = null;
+    cacheInventory = await invokeCache<CacheInventory>("inventory");
+    renderCacheInventory();
+    const target = document.querySelector<HTMLElement>("#cachePreviewList");
+    if (target) target.textContent = `已删除 ${result.deleted.length} 项（${cacheBytes(result.deleted_bytes)}），跳过 ${result.skipped.length} 项。`;
+    cacheNotice("清理完成；占用统计已重新读取，可与预览核对。");
+  });
+}
+
+async function exportCacheDiagnostics(): Promise<void> {
+  await cacheOperation(async () => {
+    const result = await invokeCache<{ filename: string; content: string }>("export", { include_original: checkboxChecked("cacheIncludeOriginal"), include_paths: checkboxChecked("cacheIncludePaths") });
+    const url = URL.createObjectURL(new Blob([result.content], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = result.filename;
+    link.click();
+    URL.revokeObjectURL(url);
+    cacheNotice("诊断 JSON 已导出。导出内容不会写入任务日志。");
+  });
 }
 
 async function cancelWorker(): Promise<void> {
@@ -1700,7 +1954,7 @@ async function importProfile(input: HTMLInputElement): Promise<void> {
 }
 
 function enqueueCurrentTask(): void {
-  if (isWorkerRunning || queueRunning) {
+  if (isWorkerRunning || queueRunning || cacheBusy) {
     setState("当前 Worker 正在运行；完成后可继续入队");
     return;
   }
@@ -1736,7 +1990,7 @@ function enqueueCurrentTask(): void {
     addedAt: new Date().toISOString(),
   };
   queueEntries = [...queueEntries, entry];
-  saveQueue(queueEntries);
+  persistTaskQueue();
   renderQueue();
   setState(`已加入串行队列（${queueEntries.filter((item) => item.status === "waiting").length} 项等待）`);
 }
@@ -1762,12 +2016,13 @@ function renderQueue(): void {
     </article>`;
   }).join("") : '<p class="empty-state">队列为空。先填写任务，再点击“当前任务入队”。</p>';
   target.querySelectorAll<HTMLButtonElement>("button[data-queue-action]").forEach((button) => button.addEventListener("click", () => {
+    if (cacheBusy) return;
     const id = button.dataset.id || "";
     const action = button.dataset.queueAction;
     if (action === "up" || action === "down") queueEntries = moveQueueEntry(queueEntries, id, action === "up" ? -1 : 1);
     else if (action === "retry") queueEntries = queueEntries.map((entry) => entry.id === id && ["failed", "interrupted", "cancelled"].includes(entry.status) ? { ...entry, status: "waiting", error: undefined, endedAt: undefined } : entry);
     else if (action === "remove") queueEntries = queueEntries.filter((entry) => entry.id !== id || entry.status === "running");
-    saveQueue(queueEntries);
+    persistTaskQueue();
     renderQueue();
   }));
 }
@@ -1780,7 +2035,7 @@ function pauseQueue(): void {
 }
 
 async function startQueue(): Promise<void> {
-  if (queueRunning || isWorkerRunning) {
+  if (queueRunning || isWorkerRunning || cacheBusy) {
     setState("已有 Worker 或队列正在运行");
     return;
   }
@@ -1789,7 +2044,7 @@ async function startQueue(): Promise<void> {
     const resume = window.confirm(`发现 ${interrupted.length} 个上次关闭时中断的队列项。\n\n确认后将这些项改为等待并从头重新执行；不会把它们当作已完成。`);
     if (!resume) return;
     queueEntries = queueEntries.map((entry) => entry.status === "interrupted" ? { ...entry, status: "waiting", error: undefined } : entry);
-    saveQueue(queueEntries);
+    persistTaskQueue();
   }
   if (!queueEntries.some((entry) => entry.status === "waiting")) {
     setState("队列中没有等待项");
@@ -1822,10 +2077,12 @@ async function startQueue(): Promise<void> {
       };
       updateQueueEntry(entry.id, { status: "running", startedAt: new Date().toISOString(), endedAt: undefined, error: undefined });
       const history = createHistoryEntry(String(request.task || "unknown"), request);
-      entry.historyId = history.id;
+      request.run_id = history.id;
+      history.request.run_id = history.id;
+      updateQueueEntry(entry.id, { historyId: history.id, request: { ...entry.request, run_id: history.id } });
       taskHistory = upsertHistoryEntry(taskHistory, history);
-      saveTaskHistory(taskHistory);
-      saveQueue(queueEntries);
+      persistTaskHistory();
+      persistTaskQueue();
       activeHistoryEntry = history;
       setWorkerRunning(true);
       setState(`队列运行中：${taskLabels[String(request.task || "") as TaskType] || String(request.task || "")}`);
@@ -1834,6 +2091,7 @@ async function startQueue(): Promise<void> {
       let failed = false;
       let cancelled = false;
       try {
+        await syncCacheReferences();
         const output = await invokeWorker(request);
         if (!currentOutput().trim()) setOutput(output || "(worker 没有返回输出)");
         updateBatchResult(output || currentOutput());
@@ -1857,7 +2115,7 @@ async function startQueue(): Promise<void> {
         history.log = currentOutput();
         history.endedAt = new Date().toISOString();
         taskHistory = upsertHistoryEntry(taskHistory, history);
-        saveTaskHistory(taskHistory);
+        persistTaskHistory();
         activeHistoryEntry = null;
         updateQueueEntry(entry.id, { status: history.status === "completed" ? "completed" : history.status === "cancelled" ? "cancelled" : "failed", error: history.error, historyId: history.id, endedAt: new Date().toISOString() });
         setWorkerRunning(false);
@@ -1875,7 +2133,7 @@ async function startQueue(): Promise<void> {
   } finally {
     queueRunning = false;
     if (isWorkerRunning) setWorkerRunning(false);
-    saveQueue(queueEntries);
+    persistTaskQueue();
     renderQueue();
     if (notice) notice.textContent = queuePaused ? "调度已暂停；等待项会保留。" : "队列运行结束。已完成项不会在重启后重复执行。";
   }
@@ -1883,7 +2141,7 @@ async function startQueue(): Promise<void> {
 
 function updateQueueEntry(id: string, patch: Partial<QueueEntry>): void {
   queueEntries = queueEntries.map((entry) => entry.id === id ? { ...entry, ...patch } : entry);
-  saveQueue(queueEntries);
+  persistTaskQueue();
   renderQueue();
 }
 
@@ -1942,6 +2200,7 @@ function setWorkerRunning(running: boolean): void {
       control.disabled = running;
     });
   document.querySelectorAll<HTMLElement>(".manifest-card").forEach(updateManifestSelectionState);
+  updateCacheButtons();
 }
 
 function renderProgress(progress: ProgressEvent): void {
@@ -2313,6 +2572,7 @@ function renderHistory(): void {
             <div><span class="status ${entry.status}">${historyStatusLabels[entry.status]}</span><strong>${escapeHtml(taskLabels[entry.task as TaskType] || entry.task)}</strong><small>${escapeHtml(new Date(entry.startedAt).toLocaleString())}${source ? ` · ${escapeHtml(source)}` : ""}</small></div>
             <div class="row-actions">
               <button type="button" class="secondary" data-history-action="log" data-id="${entry.id}">查看日志</button>
+              ${["failed", "cancelled", "interrupted"].includes(entry.status) ? `<button type="button" class="secondary" data-history-action="diagnostics" data-id="${entry.id}">定位诊断与恢复材料</button>` : ""}
               ${entry.outputs.length ? `<button type="button" class="secondary" data-history-action="outputs" data-id="${entry.id}">查看 ${entry.outputs.length} 个输出</button>` : ""}
               <button type="button" class="secondary" data-history-action="rerun-current" data-id="${entry.id}">用当前配置重跑</button>
               <button type="button" class="secondary" data-history-action="rerun-snapshot" data-id="${entry.id}">按历史参数重跑</button>
@@ -2329,6 +2589,11 @@ function renderHistory(): void {
       if (button.dataset.historyAction === "log") {
         setOutput(entry.log || entry.error || "该任务没有保存日志。");
         setState(`历史：${historyStatusLabels[entry.status]}`);
+      } else if (button.dataset.historyAction === "diagnostics") {
+        appTabs.activate("validation");
+        setInputValue("cacheSourceFilter", String(entry.request.run_id || taskResultFromLog(entry.log)?.run_id || entry.task), false);
+        setInputValue("cacheCategoryFilter", "all", false);
+        void refreshCacheInventory();
       } else if (button.dataset.historyAction === "outputs") {
         renderOutputs(entry.outputs, `历史输出 · ${taskLabels[entry.task as TaskType] || entry.task}`, true);
         setState(`已显示历史输出（${entry.outputs.length} 个文件）`);
@@ -2352,11 +2617,11 @@ function renderHistory(): void {
 }
 
 function deleteHistoryEntry(entry: TaskHistoryEntry): void {
-  if (isWorkerRunning) return;
+  if (isWorkerRunning || cacheBusy) return;
   const taskName = taskLabels[entry.task as TaskType] || entry.task;
   if (!window.confirm(`确定删除“${taskName}”这条任务历史吗？\n\n只删除历史记录，不会删除输出文件。`)) return;
   taskHistory = removeHistoryEntry(taskHistory, entry.id);
-  saveTaskHistory(taskHistory);
+  persistTaskHistory();
   renderHistory();
   setState("任务历史已删除");
 }
@@ -2415,7 +2680,7 @@ function applyHistoryRequest(request: Record<string, unknown>): void {
 }
 
 function clearHistory(): void {
-  if (isWorkerRunning) {
+  if (isWorkerRunning || cacheBusy) {
     setState("任务运行中，不能清空历史");
     return;
   }
@@ -2425,7 +2690,7 @@ function clearHistory(): void {
   }
   if (!window.confirm(`确定清空本机保存的全部 ${taskHistory.length} 条任务历史吗？\n\n不会删除任何输出文件。`)) return;
   taskHistory = [];
-  saveTaskHistory(taskHistory);
+  persistTaskHistory();
   renderHistory();
   setState("全部任务历史已清空");
 }

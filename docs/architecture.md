@@ -30,6 +30,12 @@ Worker executions are started in their own process group on Unix-like systems. C
 
 All mutating Worker entry points also acquire one macOS advisory file lock under Application Support. The lock descriptor is inherited by the active business subprocess, so a parent crash cannot allow a competing GUI/CLI/MCP task to enter while that subprocess is still alive. Read-only checks and status queries do not acquire the write lock.
 
+T-118 uses `cache-manage` requests through this same bridge. `inventory`, `preview`, `export` and policy reads are read-only; cleanup, reference synchronization and policy writes acquire the global lock. Maintenance requests do not enter processing history, so exports containing explicitly selected original text cannot be copied into the audit database. Cleanup previews identify a fixed selection and execution rescans fingerprints and references before deletion. A durable desktop queue reference snapshot complements SQLite history and recovery journals. Only known managed cache locations are eligible; source files, published notes, model/runtime installations and output assets are outside the deletion boundary.
+
+`state/diagnostics/<run_id>.json` summarizes non-secret per-run events: actual request counts, reported token usage, retries, cache hits, stage durations and effective configuration. Unavailable metrics are `null`. Transcript cache metadata links new evidence to runs and source references while retaining legacy payload compatibility. Incognito runs do not add persistent transcript or diagnostic body caches. Retention is disabled by default; an enabled policy executes before a normal processing task under its existing lock, rather than using a background scheduler.
+
+Diagnostic summary/event/lock storage is counted separately as retained audit evidence and is excluded from file-by-file cleanup. A partial event set would change future aggregates silently. Unknown legacy provenance is also protected. Incognito processing skips automatic maintenance entirely.
+
 ## Distribution Runtime Boundary
 
 The daily-use package should use a hybrid runtime instead of putting every dependency inside the signed `.app`:
@@ -122,6 +128,7 @@ Output discovery is restricted to processing tasks with a non-empty output direc
 | `paper-quickread` | `worker/scripts/quick_read_pdf.py --source` |
 | `epub-export` | `worker/scripts/export_epub.py --source-dir` |
 | `env-check` | internal worker dependency validation |
+| `cache-manage` | internal `worker/cache_maintenance.py` inventory, reference protection, retention and redacted diagnostics |
 
 `output_filename` is optional and only intended for single-output tasks. It cannot contain path separators. Directory batch video jobs intentionally reject it to prevent multiple sources writing to the same Markdown file.
 

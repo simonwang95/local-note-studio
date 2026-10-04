@@ -36,6 +36,7 @@ from mindmap_markdown import (
     normalize_mindmap_list,
 )
 from stock_reference import build_stock_reference_prompt, build_stock_validation_section, sanitize_model_stock_codes
+from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_cache_hit, record_retry
 from transcript_quality import compact_text, load_transcript_diagnostic, proofread_errors, save_transcript_diagnostic
 from transcript_timing import load_note_timing, timestamp_for_position
 from video_contract import SECTION_NAMES, PLACEHOLDER_RE, raw_transcript, review_transcript_changes, section_text, validate_video_note
@@ -501,10 +502,19 @@ def _call_llm(
     retry_count = LLM_MAX_RETRIES if max_retries is None else max(0, max_retries)
     total_attempts = max(1, retry_count + 1)
     last_error = None
+    stage = "proofread" if task_name.startswith("校对正文") else "summary"
+    last_reason = None
 
     for attempt in range(1, total_attempts + 1):
         if attempt > 1 and before_retry is not None:
             before_retry()
+        if attempt > 1:
+            record_retry(stage, last_reason or "transport")
+        call_id = begin_model_call(stage, SUMMARY_MODEL, config={
+            "max_tokens": payload["max_tokens"], "enable_thinking": enable_thinking,
+            "timeout_seconds": timeout or LLM_TIMEOUT, "max_retries": retry_count,
+        })
+        call_status, call_reason, call_usage = "failed", None, None
         try:
             resp = requests.post(
                 api_url,
@@ -517,6 +527,7 @@ def _call_llm(
             )
 
             if resp.status_code >= 400:
+                call_reason = f"http_{resp.status_code}"
                 preview = resp.text.strip()[:500]
                 msg = f"HTTP {resp.status_code}: {preview or resp.reason}"
                 if not _is_retryable_http_status(resp.status_code):
@@ -524,6 +535,9 @@ def _call_llm(
                 raise requests.HTTPError(msg, response=resp)
 
             resp_data = resp.json()
+            usage = (resp_data.get("usage") or {}) if isinstance(resp_data, dict) else {}
+            usage = usage if isinstance(usage, dict) else {}
+            call_usage = usage
             # LM Studio 等本地服务可能不返回 choices
             if "choices" in resp_data:
                 choice = resp_data["choices"][0]
@@ -536,7 +550,6 @@ def _call_llm(
                 raise ValueError(f"Unexpected response: {resp_data}")
 
             finish_reason = str(choice.get("finish_reason") or "") if isinstance(choice, dict) else ""
-            usage = resp_data.get("usage", {}) if isinstance(resp_data, dict) else {}
             completion_details = usage.get("completion_tokens_details") or {}
             prompt_tokens = usage.get("prompt_tokens")
             completion_tokens = usage.get("completion_tokens")
@@ -544,6 +557,7 @@ def _call_llm(
             if not content or not content.strip():
                 current_tokens = int(payload.get("max_tokens") or SUMMARY_MAX_TOKENS)
                 if finish_reason == "length" and current_tokens < SUMMARY_MAX_TOKENS_CAP:
+                    call_reason = "output_budget"
                     next_tokens = min(SUMMARY_MAX_TOKENS_CAP, max(current_tokens * 2, current_tokens + 1024))
                     payload["max_tokens"] = next_tokens
                     raise ValueError(
@@ -551,6 +565,7 @@ def _call_llm(
                         f"(max_tokens {current_tokens}->{next_tokens}, "
                         f"completion_tokens={completion_tokens}, reasoning_tokens={reasoning_tokens})"
                     )
+                call_reason = "empty_response"
                 raise ValueError(
                     "Empty LLM response "
                     f"(finish_reason={finish_reason}, completion_tokens={completion_tokens}, "
@@ -562,6 +577,7 @@ def _call_llm(
                 f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
                 f"reasoning_tokens={reasoning_tokens}, content_chars={len(content)}"
             )
+            call_status = "completed"
             return LLMResponse(
                 content=content,
                 finish_reason=finish_reason,
@@ -574,6 +590,9 @@ def _call_llm(
             raise
         except (requests.Timeout, requests.ConnectionError, requests.HTTPError, ValueError) as e:
             last_error = e
+            call_reason = call_reason or ("timeout" if isinstance(e, requests.Timeout) else
+                                         "connection" if isinstance(e, requests.ConnectionError) else "invalid_response")
+            last_reason = call_reason
             if attempt >= total_attempts:
                 break
             wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
@@ -582,12 +601,16 @@ def _call_llm(
             time.sleep(wait)
         except requests.RequestException as e:
             last_error = e
+            call_reason = "transport"
+            last_reason = call_reason
             if attempt >= total_attempts:
                 break
             wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
             print(f"   ⚠️ {task_name} 请求异常（第 {attempt}/{total_attempts} 次）: {e}")
             print(f"   ⏳ {wait:g} 秒后重试...")
             time.sleep(wait)
+        finally:
+            finish_model_call(call_id, stage, call_status, usage=call_usage, reason=call_reason)
 
     raise RuntimeError(f"{task_name} 调用失败，已重试 {retry_count} 次: {last_error}")
 
@@ -1171,6 +1194,7 @@ def _parse_combined_summary(response, requested, transcript_text=""):
     return sections
 
 
+@diagnostic_stage("summary")
 def _run_summary_sections(label, title, transcript_text, requested):
     system_prompt, chunk_instruction, combine_instruction = _combined_summary_prompts(
         requested,
@@ -1188,6 +1212,7 @@ def _run_summary_sections(label, title, transcript_text, requested):
     return _parse_combined_summary(response, requested, transcript_text)
 
 
+@diagnostic_stage("proofread")
 def _run_chunked_proofread(label, title, transcript_text, identity_path=None):
     """Proofread with compatible checkpoints and a bounded quality-only split retry."""
     ranges = _chunk_text_ranges(transcript_text, SUMMARY_PROOFREAD_CHUNK_CHARS)
@@ -1210,6 +1235,7 @@ def _run_chunked_proofread(label, title, transcript_text, identity_path=None):
         payload = {
             "schema_version": 2,
             "metadata": metadata,
+            "note_path": checkpoint_key.split("\n", 1)[0],
             "segments": [
                 {"start": start, "end": end, "source_hash": digest, "result": value}
                 for (start, end, digest), value in sorted(segment_cache.items())
@@ -1249,6 +1275,7 @@ def _run_chunked_proofread(label, title, transcript_text, identity_path=None):
         cached_value = segment_cache.get(cache_key, "")
         if cached_value and not proofread_errors(cached_value, source):
             counters["reused"] += 1
+            record_cache_hit("proofread", "success_checkpoints")
             print(f"   ♻️ {label}: 复用校对检查点 {start + 1}-{end} 字")
             return [cached_value]
         if counters["calls"] >= max_calls:
@@ -1259,6 +1286,7 @@ def _run_chunked_proofread(label, title, transcript_text, identity_path=None):
             reserve_call()
             if attempt:
                 counters["quality_retries"] += 1
+                record_retry("proofread", "quality")
             if previous_calls:
                 _wait_between_llm_calls("下一次校对调用", SUMMARY_PROOFREAD_COOLDOWN_DELAY)
             source_before = transcript[max(0, start - 240):start]
@@ -1293,6 +1321,7 @@ def _run_chunked_proofread(label, title, transcript_text, identity_path=None):
         if boundary - start < min_chars or end - boundary < min_chars:
             raise RuntimeError(f"校对分段范围 {start + 1}-{end} 无法在最小段长 {min_chars} 内细分")
         counters["splits"] += 1
+        record_retry("proofread", "split")
         print(f"   ✂️ {label}: 质量检查失败，有限细分来源范围 {start + 1}-{end}（深度 {depth + 1}/{max_depth}）")
         left = proofread_range(start, boundary, depth + 1, f"{label_index}a")
         right = proofread_range(boundary, end, depth + 1, f"{label_index}b")
@@ -1414,6 +1443,7 @@ def _upsert_review_section(content, findings):
     return _upsert_section_before_raw(content, "人工复核提示", "\n".join(section.splitlines()[2:]))
 
 
+@diagnostic_stage("video_organization", lambda result: result.status)
 def generate_summary(filepath, progress_label=None):
     """Generate or repair the complete video-note contract and report its status."""
     label = progress_label or os.path.basename(filepath)
@@ -1428,6 +1458,8 @@ def generate_summary(filepath, progress_label=None):
     if not transcript_text:
         cached_source = load_transcript_diagnostic("source-by-note", os.path.abspath(filepath)) or {}
         transcript_text = str(cached_source.get("transcript") or "")
+        if transcript_text:
+            record_cache_hit("source_recovery", "source_evidence")
     content = _ensure_video_summary_placeholders(content)
     rejected_findings = []
     proofread_value = section_text(content, SECTION_NAMES["校对正文"])
@@ -1462,6 +1494,7 @@ def generate_summary(filepath, progress_label=None):
         if not validation.complete:
             return SummaryOutcome("failed", missing_sections=validation.missing_sections,
                                   message="；".join(validation.errors))
+        record_cache_hit("video_organization", "completed_output")
         changed = apply_original_subtitle_preference(filepath)
         return SummaryOutcome("completed" if changed else "no_changes", changed=changed,
                               completed_sections=validation.completed_sections)
@@ -1515,6 +1548,7 @@ def generate_summary(filepath, progress_label=None):
 
         primary_missing = [key for key in primary_requested if key not in sections]
         if primary_missing and completed_model_call:
+            record_retry("summary", "missing_sections")
             _wait_between_llm_calls("缺失栏目的定向补偿")
             missing_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in primary_missing)
             print(f"   🔁 {label}: 仅重试缺失栏目：{missing_labels}")

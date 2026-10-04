@@ -1,6 +1,6 @@
 # Development Plan
 
-Updated: 2026-09-29. Baseline: `0.1.28` / `6c1bb1b`.
+Updated: 2026-10-04. Baseline: `0.1.28` / `6c1bb1b`.
 
 This document describes development stages. Task status, dependencies, scope, and acceptance criteria are maintained only in the [canonical backlog](todo.md). “Baseline completed” means the initial workflow is available; it does not imply that the newly reviewed reliability gaps are resolved.
 
@@ -77,7 +77,7 @@ Candidate work:
 
 ## Stage 6: Signed Daily-Use Package (Development Build Works, Release Gate Open)
 
-Goal: package and distribute the app only after the managed runtime lifecycle works reliably.
+Goal: publicly distribute the Developer ID signed and notarized app after the managed runtime lifecycle passes independent clean-Mac acceptance. Internal ad-hoc packages support development and acceptance before that gate.
 
 Candidate work:
 
@@ -88,7 +88,7 @@ Candidate work:
 
 ## Open Todo Backlog
 
-The current development branch has completed P0 and P1 work for completion status, safe video output promotion, resumable proofreading, stage-specific configuration, transcript review and alignment, desktop profiles, and the serial task queue. The branch review fixes and deterministic regressions are recorded in `docs/progress.md`; live-model and independent GUI acceptance remain outside that evidence. These changes are not in the published 0.1.28 package. T-118 cache management and diagnostics is the next planned backlog item; exact ordering and acceptance criteria are maintained in [`docs/todo.md`](todo.md).
+0.1.29 includes the completed P0 and P1 work for completion status, safe video output promotion, resumable proofreading, stage-specific configuration, transcript review and alignment, desktop profiles, and the serial task queue, plus P2 T-118 cache management and diagnostics. Maintenance has conservative provenance/reference protection, category-specific previews, retention that defaults to off, and redacted opt-in exports. Diagnostic audit events are counted separately and retained; legacy caches without sufficient provenance remain protected. The review fixes and regressions are recorded in `docs/progress.md`. The Apple Silicon internal app/DMG passes release checks, read-only mounting, packaged Worker acceptance and an isolated native desktop smoke test; details are in [0.1.29 acceptance](acceptance-0.1.29.md). Live-model task-matrix and independent GUI/clean-Mac acceptance remain separate. T-203/T-204 remain evaluation candidates, and the clean-Mac/signing release gates remain open; exact status and acceptance criteria are maintained in [`docs/todo.md`](todo.md).
 
 The independent runtime and signed-package acceptance gates remain separate from this development sequence. An internal DMG build does not close those gates.
 

@@ -31,6 +31,7 @@ if str(_WORKER_MODULE_DIR) not in sys.path:
 
 from automation_core import (
     AutomationError,
+    GlobalTaskLock,
     TaskResult,
     audited_task,
     classify_error,
@@ -40,6 +41,8 @@ from automation_core import (
     state_dir as automation_state_dir,
     utc_now,
 )
+from cache_maintenance import handle_cache_request
+from scripts.task_diagnostics import start_run, finalize_run
 from scripts.transcript_quality import load_transcript_diagnostic, proofread_errors
 from scripts.video_contract import validate_video_note
 
@@ -84,6 +87,7 @@ BUILTIN_LLM_API_BASE = "http://127.0.0.1:8000/v1"
 BUILTIN_LLM_API_KEY = "mtplx-local"
 BUILTIN_LLM_MODEL = "mtplx-qwen38-27b-optimized-speed"
 ASR_MODEL_HINT = "Choose an existing Whisper model directory in the app Configuration, or run managed Install/Repair to download the default model."
+CACHE_ACTIONS = {"inventory", "preview", "clean", "policy", "export", "references", "auto"}
 
 
 @dataclass
@@ -151,10 +155,18 @@ class TaskRequest:
     lock_timeout_seconds: int = 0
     execution_timeout_seconds: int = 0
     dry_run: bool = False
+    cache_action: str = "inventory"
+    cache_options: dict[str, Any] = field(default_factory=dict)
     parameter_sources: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "TaskRequest":
+        cache_options = data.get("cache_options", {})
+        if not isinstance(cache_options, dict):
+            raise ValueError("cache_options must be a JSON object")
+        cache_action = str(data.get("cache_action") or "inventory")
+        if str(data.get("task") or "") == "cache-manage" and cache_action not in CACHE_ACTIONS:
+            raise ValueError("unsupported cache_action")
         opus_image_analysis = str(data.get("opus_image_analysis") or "off").strip().lower()
         if opus_image_analysis not in {"off", "ocr", "vision"}:
             raise ValueError("opus_image_analysis must be off, ocr, or vision")
@@ -225,6 +237,8 @@ class TaskRequest:
             lock_timeout_seconds=max(0, parse_int(data.get("lock_timeout_seconds"), 0)),
             execution_timeout_seconds=max(0, parse_int(data.get("execution_timeout_seconds"), 0)),
             dry_run=bool(data.get("dry_run")),
+            cache_action=cache_action,
+            cache_options=cache_options,
         )
         req.parameter_sources = {
             "proofread": "request override" if "proofread_chunk_chars" in data else "Worker defaults",
@@ -298,6 +312,11 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
     env["PYTHONUNBUFFERED"] = "1"
+    env["LOCAL_NOTE_STUDIO_RUN_ID"] = req.run_id
+    env["LOCAL_NOTE_STUDIO_TASK"] = req.task
+    env["LOCAL_NOTE_STUDIO_SOURCE_REF"] = stable_source_ref(req.source)
+    env["LOCAL_NOTE_STUDIO_SOURCE"] = req.source
+    env["LOCAL_NOTE_STUDIO_OUTPUT_DIR"] = req.output_dir
     effective_api_base, effective_api_key, effective_model = effective_llm_config(req, env)
     env["DEFAULT_LLM_API_BASE"] = effective_api_base
     env["DEFAULT_LLM_API_KEY"] = effective_api_key
@@ -2680,6 +2699,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-json", help="Task request JSON from the desktop app.")
     parser.add_argument("--request-stdin", action="store_true", help="Read one task request JSON object from stdin.")
     parser.add_argument("--task", help="Task type.")
+    parser.add_argument("--cache-action", default="inventory", choices=sorted(CACHE_ACTIONS), help="Cache maintenance action for cache-manage.")
+    parser.add_argument("--cache-options", default="{}", help="JSON object of cache selection, policy or export options.")
     parser.add_argument("--source", default="", help="URL or file path.")
     parser.add_argument("--output-dir", default="", help="Markdown output directory.")
     parser.add_argument("--output-filename", default="", help="Custom Markdown/EPUB file name for single-output tasks.")
@@ -2769,6 +2790,8 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         return TaskRequest.from_mapping(json.loads(args.request_json))
     req = TaskRequest(
         task=args.task or "",
+        cache_action=args.cache_action,
+        cache_options=json.loads(args.cache_options),
         source=args.source,
         output_dir=args.output_dir,
         output_filename=args.output_filename,
@@ -2816,6 +2839,8 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         ocr_resume=not args.no_ocr_resume,
         dry_run=args.dry_run,
     )
+    if not isinstance(req.cache_options, dict):
+        raise ValueError("cache_options must be a JSON object")
     if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
         if not 500 <= req.proofread_chunk_chars <= 8000:
             raise ValueError("proofread_chunk_chars must be between 500 and 8000")
@@ -2855,6 +2880,51 @@ READ_ONLY_TASKS = {
 
 def execute_request(req: TaskRequest, result: TaskResult) -> None:
     env = build_env(req)
+    if req.task == "cache-manage":
+        if req.cache_action not in CACHE_ACTIONS:
+            raise ValueError("unsupported cache_action")
+        if req.dry_run and cache_request_mutates(req):
+            result.details["cache"] = {"dry_run": True, "action": req.cache_action}
+            result.warnings.append("dry run: cache and retention policy were not modified")
+        else:
+            result.details["cache"] = handle_cache_request(req.cache_action, req.cache_options, env)
+        result.finish()
+        return
+    tracked = req.task not in READ_ONLY_TASKS and not req.dry_run
+    # Automatic maintenance shares the processing lock and runs before any
+    # business subprocess starts. Disabled policies have no cleanup side effects.
+    if tracked and not req.incognito_mode and env.get("LOCAL_NOTE_STUDIO_LOCK_FD"):
+        try:
+            maintenance = handle_cache_request("auto", {}, env)
+            if maintenance.get("deleted_bytes"):
+                result.details["cache_maintenance"] = maintenance
+        except (OSError, ValueError, AutomationError) as exc:
+            result.warnings.append("automatic cache maintenance skipped: " + redact_text(str(exc)))
+    diagnostic_status = result.status
+    try:
+        _execute_request(req, result, env, tracked)
+        diagnostic_status = result.status
+    except BaseException as exc:
+        code, _ = classify_error(exc)
+        diagnostic_status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+        raise
+    finally:
+        if tracked:
+            try:
+                diagnostics = finalize_run(diagnostic_status, env=env)
+                if diagnostics:
+                    result.details["diagnostics"] = diagnostics
+            except (OSError, ValueError, TypeError):
+                result.warnings.append("task diagnostics could not be persisted")
+
+
+def cache_request_mutates(req: TaskRequest) -> bool:
+    return req.cache_action in {"clean", "references", "auto"} or (
+        req.cache_action == "policy" and bool(req.cache_options)
+    )
+
+
+def _execute_request(req: TaskRequest, result: TaskResult, env: dict[str, str], tracked: bool) -> None:
     proofread = {
         "chunk_chars": int(env.get("SUMMARY_PROOFREAD_CHUNK_CHARS", "8000")),
         "context_chars_each_side": 240,
@@ -2885,6 +2955,11 @@ def execute_request(req: TaskRequest, result: TaskResult) -> None:
         "proofread": proofread,
         "summary": summary,
     }
+    if tracked:
+        try:
+            start_run(env=env, effective_config=result.details["effective_config"])
+        except (OSError, ValueError, TypeError):
+            result.warnings.append("task diagnostics could not be initialized")
     # The desktop streams worker output into its task log. Agent and MCP callers
     # use stdout for machine-readable JSON, so keep diagnostics out of that channel.
     show_effective_config = req.task in {"bilibili-url", "bilibili-favorite", "local-video"} and req.caller not in {"agent", "mcp"}
@@ -3017,7 +3092,20 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=req.output_dir,
         )
         mutating = req.task not in READ_ONLY_TASKS and not req.dry_run
-        if mutating:
+        if req.task == "cache-manage":
+            try:
+                if cache_request_mutates(req) and not req.dry_run:
+                    with GlobalTaskLock(req.task, caller, req.run_id, req.lock_timeout_seconds):
+                        execute_request(req, result)
+                else:
+                    execute_request(req, result)
+            except BaseException as exc:
+                code, retryable = classify_error(exc)
+                result.status = "failed"
+                result.counts["failed"] = 1
+                result.error = {"error_code": code, "message": redact_text(str(exc))}
+                result.retryable = retryable
+        elif mutating:
             try:
                 with audited_task(
                     result,

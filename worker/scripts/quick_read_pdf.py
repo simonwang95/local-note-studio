@@ -16,6 +16,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+if __package__:
+    from .task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_cache_hit, record_retry
+else:
+    from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_cache_hit, record_retry
+
 try:
     from pypdf import PdfReader
 except Exception:  # pragma: no cover - handled at runtime
@@ -263,6 +268,7 @@ def has_full_translation(markdown: str) -> bool:
     return len(content) >= 200 and "待处理" not in content[:200]
 
 
+@diagnostic_stage("paper_translation")
 def translate_full_text(title: str, source_path: str, page_count: int, text: str, cfg: dict[str, str]) -> str:
     max_chars = max(2000, int(cfg.get("QWEN_QUICKREAD_TRANSLATION_CHARS") or 16000))
     chunks = chunk_text(text, max_chars)
@@ -270,7 +276,7 @@ def translate_full_text(title: str, source_path: str, page_count: int, text: str
     for index, chunk in enumerate(chunks, start=1):
         print(f"translating full text chunk {index}/{len(chunks)}")
         prompt = build_translation_prompt(title, source_path, page_count, chunk, index, len(chunks))
-        translations.append(call_chat_completion(cfg, prompt).strip())
+        translations.append(call_chat_completion(cfg, prompt, stage="paper_translation").strip())
     return "\n\n".join(item for item in translations if item).strip()
 
 
@@ -336,7 +342,7 @@ def is_retryable_http_status(status_code: int) -> bool:
     return status_code in (408, 409, 425, 429, 502, 503, 504) or status_code >= 500
 
 
-def call_chat_completion(cfg: dict[str, str], prompt: str) -> str:
+def call_chat_completion(cfg: dict[str, str], prompt: str, stage: str = "paper_quickread") -> str:
     url = f"{cfg['DEFAULT_LLM_API_BASE'].rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
         "model": cfg["DEFAULT_LLM_MODEL"],
@@ -361,24 +367,41 @@ def call_chat_completion(cfg: dict[str, str], prompt: str) -> str:
     retry_count = max(0, int(cfg.get("QWEN_QUICKREAD_MAX_RETRIES") or 0))
     retry_delay = max(0.0, float(cfg.get("QWEN_QUICKREAD_RETRY_DELAY") or 0))
     last_error: Exception | None = None
+    last_reason = None
 
     for attempt in range(1, retry_count + 2):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        if attempt > 1:
+            record_retry(stage, last_reason or "transport")
+        call_id = begin_model_call(stage, cfg["DEFAULT_LLM_MODEL"], config={
+            "max_tokens": max_tokens or None, "timeout_seconds": timeout, "max_retries": retry_count,
+        })
+        call_status, call_reason, call_usage = "failed", None, None
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
-            return str(data["choices"][0]["message"]["content"]).strip()
+            call_usage = data.get("usage") if isinstance(data, dict) else None
+            content = str(data["choices"][0]["message"]["content"]).strip()
+            call_status = "completed"
+            return content
         except urllib.error.HTTPError as exc:
+            call_reason = f"http_{exc.code}"
+            last_reason = call_reason
             detail = exc.read().decode("utf-8", errors="replace")
             last_error = RuntimeError(f"LLM HTTP {exc.code}: {detail}")
             if not is_retryable_http_status(exc.code) or attempt > retry_count:
                 raise last_error from exc
         except urllib.error.URLError as exc:
+            call_reason = "connection"
+            last_reason = call_reason
             last_error = RuntimeError(f"LLM connection failed: {exc.reason}")
             if attempt > retry_count:
                 raise last_error from exc
         except (KeyError, IndexError, TypeError) as exc:
+            call_reason = "invalid_response"
             raise RuntimeError(f"unexpected LLM response: {data}") from exc
+        finally:
+            finish_model_call(call_id, stage, call_status, usage=call_usage, reason=call_reason)
         wait = retry_delay * (2 ** (attempt - 1))
         print(f"LLM request failed ({attempt}/{retry_count + 1}): {last_error}", file=sys.stderr)
         print(f"retrying in {wait:g}s", file=sys.stderr)
@@ -393,6 +416,7 @@ def output_dir_for(cfg: dict[str, str], month: str, output_dir: str | None) -> p
     return ROOT / cfg["AI_PAPER_QUICKREAD_DIR"] / month
 
 
+@diagnostic_stage("paper_quickread")
 def write_quickread(
     source: pathlib.Path,
     out_dir: pathlib.Path,
@@ -408,6 +432,7 @@ def write_quickread(
     prefix = "PROMPT" if prompt_only else "QR"
     out_path = output_path_for(out_dir, f"{prefix}-{slug}.md", output_filename)
     if out_path.exists() and not overwrite:
+        record_cache_hit("paper_quickread", "completed_output")
         print(f"skip existing: {rel(out_path)}")
         return out_path
 
