@@ -2,6 +2,8 @@
 
 Current internal release: 0.1.29 (2026-10-04), containing the P0/P1 workflow fixes and P2 T-118 cache maintenance and task diagnostics. The Apple Silicon app/DMG passed release checks, read-only mounting, packaged Worker acceptance and an isolated native desktop smoke test. Normal upgrades preserve evidence and retention settings; automatic cleanup remains off unless explicitly configured. Developer ID signing, notarization and independent clean-Mac acceptance remain open public-release gates.
 
+Local artifact retention (2026-10-05): project housekeeping removed the older 0.1.0 debug image and 0.1.26–0.1.28 DMGs. The current 0.1.29 signed app/DMG and its frontend verification assets remain intact. Older entries below retain historical build metadata; they do not imply that those files remain in the local checkout.
+
 The release build produces both `Local Note Studio.app` and a DMG. The app bundle contains the worker source but no mutable Python environment or model weights.
 
 ## Internal tester handoff

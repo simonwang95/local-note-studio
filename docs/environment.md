@@ -26,6 +26,14 @@ The July 2026 development-machine acceptance used Node.js `20.20.2` and the `cou
 
 The same `course-whisper` environment contains `mlx-whisper 0.4.3`; a normal macOS process can import `mlx_whisper` successfully. Because importing MLX initializes Metal, an environment check executed inside a headless or GPU-restricted sandbox may report `No Metal device available`. Treat that message as a runtime-permission limitation rather than a missing-package result, and repeat the import from Terminal or the installed GUI context.
 
+## Project Housekeeping
+
+Project build-file cleanup is separate from the application's T-118 cache maintenance. Once no project build/debug process is running, obsolete `src-tauri/target/debug/`, old-version DMGs, source-tree `__pycache__/` and `.DS_Store` files can be removed. Removing debug output makes the next Rust debug build/test compile again.
+
+Keep the current verified signed app and DMG under `src-tauri/target/release/bundle/`, the current `dist/assets`, and the matching `src-tauri/target/release/build/local-note-studio-*/out/tauri-codegen-assets`. The packaged acceptance script compares embedded Brotli assets against those files, so preserve the release build tree when retaining that verification path. Current dependencies in `node_modules/`, generated schemas, local settings, indexes, notes and runtime evidence have separate lifecycles.
+
+This macOS project keeps the four configured bundle icons, `icon.png` required by release checks, and `app-icon.svg` as the regeneration source. Unused generated Android/iOS/Windows icons were removed on 2026-10-05. The migration reference archive and `docs/code_list_20260612.csv` remain intentional project inputs.
+
 ## Local Path Variables
 
 Machine-specific paths belong in `worker/env.local`, not in committed source code or docs. Use placeholder paths in examples, such as `/Users/xxx/Notes`.

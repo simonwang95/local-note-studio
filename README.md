@@ -189,7 +189,7 @@ local-note-studio/
 │   ├── capabilities/default.json      # 桌面权限声明
 │   ├── tauri.conf.json                # 窗口、资源和安装包配置
 │   ├── Cargo.toml                     # Rust 依赖与包信息
-│   └── icons/                         # 应用图标资源
+│   └── icons/                         # macOS 图标、通用 PNG 与 SVG 重建源
 ├── worker/                            # Python 业务层
 │   ├── local_note_studio_worker.py    # 统一任务入口、编排与结果校验
 │   ├── automation_core.py             # 跨入口锁、任务执行与审计基础能力
@@ -237,6 +237,8 @@ local-note-studio/
 ```
 
 `dist/`、`node_modules/`、`src-tauri/target/`、`__pycache__/`、运行缓存和本机私有配置均为构建或运行时内容，不属于核心源码结构。
+
+项目整理时可移除旧版 DMG、调试构建缓存、Python 字节码和 Finder 元数据。保留当前已验收的 app/DMG、`dist/assets` 与对应的 Tauri release codegen 资产，便于复验包内容；具体范围见[环境说明](docs/environment.md#project-housekeeping)。`docs/reference/knowledge-base-docs/` 是迁移参考归档，带日期的证券代码 CSV 仍是运行依赖。
 
 ## 数据与隐私
 

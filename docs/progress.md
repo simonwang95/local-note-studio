@@ -1,5 +1,10 @@
 # Progress
 
+## 2026-10-05
+
+- Cleaned obsolete/rebuildable project output after confirming no active project build/debug process: the 4.01 GiB debug tree (including the old 0.1.0 image), 0.1.26–0.1.28 DMGs, source-tree Python bytecode and Finder metadata. Removed 47 unused generated Android/iOS/Windows icon files while preserving the configured macOS icons, release-check PNG and SVG regeneration source. Total project allocation decreased by 4,316,360,704 bytes (4.02 GiB), from 5.96 GiB to 1.94 GiB immediately after cleanup.
+- Preserved the current 0.1.29 signed app/DMG and release codegen/`dist` verification assets; all app file hashes and the DMG SHA-256 remain unchanged. Release consistency, strict/deep signature, all 37 source-resource hashes, embedded frontend assets, changed-document local links and whitespace checks pass. Kept current dependencies, runtime/user data, stock-reference CSV, migration archives, active source and tests. Clarified historical reference use, removed the stale Agent-guide version label and corrected the already-implemented desktop favorite/series selection description.
+
 ## 2026-10-04
 
 - After successful package acceptance, committed the P2/release change as `af5ceaf` and merged `codex/p0-p1-backlog` into local `main` with merge commit `a7d0c8c`. The merge tree exactly matches the verified development commit; subsequent edits only record integration in documentation. No remote push was performed.

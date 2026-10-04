@@ -39,7 +39,7 @@ Add `--dialogue-detection` for interviews or panel discussions. This performs an
 
 ## Bilibili Favorites Or Series
 
-The migrated scripts already support favorites through configured `BILIBILI_FAV_MEDIA_ID`. Cookie can be refreshed from the selected Chrome Profile in the desktop UI. In-app favorite selection remains pending.
+The desktop UI reads the logged-in account's favorites/series and lets the user choose a target before running. Cookie can be refreshed from the selected Chrome Profile. Standalone migrated scripts also support a configured `BILIBILI_FAV_MEDIA_ID`.
 The desktop UI uses `--limit 1` by default for safe testing. Set the favorite test count to `0` for a full incremental run.
 
 ```bash
