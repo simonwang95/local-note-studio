@@ -11,11 +11,29 @@ import re
 import shutil
 import subprocess
 import tempfile
+import hashlib
+import difflib
 from typing import Any
+
+from transcript_timing import _timestamp_seconds, _timestamped_transcript_segments, load_note_timing
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".ts", ".m4v"}
+
+
+def _atomic_write_text(path: pathlib.Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".lns-keyframes-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _run(command: list[str], cwd: pathlib.Path | None = None) -> tuple[int, str]:
@@ -138,13 +156,75 @@ def _structured_semantic_points(markdown: str, duration: float, max_frames: int)
     return points
 
 
+
+def _transcript_aligned_points(markdown: str, duration: float, max_frames: int, transcript: str, segments: list[dict] | None = None) -> list[dict[str, Any]]:
+    segments = segments or _timestamped_transcript_segments(transcript)
+    if not segments:
+        return _structured_semantic_points(markdown, duration, max_frames)
+    body_match = re.search(r"(?ms)^##\s+结构化正文\s*$\n(.*?)(?=^##\s+|\Z)", markdown)
+    visible = body_match.group(1) if body_match else markdown.split("## 校对正文", 1)[0]
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", visible) if block.strip()]
+    selected = []
+    for index, block in enumerate(blocks):
+        if block.startswith("#"):
+            continue
+        plain = re.sub(r"[>`*_\[\]()#-]", "", block)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if len(plain) < 18:
+            continue
+        best: tuple[float, dict[str, Any]] | None = None
+        compact = re.sub(r"[^\w\u4e00-\u9fff]+", "", plain).lower()
+        for segment in segments:
+            source = re.sub(r"[^\w\u4e00-\u9fff]+", "", segment["text"]).lower()
+            if not source:
+                continue
+            if compact in source or source in compact:
+                score = min(len(compact), len(source)) / max(len(compact), len(source), 1)
+            else:
+                score = difflib.SequenceMatcher(None, compact[:240], source[:240], autojunk=False).ratio()
+            if best is None or score > best[0]:
+                best = (score, segment)
+        confidence, matched = best if best else (0.0, {})
+        # Keep weak matches visibly estimated rather than presenting false precision.
+        if confidence < 0.42:
+            ratio = (index + 0.5) / max(len(blocks), 1)
+            selected.append({"timestamp": max(2.0, min(duration - 2.0, ratio * duration)),
+                             "section": "内容要点", "snippet": plain[:110],
+                             "alignment": "estimated", "confidence": "low"})
+            continue
+        selected.append({
+            "timestamp": round((float(matched["start"]) + float(matched["end"])) / 2, 2),
+            "range_start": round(float(matched["start"]), 2),
+            "range_end": round(float(matched["end"]), 2),
+            "section": "结构化正文", "snippet": str(matched["text"])[:110],
+            "alignment": "transcript-match",
+            "confidence": "high" if confidence >= 0.62 else "medium",
+            "match_score": round(confidence, 3),
+        })
+    if not selected:
+        return _structured_semantic_points(markdown, duration, max_frames)
+    # Space chosen moments through the timeline and cap results as before.
+    chosen: list[dict[str, Any]] = []
+    for point in sorted(selected, key=lambda item: float(item["timestamp"])):
+        if any(abs(float(point["timestamp"]) - float(old["timestamp"])) < max(5.0, duration / (max_frames * 2)) for old in chosen):
+            continue
+        chosen.append(point)
+        if len(chosen) >= max_frames:
+            break
+    return chosen
+
+
 def _snap_semantic_timestamps(points: list[dict[str, Any]], scenes: list[float], duration: float) -> list[dict[str, Any]]:
     snapped: list[dict[str, Any]] = []
     max_distance = max(12.0, duration * 0.08)
     for point in points:
         target = float(point["timestamp"])
         nearest = min(scenes, key=lambda value: abs(value - target), default=target)
-        timestamp = nearest if abs(nearest - target) <= max_distance else target
+        if point.get("alignment") == "transcript-match":
+            start, end = float(point.get("range_start", target)), float(point.get("range_end", target))
+            timestamp = nearest if start <= nearest <= end else target
+        else:
+            timestamp = nearest if abs(nearest - target) <= max_distance else target
         snapped.append({**point, "timestamp": round(timestamp, 2)})
     return snapped
 
@@ -241,9 +321,10 @@ def _format_timestamp(seconds: float) -> str:
 
 
 def _keyframe_section(asset_dir_name: str, frames: list[dict[str, str]]) -> str:
+    has_aligned = any(frame.get("alignment") == "transcript-match" for frame in frames)
     lines = [
         "## 关键帧图文笔记",
-        "> 关键帧优先对齐结构化正文中的核心论点，并经过黑屏、转场和近似画面过滤；语义位置仍是估算值，不等同于严格时间轴字幕。",
+        "> 关键帧按校对正文对应的转写片段定位，并经过黑屏、转场和近似画面过滤。时间标记会注明转写匹配或估算方式；估算位置不等同于字幕时间轴。" if has_aligned else "> 原转写没有可用时间戳，本组位置按笔记内容比例估算，可信度较低；不代表精确字幕时间。",
     ]
     for frame in frames:
         lines.extend(
@@ -254,6 +335,7 @@ def _keyframe_section(asset_dir_name: str, frames: list[dict[str, str]]) -> str:
                 f"![{frame['title']}](assets/{asset_dir_name}/{frame['file_name']})",
                 "",
                 f"> 相关摘录：{frame['snippet'] or '该位置未抽取到可用文本。'}",
+                f"> 对齐：{frame.get('alignment_label', '按内容位置估算')} · 可信度：{frame.get('confidence', 'low')} · 原文范围：{frame.get('range_label', '无时间戳')}",
             ]
         )
     return "\n".join(lines).strip()
@@ -316,12 +398,15 @@ def add_keyframes_to_note(
         transcript_text = _extract_transcript_text(markdown)
         duration = _ffprobe_duration(video_path)
         scenes = _scene_timestamps(video_path, max_frames * 5)
-        semantic = _snap_semantic_timestamps(_structured_semantic_points(markdown, duration, max_frames), scenes, duration)
+        semantic = _snap_semantic_timestamps(
+            _transcript_aligned_points(markdown, duration, max_frames, transcript_text, load_note_timing(note_path)), scenes, duration
+        )
         fallback = [
-            {"timestamp": value, "section": "内容回看", "snippet": ""}
+            {"timestamp": value, "section": "内容回看", "snippet": "", "alignment": "estimated", "confidence": "low"}
             for value in _choose_timestamps(duration, scenes, max_frames * 3)
         ]
-        candidates = sorted([*semantic, *fallback], key=lambda item: float(item["timestamp"]))
+        # Prefer source-backed passage matches before filling unused slots by time.
+        candidates = sorted(semantic, key=lambda item: item.get("alignment") != "transcript-match") + fallback
         selected: list[dict[str, Any]] = []
         fingerprints: list[bytes] = []
         for candidate in candidates:
@@ -338,7 +423,12 @@ def add_keyframes_to_note(
         if not selected:
             return {"enabled": True, "status": "skipped", "reason": "no keyframe timestamps detected", "assets": []}
 
-        asset_dir = note_path.parent / "assets" / f"{note_path.stem}-keyframes"
+        selected.sort(key=lambda item: float(item["timestamp"]))
+        source_fingerprint = hashlib.sha256((
+            f"{video_path.resolve()}\n{video_path.stat().st_size}\n{video_path.stat().st_mtime_ns}\n{duration:.3f}\n"
+            + json.dumps(selected, ensure_ascii=False, sort_keys=True)
+        ).encode("utf-8")).hexdigest()[:10]
+        asset_dir = note_path.parent / "assets" / f"{note_path.stem}-keyframes-{source_fingerprint}"
         asset_dir.mkdir(parents=True, exist_ok=True)
         frames: list[dict[str, str]] = []
         for index, candidate in enumerate(selected, start=1):
@@ -354,16 +444,18 @@ def add_keyframes_to_note(
                     "snippet": str(candidate.get("snippet") or "") or _snippet_for_timestamp(transcript_text, timestamp, duration),
                     "timestamp": _format_timestamp(timestamp),
                     "timestamp_seconds": f"{timestamp:.2f}",
+                    "range_start": f"{float(candidate.get('range_start', timestamp)):.2f}",
+                    "range_end": f"{float(candidate.get('range_end', timestamp)):.2f}",
+                    "alignment": str(candidate.get("alignment") or "estimated"),
+                    "confidence": str(candidate.get("confidence") or "low"),
+                    "match_score": str(candidate.get("match_score") or ""),
+                    "alignment_label": "转写片段匹配" if candidate.get("alignment") == "transcript-match" else "按内容位置估算",
+                    "range_label": f"{_format_timestamp(float(candidate.get('range_start', timestamp)))}–{_format_timestamp(float(candidate.get('range_end', timestamp)))}" if candidate.get("alignment") == "transcript-match" else "无时间戳",
                 }
             )
 
-        expected = {frame["file_name"] for frame in frames}
-        for old_path in asset_dir.glob("frame-*.jpg"):
-            if old_path.name not in expected:
-                old_path.unlink(missing_ok=True)
-
         markdown = _replace_or_insert_keyframe_section(markdown, _keyframe_section(asset_dir.name, frames))
-        note_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
+        _atomic_write_text(note_path, markdown.rstrip() + "\n")
 
         result = {
             "enabled": True,
@@ -377,12 +469,17 @@ def add_keyframes_to_note(
                     "section": frame["section"],
                     "source_video": str(video_path),
                     "resource_path": f"assets/{asset_dir.name}/{frame['file_name']}",
+                    "transcript_range_seconds": [float(frame["range_start"]), float(frame["range_end"])],
+                    "alignment": frame["alignment"],
+                    "confidence": frame["confidence"],
+                    "match_score": float(frame["match_score"]) if frame["match_score"] else None,
                 }
                 for frame in frames
             ],
         }
         if os.environ.get("KEYFRAME_MANIFEST_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}:
-            (asset_dir / "keyframes-manifest.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            manifest_path = asset_dir / "keyframes-manifest.json"
+            _atomic_write_text(manifest_path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return result
     finally:
         if video_path.parent.name.startswith("local-note-bili-video-"):

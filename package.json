@@ -1,6 +1,6 @@
 {
   "name": "local-note-studio",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "dev:vite": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "dev:stop": "node scripts/stop-dev-server.mjs",
     "build": "tsc && vite build",
-    "check:frontend": "node tests/test_p1.mjs",
+    "check:frontend": "node tests/test_p1.mjs && node tests/test_cache_frontend.mjs",
     "check:python": "PYTHONPYCACHEPREFIX=/tmp/local-note-studio-pycache python3 -m compileall -q worker tests && PYTHONPYCACHEPREFIX=/tmp/local-note-studio-pycache python3 -m unittest discover -s tests -v",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check": "npm run build && npm run check:frontend && npm run check:python && npm run test:rust",

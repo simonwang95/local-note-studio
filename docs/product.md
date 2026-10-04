@@ -42,4 +42,4 @@ The canonical prioritized backlog is [`docs/todo.md`](todo.md).
 
 ## Distribution Principle
 
-The macOS package depends on a working app-managed runtime. Python, worker packages, command-line tools and the default ASR model are installed and versioned under Application Support; they are not expected to be present in conda or Homebrew. Packaging, signing, and notarization begin only after this lifecycle passes clean-Mac installation, upgrade, repair, and removal tests.
+The macOS package depends on a working app-managed runtime. Python, worker packages, command-line tools and the default ASR model are installed and versioned under Application Support; they are not expected to be present in conda or Homebrew. Public Developer ID signed and notarized distribution begins only after this lifecycle passes independent clean-Mac installation, upgrade, repair, and removal tests. Internal ad-hoc packages can be built earlier for development and acceptance.

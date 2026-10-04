@@ -65,7 +65,7 @@ class TranscriptQualityTests(unittest.TestCase):
     def test_quality_retry_uses_original_chunk_then_accepts_repaired_text(self):
         bad = batch.LLMResponse("[[LNS_SECTION:proofread]]" + "产业企业研究逻辑" * 30 + "[[/LNS_SECTION:proofread]]", "stop")
         good = batch.LLMResponse("[[LNS_SECTION:proofread]]产业研究需要关注订单。[[/LNS_SECTION:proofread]]", "stop")
-        with mock.patch.object(batch, "_call_llm", side_effect=[bad, good]) as call, mock.patch.object(batch, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0):
+        with mock.patch.object(batch, "_call_llm", side_effect=[bad, good]) as call, mock.patch.object(batch, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0), mock.patch.object(batch, "SUMMARY_PROOFREAD_COOLDOWN_DELAY", 0), mock.patch.object(batch, "save_transcript_diagnostic"):
             self.assertEqual(batch._run_chunked_proofread("测试", "标题", "产业研究需要关注订单"), "产业研究需要关注订单。")
         self.assertEqual(call.call_count, 2)
         self.assertIn("转录文本分段：\n产业研究需要关注订单", call.call_args.args[1])
@@ -74,7 +74,7 @@ class TranscriptQualityTests(unittest.TestCase):
     def test_readonly_context_carries_question_across_boundary_without_duplication(self):
         responses = [batch.LLMResponse("[[LNS_SECTION:proofread]]我说五成仓，[[/LNS_SECTION:proofread]]", "stop"),
                      batch.LLMResponse("[[LNS_SECTION:proofread]]你们就一定要照做吗？[[/LNS_SECTION:proofread]]", "stop")]
-        with mock.patch.object(batch, "_chunk_text_with_overlap", return_value=["我说五成仓", "你们就一定要照做"]), mock.patch.object(batch, "_call_llm", side_effect=responses) as call, mock.patch.object(batch, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0):
+        with mock.patch.object(batch, "_chunk_text_with_overlap", return_value=["我说五成仓", "你们就一定要照做"]), mock.patch.object(batch, "_call_llm", side_effect=responses) as call, mock.patch.object(batch, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0), mock.patch.object(batch, "SUMMARY_PROOFREAD_COOLDOWN_DELAY", 0), mock.patch.object(batch, "save_transcript_diagnostic"):
             text = batch._run_chunked_proofread("测试", "反问", "我说五成仓你们就一定要照做")
         self.assertIn("只读后文：你们就一定要照做", call.call_args_list[0].args[1])
         self.assertIn("只读前文：我说五成仓", call.call_args_list[1].args[1])

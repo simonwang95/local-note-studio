@@ -295,6 +295,13 @@ fn emit_log(app: &tauri::AppHandle, line: &str) {
 }
 
 fn app_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Some(root) = configured_app_data_root(
+        std::env::var("LOCAL_NOTE_STUDIO_APP_DATA_DIR")
+            .ok()
+            .as_deref(),
+    )? {
+        return Ok(root);
+    }
     #[cfg(target_os = "macos")]
     {
         return app
@@ -305,6 +312,17 @@ fn app_data_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     }
     #[allow(unreachable_code)]
     app.path().app_data_dir().map_err(|err| err.to_string())
+}
+
+fn configured_app_data_root(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err("LOCAL_NOTE_STUDIO_APP_DATA_DIR must be an absolute path".to_string());
+    }
+    Ok(Some(path))
 }
 
 fn request_string(request: &str, key: &str) -> Option<String> {
@@ -1261,6 +1279,18 @@ mod tests {
             request_runtime_backend(r#"{"runtime_backend":"conda"}"#),
             "conda"
         );
+    }
+
+    #[test]
+    fn isolated_app_data_override_requires_an_explicit_absolute_path() {
+        assert_eq!(configured_app_data_root(None).unwrap(), None);
+        assert_eq!(configured_app_data_root(Some("  ")).unwrap(), None);
+        assert_eq!(
+            configured_app_data_root(Some(" /private/tmp/lns-release-test ")).unwrap(),
+            Some(PathBuf::from("/private/tmp/lns-release-test"))
+        );
+        assert!(configured_app_data_root(Some("relative/state")).is_err());
+        assert!(configured_app_data_root(Some("~/Library/test")).is_err());
     }
 
     #[test]

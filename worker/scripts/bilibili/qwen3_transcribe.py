@@ -17,8 +17,41 @@ Qwen3-ASR 转录辅助脚本 v1.3
 """
 
 import argparse
+import hashlib
 import os
+from pathlib import Path
 import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call
+from transcript_quality import save_transcript_diagnostic
+
+
+@diagnostic_stage("asr", lambda text: "completed" if text.strip() else "failed")
+def transcribe_with_diagnostics(model, audio_path, model_name, device_map):
+    call_id = begin_model_call("asr", os.path.basename(model_name), provider="local_asr",
+                               config={"device_map": device_map})
+    status = "failed"
+    try:
+        results = model.transcribe(audio_path)
+        status = "completed"
+    finally:
+        # This local provider does not expose tokens. Retain unknown usage.
+        finish_model_call(call_id, "asr", status, reason="asr_error" if status == "failed" else None)
+    transcript = results[0].text if results else ""
+    audio_hash = hashlib.sha256()
+    with open(audio_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            audio_hash.update(chunk)
+    save_transcript_diagnostic("asr", audio_hash.hexdigest() + str(time.time_ns()), {
+        "schema_version": 1, "audio_sha256": audio_hash.hexdigest(),
+        "source_ref": os.environ.get("ASR_SOURCE_REF", audio_path),
+        "duration_seconds": None, "model": os.path.basename(model_name),
+        "parameters": {"device_map": device_map}, "text": transcript,
+        "errors": [] if transcript.strip() else ["ASR未返回可用文字"],
+    })
+    return transcript
 
 
 def detect_device():
@@ -127,8 +160,7 @@ def main():
         print(f"   ✅ 模型加载完成", file=sys.stderr)
         print(f"   🎤 正在转录...", file=sys.stderr)
 
-        results = model.transcribe(args.audio)
-        transcript = results[0].text if results else ""
+        transcript = transcribe_with_diagnostics(model, args.audio, model_name, device_map)
 
         if not transcript or transcript.strip() == "":
             print("错误: 转录结果为空", file=sys.stderr)

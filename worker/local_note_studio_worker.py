@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 _WORKER_MODULE_DIR = pathlib.Path(__file__).resolve().parent
@@ -31,6 +31,7 @@ if str(_WORKER_MODULE_DIR) not in sys.path:
 
 from automation_core import (
     AutomationError,
+    GlobalTaskLock,
     TaskResult,
     audited_task,
     classify_error,
@@ -40,7 +41,10 @@ from automation_core import (
     state_dir as automation_state_dir,
     utc_now,
 )
-from scripts.transcript_quality import proofread_errors
+from cache_maintenance import handle_cache_request
+from scripts.task_diagnostics import start_run, finalize_run
+from scripts.transcript_quality import load_transcript_diagnostic, proofread_errors
+from scripts.video_contract import validate_video_note
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -83,6 +87,7 @@ BUILTIN_LLM_API_BASE = "http://127.0.0.1:8000/v1"
 BUILTIN_LLM_API_KEY = "mtplx-local"
 BUILTIN_LLM_MODEL = "mtplx-qwen38-27b-optimized-speed"
 ASR_MODEL_HINT = "Choose an existing Whisper model directory in the app Configuration, or run managed Install/Repair to download the default model."
+CACHE_ACTIONS = {"inventory", "preview", "clean", "policy", "export", "references", "auto"}
 
 
 @dataclass
@@ -122,13 +127,24 @@ class TaskRequest:
     opus_image_analysis: str = "off"
     web_capture_mode: str = "static"
     browser_executable: str = ""
-    timeout_seconds: int = 0
-    retry_count: int = 0
+    timeout_seconds: int = -1
+    retry_count: int = -1
     cooldown_delay: int = -1
-    chunk_chars: int = 0
+    chunk_chars: int = -1
     ocr_resume: bool = True
     date_in_filename: bool = False
     enable_thinking: bool = False
+    video_output_mode: str = "full"
+    proofread_chunk_chars: int = 8000
+    proofread_timeout_seconds: int = 600
+    proofread_retry_count: int = 1
+    proofread_cooldown_delay: int = -1
+    proofread_enable_thinking: bool = False
+    summary_timeout_seconds: int = -1
+    summary_retry_count: int = -1
+    summary_cooldown_delay: int = -1
+    summary_chunk_chars: int = -1
+    summary_enable_thinking: bool | None = None
     manifest_path: str = ""
     manifest_kind: str = ""
     manifest_action: str = ""
@@ -139,13 +155,25 @@ class TaskRequest:
     lock_timeout_seconds: int = 0
     execution_timeout_seconds: int = 0
     dry_run: bool = False
+    cache_action: str = "inventory"
+    cache_options: dict[str, Any] = field(default_factory=dict)
+    parameter_sources: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "TaskRequest":
+        cache_options = data.get("cache_options", {})
+        if not isinstance(cache_options, dict):
+            raise ValueError("cache_options must be a JSON object")
+        cache_action = str(data.get("cache_action") or "inventory")
+        if str(data.get("task") or "") == "cache-manage" and cache_action not in CACHE_ACTIONS:
+            raise ValueError("unsupported cache_action")
         opus_image_analysis = str(data.get("opus_image_analysis") or "off").strip().lower()
         if opus_image_analysis not in {"off", "ocr", "vision"}:
             raise ValueError("opus_image_analysis must be off, ocr, or vision")
-        return cls(
+        video_output_mode = str(data.get("video_output_mode") or "full").strip().lower()
+        if video_output_mode not in {"full", "transcription-only"}:
+            video_output_mode = "full"
+        req = cls(
             task=str(data.get("task") or ""),
             caller=str(data.get("caller") or ""),
             profile_id=str(data.get("profile_id") or ""),
@@ -172,7 +200,7 @@ class TaskRequest:
             retry_failed=parse_bool(data.get("retry_failed")),
             extract_keyframes=parse_bool(data.get("extract_keyframes")),
             dialogue_detection=parse_bool(data.get("dialogue_detection")),
-            keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", False)),
+            keep_original_subtitles=parse_bool(data.get("keep_original_subtitles", False)) or video_output_mode == "transcription-only",
             recursive_search=parse_bool(data.get("recursive_search")),
             overwrite_outputs=parse_bool(data.get("overwrite_outputs")),
             incognito_mode=parse_bool(data.get("incognito_mode")),
@@ -181,13 +209,24 @@ class TaskRequest:
             opus_image_analysis=opus_image_analysis,
             web_capture_mode=str(data.get("web_capture_mode") or "static"),
             browser_executable=str(data.get("browser_executable") or ""),
-            timeout_seconds=parse_int(data.get("timeout_seconds"), 0),
-            retry_count=parse_int(data.get("retry_count"), 0),
+            timeout_seconds=parse_optional_nonnegative_int(data.get("timeout_seconds")),
+            retry_count=parse_optional_nonnegative_int(data.get("retry_count")),
             cooldown_delay=parse_optional_nonnegative_int(data.get("cooldown_delay")),
-            chunk_chars=parse_int(data.get("chunk_chars"), 0),
+            chunk_chars=parse_optional_nonnegative_int(data.get("chunk_chars")),
             ocr_resume=parse_bool(data.get("ocr_resume", True)),
             date_in_filename=parse_bool(data.get("date_in_filename")),
             enable_thinking=parse_bool(data.get("enable_thinking")),
+            video_output_mode=video_output_mode,
+            proofread_chunk_chars=parse_int(data.get("proofread_chunk_chars"), 8000),
+            proofread_timeout_seconds=parse_int(data.get("proofread_timeout_seconds"), 600),
+            proofread_retry_count=parse_int(data.get("proofread_retry_count"), 1),
+            proofread_cooldown_delay=parse_optional_nonnegative_int(data.get("proofread_cooldown_delay")),
+            proofread_enable_thinking=parse_bool(data.get("proofread_enable_thinking")),
+            summary_timeout_seconds=parse_optional_nonnegative_int(data.get("summary_timeout_seconds")),
+            summary_retry_count=parse_optional_nonnegative_int(data.get("summary_retry_count")),
+            summary_cooldown_delay=parse_optional_nonnegative_int(data.get("summary_cooldown_delay")),
+            summary_chunk_chars=parse_optional_nonnegative_int(data.get("summary_chunk_chars")),
+            summary_enable_thinking=parse_bool(data.get("summary_enable_thinking")) if "summary_enable_thinking" in data else None,
             manifest_path=str(data.get("manifest_path") or ""),
             manifest_kind=str(data.get("manifest_kind") or ""),
             manifest_action=str(data.get("manifest_action") or ""),
@@ -198,7 +237,39 @@ class TaskRequest:
             lock_timeout_seconds=max(0, parse_int(data.get("lock_timeout_seconds"), 0)),
             execution_timeout_seconds=max(0, parse_int(data.get("execution_timeout_seconds"), 0)),
             dry_run=bool(data.get("dry_run")),
+            cache_action=cache_action,
+            cache_options=cache_options,
         )
+        req.parameter_sources = {
+            "proofread": "request override" if "proofread_chunk_chars" in data else "Worker defaults",
+            "summary_chunk_chars": "request override" if str(data.get("summary_chunk_chars", "")).strip() else ("general chunk override" if req.chunk_chars > 0 else "Worker defaults"),
+            "summary_timeout_seconds": "request override" if str(data.get("summary_timeout_seconds", "")).strip() else ("general timeout override" if req.timeout_seconds > 0 else "Worker defaults"),
+            "summary_retry_count": "request override" if str(data.get("summary_retry_count", "")).strip() else ("general retry override" if req.retry_count >= 0 else "Worker defaults"),
+            "summary_cooldown_seconds": "request override" if str(data.get("summary_cooldown_delay", "")).strip() else ("general cooldown override" if req.cooldown_delay >= 0 else "Worker defaults"),
+            "summary_thinking": "request override" if "summary_enable_thinking" in data else "general thinking setting",
+        }
+        if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
+            if not 500 <= req.proofread_chunk_chars <= 8000:
+                raise ValueError("proofread_chunk_chars must be between 500 and 8000")
+            if req.proofread_timeout_seconds < 60:
+                raise ValueError("proofread_timeout_seconds must be at least 60")
+            if not 0 <= req.proofread_retry_count <= 5:
+                raise ValueError("proofread_retry_count must be between 0 and 5")
+            if req.proofread_cooldown_delay < -1:
+                raise ValueError("proofread_cooldown_delay must be blank or non-negative")
+            if req.summary_timeout_seconds == 0 or req.summary_timeout_seconds < -1:
+                raise ValueError("summary_timeout_seconds must be blank or at least 60")
+            if req.summary_timeout_seconds > 0 and req.summary_timeout_seconds < 60:
+                raise ValueError("summary_timeout_seconds must be at least 60")
+            if req.summary_retry_count > 10:
+                raise ValueError("summary_retry_count must be at most 10")
+            if req.summary_chunk_chars == 0 or req.summary_chunk_chars < -1:
+                raise ValueError("summary_chunk_chars must be blank or positive")
+        if req.timeout_seconds == 0:
+            raise ValueError("timeout_seconds must be blank or positive; use blank to inherit the Worker default")
+        if req.chunk_chars == 0:
+            raise ValueError("chunk_chars must be blank or positive; use blank to inherit the Worker default")
+        return req
 
 
 def load_env_file(path: pathlib.Path) -> dict[str, str]:
@@ -241,6 +312,11 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
     env["PYTHONUNBUFFERED"] = "1"
+    env["LOCAL_NOTE_STUDIO_RUN_ID"] = req.run_id
+    env["LOCAL_NOTE_STUDIO_TASK"] = req.task
+    env["LOCAL_NOTE_STUDIO_SOURCE_REF"] = stable_source_ref(req.source)
+    env["LOCAL_NOTE_STUDIO_SOURCE"] = req.source
+    env["LOCAL_NOTE_STUDIO_OUTPUT_DIR"] = req.output_dir
     effective_api_base, effective_api_key, effective_model = effective_llm_config(req, env)
     env["DEFAULT_LLM_API_BASE"] = effective_api_base
     env["DEFAULT_LLM_API_KEY"] = effective_api_key
@@ -288,7 +364,8 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["BILIBILI_FAV_MEDIA_ID"] = req.collection_id
     env["EXTRACT_KEYFRAMES"] = "true" if req.extract_keyframes else "false"
     env["ENABLE_DIALOGUE_DETECTION"] = "true" if req.dialogue_detection else "false"
-    env["KEEP_ORIGINAL_SUBTITLES"] = "true" if req.keep_original_subtitles else "false"
+    env["KEEP_ORIGINAL_SUBTITLES"] = "true" if (req.keep_original_subtitles or req.video_output_mode == "transcription-only") else "false"
+    env["VIDEO_OUTPUT_MODE"] = req.video_output_mode
     env["OVERWRITE_OUTPUT"] = "true" if req.overwrite_outputs else "false"
     env["LOCAL_NOTE_STUDIO_INCOGNITO"] = "true" if req.incognito_mode else "false"
     env["VIDEO_MANIFEST_ENABLED"] = "false" if req.incognito_mode else env.get("VIDEO_MANIFEST_ENABLED", "true")
@@ -309,14 +386,16 @@ def build_env(req: TaskRequest) -> dict[str, str]:
     env["BROWSER_PROFILE"] = req.browser_profile if req.web_capture_mode == "browser" else ""
     env["OCR_RESUME"] = "true" if req.ocr_resume else "false"
     if req.timeout_seconds > 0:
+        env["LLM_TIMEOUT"] = str(req.timeout_seconds)
         env["WEB_FETCH_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
         env["QWEN_PDF_POLISH_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
         env["QWEN_QUICKREAD_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
         env["QWEN_ORGANIZE_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
         env["OPUS_IMAGE_ANALYSIS_TIMEOUT_SECONDS"] = str(req.timeout_seconds)
-    if req.retry_count > 0:
+    if req.retry_count >= 0:
         env["QWEN_QUICKREAD_MAX_RETRIES"] = str(req.retry_count)
         env["QWEN_ORGANIZE_MAX_RETRIES"] = str(req.retry_count)
+        env["LLM_MAX_RETRIES"] = str(req.retry_count)
     if req.cooldown_delay >= 0:
         delay = str(req.cooldown_delay)
         env["COOLDOWN_DELAY"] = delay
@@ -329,6 +408,25 @@ def build_env(req: TaskRequest) -> dict[str, str]:
         env["QWEN_ORGANIZE_MAX_CHARS"] = str(req.chunk_chars)
         env["QWEN_QUICKREAD_TRANSLATION_CHARS"] = str(req.chunk_chars)
         env["SUMMARY_CHUNK_CHARS"] = str(req.chunk_chars)
+    if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
+        env["SUMMARY_PROOFREAD_CHUNK_CHARS"] = str(max(500, min(8000, req.proofread_chunk_chars)))
+        env["SUMMARY_PROOFREAD_TIMEOUT"] = str(max(60, req.proofread_timeout_seconds))
+        env["SUMMARY_PROOFREAD_MAX_RETRIES"] = str(max(0, req.proofread_retry_count))
+        env["SUMMARY_PROOFREAD_ENABLE_THINKING"] = "true" if req.proofread_enable_thinking else "false"
+        if req.proofread_cooldown_delay >= 0:
+            env["SUMMARY_PROOFREAD_COOLDOWN_DELAY"] = str(req.proofread_cooldown_delay)
+        if req.summary_enable_thinking is not None:
+            env["SUMMARY_ENABLE_THINKING"] = "true" if req.summary_enable_thinking else "false"
+        if req.summary_timeout_seconds > 0:
+            env["LLM_TIMEOUT"] = str(req.summary_timeout_seconds)
+        if req.summary_retry_count >= 0:
+            env["LLM_MAX_RETRIES"] = str(req.summary_retry_count)
+        elif req.retry_count >= 0:
+            env["LLM_MAX_RETRIES"] = str(req.retry_count)
+        if req.summary_cooldown_delay >= 0:
+            env["SUMMARY_CHUNK_COOLDOWN_DELAY"] = str(req.summary_cooldown_delay)
+        if req.summary_chunk_chars > 0:
+            env["SUMMARY_CHUNK_CHARS"] = str(req.summary_chunk_chars)
     subtitle_strategy = (req.subtitle_strategy or "yt-dlp").strip().lower()
     if subtitle_strategy == "web":
         env["BILIBILI_PREFER_WEB_SUBTITLE"] = "true"
@@ -1238,7 +1336,7 @@ def _discover_bilibili_up_videos_ytdlp(req: TaskRequest) -> list[dict[str, Any]]
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=req.timeout_seconds or 300,
+            timeout=req.timeout_seconds if req.timeout_seconds > 0 else 300,
             check=False,
             pass_fds=(lock_fd,) if lock_fd >= 0 else (),
         )
@@ -1837,6 +1935,8 @@ def output_snapshot(output_dir: str) -> dict[pathlib.Path, tuple[int, int]]:
     snapshot: dict[pathlib.Path, tuple[int, int]] = {}
     for pattern in ("*.md", "*.epub"):
         for path in root.rglob(pattern):
+            if any(part in {".local-note-studio-staging", ".local-note-studio-backups", ".local-note-studio-transactions"} for part in path.parts):
+                continue
             try:
                 stat = path.stat()
             except OSError:
@@ -2259,9 +2359,13 @@ def validate_markdown_output(path: pathlib.Path, req: TaskRequest) -> list[str]:
 
     raw_subtitle = re.search(r"(?m)^(?:##\s+原始字幕|<summary>📄\s*原始字幕</summary>)", markdown) is not None
     if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
-        proofread = re.search(r"(?ms)^##\s+校对正文\s*$\n(.*?)(?=^##\s+|\Z)", markdown)
-        if proofread:
-            errors.extend("校对正文：" + error for error in proofread_errors(proofread.group(1)))
+        cached_source = load_transcript_diagnostic("source-by-note", str(path.resolve())) or {}
+        validation = validate_video_note(
+            markdown,
+            transcription_only=req.video_output_mode == "transcription-only",
+            raw_transcript_override=str(cached_source.get("transcript") or ""),
+        )
+        errors.extend(validation.errors)
         if req.keep_original_subtitles and not raw_subtitle:
             errors.append("界面要求保留原始字幕，但输出中缺少原始字幕")
         if not req.keep_original_subtitles and raw_subtitle:
@@ -2420,7 +2524,40 @@ def increment_existing_complete(result: TaskResult, count: int) -> None:
 
 
 def record_batch_task_summaries(output: str, result: TaskResult, req: TaskRequest) -> None:
-    for line in output.splitlines():
+    lines = output.splitlines()
+    transaction_lines = [line for line in lines if line.startswith("VIDEO_TRANSACTION_RESULT_JSON:")]
+    if transaction_lines:
+        lines = transaction_lines
+    for line in lines:
+        if line.startswith("VIDEO_TRANSACTION_RESULT_JSON:"):
+            try:
+                payload = json.loads(line.split(":", 1)[1])
+            except ValueError:
+                continue
+            total = max(0, parse_int(payload.get("total"), 0))
+            created = max(0, parse_int(payload.get("created"), 0))
+            updated = max(0, parse_int(payload.get("updated"), 0))
+            skipped = max(0, parse_int(payload.get("skipped"), 0))
+            failed = max(0, parse_int(payload.get("failed"), 0))
+            if result.counts.get("discovered", 0) == 0:
+                result.counts["discovered"] = total
+            result.counts["skipped"] += skipped
+            result.counts["failed"] = max(result.counts.get("failed", 0), failed)
+            if skipped and result.counts.get("discovered", 0) == skipped:
+                increment_existing_complete(result, skipped)
+            result.details["video_transaction"] = {
+                "total": total,
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+                "failed": failed,
+                "recovery_dir": str(payload.get("recovery_dir") or ""),
+                "error": str(payload.get("error") or ""),
+            }
+            if failed:
+                result.status = "partial_failed" if created + updated + skipped else "failed"
+                result.warnings.append("some video outputs remain in their transaction recovery directory")
+            continue
         if line.startswith("LOCAL_BATCH_RESULT_JSON:"):
             try:
                 payload = json.loads(line.split(":", 1)[1])
@@ -2432,6 +2569,7 @@ def record_batch_task_summaries(output: str, result: TaskResult, req: TaskReques
             failed = max(0, parse_int(payload.get("failed"), 0))
             result.counts["discovered"] += total
             result.counts["skipped"] += skipped
+            result.counts["failed"] += failed
             increment_existing_complete(result, skipped)
             result.details["local_media_batch"] = {
                 "total": total,
@@ -2443,6 +2581,9 @@ def record_batch_task_summaries(output: str, result: TaskResult, req: TaskReques
                 f"[本地媒体] 已检查 {total} 个：新建/更新 {changed}，无需更新 {skipped}，失败 {failed}。",
                 flush=True,
             )
+            if failed:
+                result.status = "partial_failed" if changed + skipped else "failed"
+                result.warnings.append("some local video notes remain incomplete; raw transcripts were kept for recovery")
             continue
         if line.startswith("BATCH_RESULT_JSON:") and req.task == "bilibili-favorite":
             try:
@@ -2460,7 +2601,7 @@ def record_batch_task_summaries(output: str, result: TaskResult, req: TaskReques
             else:
                 print(f"[视频批量] 已处理 {total} 个：完成 {success}，失败 {failed}。", flush=True)
             if failed:
-                result.status = "partial_failed"
+                result.status = "partial_failed" if success else "failed"
                 result.warnings.append("some collection videos failed; use retry-failed after correcting the cause")
 
 
@@ -2558,6 +2699,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-json", help="Task request JSON from the desktop app.")
     parser.add_argument("--request-stdin", action="store_true", help="Read one task request JSON object from stdin.")
     parser.add_argument("--task", help="Task type.")
+    parser.add_argument("--cache-action", default="inventory", choices=sorted(CACHE_ACTIONS), help="Cache maintenance action for cache-manage.")
+    parser.add_argument("--cache-options", default="{}", help="JSON object of cache selection, policy or export options.")
     parser.add_argument("--source", default="", help="URL or file path.")
     parser.add_argument("--output-dir", default="", help="Markdown output directory.")
     parser.add_argument("--output-filename", default="", help="Custom Markdown/EPUB file name for single-output tasks.")
@@ -2610,10 +2753,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--web-capture-mode", default="static", choices=["static", "browser"], help="Use static HTTP or an explicit browser session for webpages.")
     parser.add_argument("--browser-executable", default="", help="Chrome/Chromium executable for browser-session webpage capture.")
-    parser.add_argument("--timeout-seconds", type=int, default=0, help="Per-task network/model timeout override.")
-    parser.add_argument("--retry-count", type=int, default=0, help="Per-task retry-count override.")
+    parser.add_argument("--timeout-seconds", type=int, default=None, help="Per-task timeout override; omit to inherit, 0 is invalid.")
+    parser.add_argument("--retry-count", type=int, default=None, help="Per-task retry-count override; 0 disables retries.")
     parser.add_argument("--cooldown-delay", type=int, default=None, help="Delay between adjacent model calls; 0 disables it.")
-    parser.add_argument("--chunk-chars", type=int, default=0, help="Per-task model chunk-size override.")
+    parser.add_argument("--chunk-chars", type=int, default=None, help="Per-task model chunk-size override; omit to inherit.")
+    parser.add_argument("--video-output-mode", default="full", choices=["full", "transcription-only"], help="Video note contract; transcription-only retains raw transcript and skips summarization.")
+    parser.add_argument("--proofread-chunk-chars", type=int, default=8000, help="Video proofreading chunk length (500-8000 characters).")
+    parser.add_argument("--proofread-timeout-seconds", type=int, default=600, help="Timeout per video proofreading request; minimum 60 seconds.")
+    parser.add_argument("--proofread-retry-count", type=int, default=1, help="Quality retries per proofreading chunk (0-5).")
+    parser.add_argument("--proofread-cooldown-delay", type=int, default=-1, help="Video proofreading cooldown; -1 inherits the general cooldown.")
+    parser.add_argument("--proofread-enable-thinking", action="store_true", help="Enable model thinking during video proofreading.")
+    parser.add_argument("--summary-chunk-chars", type=int, default=-1, help="Video summary chunk length; -1 inherits general/default.")
+    parser.add_argument("--summary-timeout-seconds", type=int, default=-1, help="Video summary timeout; -1 inherits general/default.")
+    parser.add_argument("--summary-retry-count", type=int, default=-1, help="Video summary retries; -1 inherits general/default, 0 disables.")
+    parser.add_argument("--summary-cooldown-delay", type=int, default=-1, help="Video summary cooldown; -1 inherits general/default, 0 disables.")
+    parser.add_argument("--summary-enable-thinking", action=argparse.BooleanOptionalAction, default=None, help="Override thinking for video summary generation.")
     parser.add_argument("--no-ocr-resume", action="store_true", help="Disable OCR checkpoint resume.")
     parser.add_argument("--dry-run", action="store_true", help="Print command without running.")
     return parser.parse_args(argv)
@@ -2634,8 +2788,10 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         return TaskRequest.from_mapping(data)
     if args.request_json:
         return TaskRequest.from_mapping(json.loads(args.request_json))
-    return TaskRequest(
+    req = TaskRequest(
         task=args.task or "",
+        cache_action=args.cache_action,
+        cache_options=json.loads(args.cache_options),
         source=args.source,
         output_dir=args.output_dir,
         output_filename=args.output_filename,
@@ -2665,13 +2821,52 @@ def request_from_args(args: argparse.Namespace) -> TaskRequest:
         opus_image_analysis=args.opus_image_analysis,
         web_capture_mode=args.web_capture_mode,
         browser_executable=args.browser_executable,
-        timeout_seconds=args.timeout_seconds,
-        retry_count=args.retry_count,
+        timeout_seconds=parse_optional_nonnegative_int(args.timeout_seconds),
+        retry_count=parse_optional_nonnegative_int(args.retry_count),
         cooldown_delay=args.cooldown_delay if args.cooldown_delay is not None else -1,
-        chunk_chars=args.chunk_chars,
+        chunk_chars=parse_optional_nonnegative_int(args.chunk_chars),
+        video_output_mode=args.video_output_mode,
+        proofread_chunk_chars=args.proofread_chunk_chars,
+        proofread_timeout_seconds=args.proofread_timeout_seconds,
+        proofread_retry_count=args.proofread_retry_count,
+        proofread_cooldown_delay=args.proofread_cooldown_delay,
+        proofread_enable_thinking=args.proofread_enable_thinking,
+        summary_chunk_chars=args.summary_chunk_chars,
+        summary_timeout_seconds=args.summary_timeout_seconds,
+        summary_retry_count=args.summary_retry_count,
+        summary_cooldown_delay=args.summary_cooldown_delay,
+        summary_enable_thinking=args.summary_enable_thinking,
         ocr_resume=not args.no_ocr_resume,
         dry_run=args.dry_run,
     )
+    if not isinstance(req.cache_options, dict):
+        raise ValueError("cache_options must be a JSON object")
+    if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
+        if not 500 <= req.proofread_chunk_chars <= 8000:
+            raise ValueError("proofread_chunk_chars must be between 500 and 8000")
+        if req.proofread_timeout_seconds < 60:
+            raise ValueError("proofread_timeout_seconds must be at least 60")
+        if not 0 <= req.proofread_retry_count <= 5:
+            raise ValueError("proofread_retry_count must be between 0 and 5")
+        if req.summary_timeout_seconds == 0 or (0 < req.summary_timeout_seconds < 60):
+            raise ValueError("summary_timeout_seconds must be -1 or at least 60")
+        if req.summary_retry_count > 10:
+            raise ValueError("summary_retry_count must be at most 10")
+        if req.summary_chunk_chars == 0:
+            raise ValueError("summary_chunk_chars must be -1 or positive")
+        if req.timeout_seconds == 0:
+            raise ValueError("timeout_seconds must be omitted or positive")
+        if req.chunk_chars == 0:
+            raise ValueError("chunk_chars must be omitted or positive")
+    req.parameter_sources = {
+        "proofread": "CLI flags",
+        "summary_chunk_chars": "CLI flag" if req.summary_chunk_chars >= 0 else ("general chunk override" if req.chunk_chars > 0 else "Worker defaults"),
+        "summary_timeout_seconds": "CLI flag" if req.summary_timeout_seconds >= 0 else ("general timeout override" if req.timeout_seconds > 0 else "Worker defaults"),
+        "summary_retry_count": "CLI flag" if req.summary_retry_count >= 0 else ("general retry override" if req.retry_count >= 0 else "Worker defaults"),
+        "summary_cooldown_seconds": "CLI flag" if req.summary_cooldown_delay >= 0 else ("general cooldown override" if req.cooldown_delay >= 0 else "Worker defaults"),
+        "summary_thinking": "CLI flag" if req.summary_enable_thinking is not None else "general thinking setting",
+    }
+    return req
 
 
 READ_ONLY_TASKS = {
@@ -2685,7 +2880,92 @@ READ_ONLY_TASKS = {
 
 def execute_request(req: TaskRequest, result: TaskResult) -> None:
     env = build_env(req)
-    if req.cooldown_delay >= 0:
+    if req.task == "cache-manage":
+        if req.cache_action not in CACHE_ACTIONS:
+            raise ValueError("unsupported cache_action")
+        if req.dry_run and cache_request_mutates(req):
+            result.details["cache"] = {"dry_run": True, "action": req.cache_action}
+            result.warnings.append("dry run: cache and retention policy were not modified")
+        else:
+            result.details["cache"] = handle_cache_request(req.cache_action, req.cache_options, env)
+        result.finish()
+        return
+    tracked = req.task not in READ_ONLY_TASKS and not req.dry_run
+    # Automatic maintenance shares the processing lock and runs before any
+    # business subprocess starts. Disabled policies have no cleanup side effects.
+    if tracked and not req.incognito_mode and env.get("LOCAL_NOTE_STUDIO_LOCK_FD"):
+        try:
+            maintenance = handle_cache_request("auto", {}, env)
+            if maintenance.get("deleted_bytes"):
+                result.details["cache_maintenance"] = maintenance
+        except (OSError, ValueError, AutomationError) as exc:
+            result.warnings.append("automatic cache maintenance skipped: " + redact_text(str(exc)))
+    diagnostic_status = result.status
+    try:
+        _execute_request(req, result, env, tracked)
+        diagnostic_status = result.status
+    except BaseException as exc:
+        code, _ = classify_error(exc)
+        diagnostic_status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+        raise
+    finally:
+        if tracked:
+            try:
+                diagnostics = finalize_run(diagnostic_status, env=env)
+                if diagnostics:
+                    result.details["diagnostics"] = diagnostics
+            except (OSError, ValueError, TypeError):
+                result.warnings.append("task diagnostics could not be persisted")
+
+
+def cache_request_mutates(req: TaskRequest) -> bool:
+    return req.cache_action in {"clean", "references", "auto"} or (
+        req.cache_action == "policy" and bool(req.cache_options)
+    )
+
+
+def _execute_request(req: TaskRequest, result: TaskResult, env: dict[str, str], tracked: bool) -> None:
+    proofread = {
+        "chunk_chars": int(env.get("SUMMARY_PROOFREAD_CHUNK_CHARS", "8000")),
+        "context_chars_each_side": 240,
+        "thinking": env.get("SUMMARY_PROOFREAD_ENABLE_THINKING", "false").lower() == "true",
+        "timeout_seconds": int(env.get("SUMMARY_PROOFREAD_TIMEOUT", "600")),
+        "quality_retries": int(env.get("SUMMARY_PROOFREAD_MAX_RETRIES", "1")),
+        "cooldown_seconds": float(env.get("SUMMARY_PROOFREAD_COOLDOWN_DELAY", "0")),
+        "min_chars": int(env.get("SUMMARY_PROOFREAD_MIN_CHARS", "500")),
+        "max_split_depth": int(env.get("SUMMARY_PROOFREAD_MAX_SPLIT_DEPTH", "2")),
+        "call_budget": int(env.get("SUMMARY_PROOFREAD_CALL_BUDGET", "24")),
+        "source": req.parameter_sources.get("proofread", "Worker defaults"),
+    }
+    summary = {
+        "chunk_chars": int(env.get("SUMMARY_CHUNK_CHARS", "60000")),
+        "thinking": env.get("SUMMARY_ENABLE_THINKING", "false").lower() == "true",
+        "timeout_seconds": int(env.get("LLM_TIMEOUT", "1800")),
+        "retries": int(env.get("LLM_MAX_RETRIES", "2")),
+        "cooldown_seconds": float(env.get("SUMMARY_CHUNK_COOLDOWN_DELAY", "0")),
+        "max_output_tokens": int(env.get("SUMMARY_MAX_TOKENS", "80000")),
+        "source": {key: req.parameter_sources.get(key, "Worker defaults") for key in (
+            "summary_chunk_chars", "summary_timeout_seconds", "summary_retry_count", "summary_cooldown_seconds", "summary_thinking"
+        )},
+    }
+    result.details["effective_config"] = {
+        "runtime_backend": req.runtime_backend or "managed",
+        "model": effective_llm_config(req, env)[2],
+        "video_output_mode": req.video_output_mode,
+        "proofread": proofread,
+        "summary": summary,
+    }
+    if tracked:
+        try:
+            start_run(env=env, effective_config=result.details["effective_config"])
+        except (OSError, ValueError, TypeError):
+            result.warnings.append("task diagnostics could not be initialized")
+    # The desktop streams worker output into its task log. Agent and MCP callers
+    # use stdout for machine-readable JSON, so keep diagnostics out of that channel.
+    show_effective_config = req.task in {"bilibili-url", "bilibili-favorite", "local-video"} and req.caller not in {"agent", "mcp"}
+    if show_effective_config:
+        print("[有效配置] " + json.dumps(result.details["effective_config"], ensure_ascii=False, sort_keys=True), flush=True)
+    if show_effective_config and req.cooldown_delay >= 0:
         print(
             f"[参数] 模型冷却已覆盖为 {req.cooldown_delay} 秒；只在相邻的实际模型调用之间等待。",
             flush=True,
@@ -2754,9 +3034,17 @@ def execute_request(req: TaskRequest, result: TaskResult) -> None:
     command = command_for(req)
     if req.dry_run:
         sys.stdout.write(run_command(command, env, True))
-    else:
+        return
+    try:
         output = run_process(command, env)
-        record_batch_task_summaries(output, result, req)
+    except RuntimeError as exc:
+        if req.task in {"local-video", "bilibili-favorite", "bilibili-url"}:
+            record_batch_task_summaries(str(exc), result, req)
+            if result.details.get("video_transaction"):
+                validate_task_outputs(req, before, result)
+                finalize_success_result(result, req, before, processing_task=True)
+        raise
+    record_batch_task_summaries(output, result, req)
     validate_task_outputs(req, before, result)
     finalize_success_result(result, req, before, processing_task=True)
 
@@ -2804,7 +3092,20 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=req.output_dir,
         )
         mutating = req.task not in READ_ONLY_TASKS and not req.dry_run
-        if mutating:
+        if req.task == "cache-manage":
+            try:
+                if cache_request_mutates(req) and not req.dry_run:
+                    with GlobalTaskLock(req.task, caller, req.run_id, req.lock_timeout_seconds):
+                        execute_request(req, result)
+                else:
+                    execute_request(req, result)
+            except BaseException as exc:
+                code, retryable = classify_error(exc)
+                result.status = "failed"
+                result.counts["failed"] = 1
+                result.error = {"error_code": code, "message": redact_text(str(exc))}
+                result.retryable = retryable
+        elif mutating:
             try:
                 with audited_task(
                     result,
@@ -2819,7 +3120,8 @@ def main(argv: list[str] | None = None) -> int:
             except BaseException as exc:
                 if result.error is None:
                     code, retryable = classify_error(exc)
-                    result.status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+                    had_partial_success = result.status == "partial_failed" and result.counts.get("failed", 0) > 0
+                    result.status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "partial_failed" if had_partial_success else "failed"
                     result.counts["failed"] = max(1, result.counts.get("failed", 0))
                     result.error = {"error_code": code, "message": redact_text(str(exc))}
                     result.retryable = retryable
@@ -2829,7 +3131,8 @@ def main(argv: list[str] | None = None) -> int:
                     execute_request(req, result)
             except BaseException as exc:
                 code, retryable = classify_error(exc)
-                result.status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+                had_partial_success = result.status == "partial_failed" and result.counts.get("failed", 0) > 0
+                result.status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "partial_failed" if had_partial_success else "failed"
                 result.counts["failed"] = 1
                 result.error = {"error_code": code, "message": redact_text(str(exc))}
                 result.retryable = retryable

@@ -13,12 +13,16 @@
 """
 
 import csv
+import dataclasses
 import hashlib
+import json
 import os
+import pathlib
 import re
 import select
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -31,8 +35,11 @@ from mindmap_markdown import (
     mindmap_has_required_hierarchy,
     normalize_mindmap_list,
 )
-from stock_reference import build_stock_reference_prompt, build_stock_validation_section
-from transcript_quality import proofread_errors, save_transcript_diagnostic
+from stock_reference import build_stock_reference_prompt, build_stock_validation_section, sanitize_model_stock_codes
+from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_cache_hit, record_retry
+from transcript_quality import compact_text, load_transcript_diagnostic, proofread_errors, save_transcript_diagnostic
+from transcript_timing import load_note_timing, timestamp_for_position
+from video_contract import SECTION_NAMES, PLACEHOLDER_RE, raw_transcript, review_transcript_changes, section_text, validate_video_note
 
 # ===== 加载 env.local 配置 =====
 def _load_env_local():
@@ -100,6 +107,8 @@ SUMMARY_PROOFREAD_ENABLE_THINKING = (
     not in {"0", "false", "no", "off"}
 )
 SUMMARY_PROOFREAD_TIMEOUT = max(60, int(_env.get("SUMMARY_PROOFREAD_TIMEOUT", "600")))
+SUMMARY_PROOFREAD_MAX_RETRIES = max(0, int(_env.get("SUMMARY_PROOFREAD_MAX_RETRIES", "1")))
+SUMMARY_PROOFREAD_COOLDOWN_DELAY = max(0.0, float(_env.get("SUMMARY_PROOFREAD_COOLDOWN_DELAY", _env.get("COOLDOWN_DELAY", "0"))))
 SUMMARY_CHUNK_COOLDOWN_DELAY = max(0.0, float(_env.get("SUMMARY_CHUNK_COOLDOWN_DELAY", _env.get("COOLDOWN_DELAY", "0"))))
 SUMMARY_ENABLE_THINKING = (
     _env.get("SUMMARY_ENABLE_THINKING", _env.get("QWEN_ORGANIZE_ENABLE_THINKING", "false")).strip().lower()
@@ -117,6 +126,10 @@ KEEP_ORIGINAL_SUBTITLES = (
     .lower()
     not in {"0", "false", "no", "off"}
 )
+VIDEO_OUTPUT_MODE = _env.get("VIDEO_OUTPUT_MODE", "full").strip().lower()
+if VIDEO_OUTPUT_MODE not in {"full", "transcription-only"}:
+    VIDEO_OUTPUT_MODE = "full"
+LAST_LOCAL_BATCH_RESULT = {"total": 0, "changed": 0, "skipped": 0, "failed": 0}
 
 PLACEHOLDERS = {
     "one_line": "【AI待处理：请设置 SUMMARY_API_KEY 后重新运行以生成一句话概括】",
@@ -403,7 +416,21 @@ def transcribe_local_dir(local_dir, recursive=False):
         cwd=PROJECT_DIR, timeout=36000,
     )
 
-    return _extract_output_paths(result.stdout), result.returncode
+    paths = _extract_output_paths(result.stdout)
+    from run_bilibili_transcript import extract_skipped_existing_markdown_paths, stage_existing_note
+    skipped = 0
+    for path in extract_skipped_existing_markdown_paths(result.stdout):
+        if _validate_video_path(path).complete:
+            skipped += 1
+        else:
+            paths.append(str(stage_existing_note(pathlib.Path(path), dict(os.environ))))
+    LAST_LOCAL_BATCH_RESULT.update({
+        "total": len(paths) + skipped + (1 if result.returncode != 0 and not paths and not skipped else 0),
+        "changed": len(paths),
+        "skipped": skipped,
+        "failed": 1 if result.returncode != 0 else 0,
+    })
+    return paths, result.returncode
 
 
 def apply_original_subtitle_preference(filepath):
@@ -423,8 +450,11 @@ def apply_original_subtitle_preference(filepath):
             "schema_version": 1, "note_path": os.path.abspath(filepath),
             "model": SUMMARY_MODEL, "transcript": transcript,
         })
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(updated)
+        save_transcript_diagnostic("source-by-note", os.path.abspath(filepath), {
+            "schema_version": 1, "note_path": os.path.abspath(filepath),
+            "source_sha256": hashlib.sha256(transcript.encode("utf-8")).hexdigest(), "transcript": transcript,
+        })
+    _atomic_write_text(filepath, updated)
     return True
 
 
@@ -449,6 +479,7 @@ def _call_llm(
     max_retries=None,
     enable_thinking=None,
     timeout=None,
+    before_retry=None,
 ):
     """调用 LLM，返回文本及结束原因。临时错误按配置重试。"""
     if not SUMMARY_API_KEY:
@@ -471,8 +502,19 @@ def _call_llm(
     retry_count = LLM_MAX_RETRIES if max_retries is None else max(0, max_retries)
     total_attempts = max(1, retry_count + 1)
     last_error = None
+    stage = "proofread" if task_name.startswith("校对正文") else "summary"
+    last_reason = None
 
     for attempt in range(1, total_attempts + 1):
+        if attempt > 1 and before_retry is not None:
+            before_retry()
+        if attempt > 1:
+            record_retry(stage, last_reason or "transport")
+        call_id = begin_model_call(stage, SUMMARY_MODEL, config={
+            "max_tokens": payload["max_tokens"], "enable_thinking": enable_thinking,
+            "timeout_seconds": timeout or LLM_TIMEOUT, "max_retries": retry_count,
+        })
+        call_status, call_reason, call_usage = "failed", None, None
         try:
             resp = requests.post(
                 api_url,
@@ -485,6 +527,7 @@ def _call_llm(
             )
 
             if resp.status_code >= 400:
+                call_reason = f"http_{resp.status_code}"
                 preview = resp.text.strip()[:500]
                 msg = f"HTTP {resp.status_code}: {preview or resp.reason}"
                 if not _is_retryable_http_status(resp.status_code):
@@ -492,6 +535,9 @@ def _call_llm(
                 raise requests.HTTPError(msg, response=resp)
 
             resp_data = resp.json()
+            usage = (resp_data.get("usage") or {}) if isinstance(resp_data, dict) else {}
+            usage = usage if isinstance(usage, dict) else {}
+            call_usage = usage
             # LM Studio 等本地服务可能不返回 choices
             if "choices" in resp_data:
                 choice = resp_data["choices"][0]
@@ -504,7 +550,6 @@ def _call_llm(
                 raise ValueError(f"Unexpected response: {resp_data}")
 
             finish_reason = str(choice.get("finish_reason") or "") if isinstance(choice, dict) else ""
-            usage = resp_data.get("usage", {}) if isinstance(resp_data, dict) else {}
             completion_details = usage.get("completion_tokens_details") or {}
             prompt_tokens = usage.get("prompt_tokens")
             completion_tokens = usage.get("completion_tokens")
@@ -512,6 +557,7 @@ def _call_llm(
             if not content or not content.strip():
                 current_tokens = int(payload.get("max_tokens") or SUMMARY_MAX_TOKENS)
                 if finish_reason == "length" and current_tokens < SUMMARY_MAX_TOKENS_CAP:
+                    call_reason = "output_budget"
                     next_tokens = min(SUMMARY_MAX_TOKENS_CAP, max(current_tokens * 2, current_tokens + 1024))
                     payload["max_tokens"] = next_tokens
                     raise ValueError(
@@ -519,6 +565,7 @@ def _call_llm(
                         f"(max_tokens {current_tokens}->{next_tokens}, "
                         f"completion_tokens={completion_tokens}, reasoning_tokens={reasoning_tokens})"
                     )
+                call_reason = "empty_response"
                 raise ValueError(
                     "Empty LLM response "
                     f"(finish_reason={finish_reason}, completion_tokens={completion_tokens}, "
@@ -530,6 +577,7 @@ def _call_llm(
                 f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
                 f"reasoning_tokens={reasoning_tokens}, content_chars={len(content)}"
             )
+            call_status = "completed"
             return LLMResponse(
                 content=content,
                 finish_reason=finish_reason,
@@ -542,6 +590,9 @@ def _call_llm(
             raise
         except (requests.Timeout, requests.ConnectionError, requests.HTTPError, ValueError) as e:
             last_error = e
+            call_reason = call_reason or ("timeout" if isinstance(e, requests.Timeout) else
+                                         "connection" if isinstance(e, requests.ConnectionError) else "invalid_response")
+            last_reason = call_reason
             if attempt >= total_attempts:
                 break
             wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
@@ -550,12 +601,16 @@ def _call_llm(
             time.sleep(wait)
         except requests.RequestException as e:
             last_error = e
+            call_reason = "transport"
+            last_reason = call_reason
             if attempt >= total_attempts:
                 break
             wait = LLM_RETRY_DELAY * (2 ** (attempt - 1))
             print(f"   ⚠️ {task_name} 请求异常（第 {attempt}/{total_attempts} 次）: {e}")
             print(f"   ⏳ {wait:g} 秒后重试...")
             time.sleep(wait)
+        finally:
+            finish_model_call(call_id, stage, call_status, usage=call_usage, reason=call_reason)
 
     raise RuntimeError(f"{task_name} 调用失败，已重试 {retry_count} 次: {last_error}")
 
@@ -597,11 +652,98 @@ def _chunk_text_with_overlap(text, max_chars=SUMMARY_CHUNK_CHARS, overlap_chars=
     return chunks
 
 
-def _wait_between_llm_calls(next_task_name):
-    if SUMMARY_CHUNK_COOLDOWN_DELAY <= 0:
+def _chunk_text_ranges(text, max_chars):
+    """Return stable, non-overlapping source ranges using the proofreading boundary rules."""
+    normalized = text.strip()
+    chunks = _chunk_text_with_overlap(normalized, max_chars=max_chars, overlap_chars=0)
+    ranges = []
+    cursor = 0
+    for chunk in chunks:
+        start = normalized.find(chunk, cursor)
+        if start < 0:
+            start = normalized.find(chunk)
+        if start < 0:
+            continue
+        end = start + len(chunk)
+        ranges.append((start, end, chunk))
+        cursor = end
+    return ranges
+
+
+@dataclasses.dataclass(frozen=True)
+class SummaryOutcome:
+    status: str
+    changed: bool = False
+    completed_sections: tuple[str, ...] = ()
+    missing_sections: tuple[str, ...] = ()
+    message: str = ""
+
+    def __bool__(self):
+        # Compatibility for migrated callers; new code should inspect status.
+        return self.changed
+
+
+def _coerce_summary_outcome(outcome):
+    """Keep old bool-returning integrations compatible while checking the note contract."""
+    if isinstance(outcome, SummaryOutcome):
+        return outcome
+    if isinstance(outcome, bool):
+        return SummaryOutcome("completed" if outcome else "no_changes", changed=outcome)
+    return SummaryOutcome("failed", message="整理阶段返回了无法识别的完成状态")
+
+
+def _atomic_write_text(filepath, content):
+    directory = os.path.dirname(os.path.abspath(filepath))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".lns-note-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, filepath)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _checkpoint_identity(note_path, transcript_text):
+    effective = {
+        "source_hash": hashlib.sha256(transcript_text.encode("utf-8")).hexdigest(),
+        "model": SUMMARY_MODEL,
+        "prompt_version": "video-proofread-v2",
+        "chunk_chars": SUMMARY_PROOFREAD_CHUNK_CHARS,
+        "enable_thinking": SUMMARY_PROOFREAD_ENABLE_THINKING,
+        "timeout": SUMMARY_PROOFREAD_TIMEOUT,
+        "max_retries": SUMMARY_PROOFREAD_MAX_RETRIES,
+        "cooldown": SUMMARY_PROOFREAD_COOLDOWN_DELAY,
+        "max_tokens": SUMMARY_MAX_TOKENS,
+        "min_chars": os.environ.get("SUMMARY_PROOFREAD_MIN_CHARS", _env.get("SUMMARY_PROOFREAD_MIN_CHARS", "500")),
+        "max_split_depth": os.environ.get("SUMMARY_PROOFREAD_MAX_SPLIT_DEPTH", _env.get("SUMMARY_PROOFREAD_MAX_SPLIT_DEPTH", "2")),
+        "call_budget": os.environ.get("SUMMARY_PROOFREAD_CALL_BUDGET", _env.get("SUMMARY_PROOFREAD_CALL_BUDGET", "24")),
+        "domains": PROOFREAD_DOMAINS,
+        "stock_terms": A_SHARE_TERMS_ENABLED,
+        "dialogue": ENABLE_DIALOGUE_DETECTION,
+    }
+    encoded = json.dumps(effective, ensure_ascii=False, sort_keys=True)
+    path_value = pathlib.Path(note_path).expanduser().resolve()
+    stage_root = os.environ.get("VIDEO_TRANSACTION_STAGE_DIR", "").strip()
+    final_root = os.environ.get("VIDEO_TRANSACTION_FINAL_DIR", "").strip()
+    if stage_root and final_root:
+        try:
+            relative = path_value.relative_to(pathlib.Path(stage_root).expanduser().resolve())
+            path_value = pathlib.Path(final_root).expanduser().resolve() / relative
+        except ValueError:
+            pass
+    return str(path_value) + "\n" + encoded, effective
+
+
+def _wait_between_llm_calls(next_task_name, delay=None):
+    effective_delay = SUMMARY_CHUNK_COOLDOWN_DELAY if delay is None else max(0.0, delay)
+    if effective_delay <= 0:
         return
-    print(f"   ⏳ {SUMMARY_CHUNK_COOLDOWN_DELAY:g} 秒后调用{next_task_name}...")
-    time.sleep(SUMMARY_CHUNK_COOLDOWN_DELAY)
+    print(f"   ⏳ {effective_delay:g} 秒后调用{next_task_name}...")
+    time.sleep(effective_delay)
 
 
 def _run_chunked_llm(
@@ -1052,6 +1194,7 @@ def _parse_combined_summary(response, requested, transcript_text=""):
     return sections
 
 
+@diagnostic_stage("summary")
 def _run_summary_sections(label, title, transcript_text, requested):
     system_prompt, chunk_instruction, combine_instruction = _combined_summary_prompts(
         requested,
@@ -1069,61 +1212,132 @@ def _run_summary_sections(label, title, transcript_text, requested):
     return _parse_combined_summary(response, requested, transcript_text)
 
 
-def _run_chunked_proofread(label, title, transcript_text):
-    """Proofread independently, retry failed chunks once, then join losslessly."""
-    chunks = _chunk_text_with_overlap(
-        transcript_text,
-        max_chars=SUMMARY_PROOFREAD_CHUNK_CHARS,
-        overlap_chars=0,
-    )
-    if not chunks:
+@diagnostic_stage("proofread")
+def _run_chunked_proofread(label, title, transcript_text, identity_path=None):
+    """Proofread with compatible checkpoints and a bounded quality-only split retry."""
+    ranges = _chunk_text_ranges(transcript_text, SUMMARY_PROOFREAD_CHUNK_CHARS)
+    if not ranges:
         return ""
-    print(
-        f"   🧩 {label}: 校对正文共 {len(transcript_text)} 字，分为 {len(chunks)} 段 "
-        f"(每段不超过 {SUMMARY_PROOFREAD_CHUNK_CHARS} 字)"
-    )
+    checkpoint_key, metadata = _checkpoint_identity(identity_path or label, transcript_text)
+    cached = load_transcript_diagnostic("proofread-checkpoints", checkpoint_key) or {}
+    segments = cached.get("segments") if cached.get("metadata") == metadata else None
+    segment_cache = {
+        (int(row.get("start", -1)), int(row.get("end", -1)), str(row.get("source_hash", ""))): str(row.get("result", ""))
+        for row in segments or [] if isinstance(row, dict)
+    }
+    print(f"   🧩 {label}: 校对正文共 {len(transcript_text)} 字，分为 {len(ranges)} 段；默认段长 {SUMMARY_PROOFREAD_CHUNK_CHARS} 字")
+    counters = {"calls": 0, "reused": 0, "quality_retries": 0, "splits": 0}
+    max_calls = max(1, int(os.environ.get("SUMMARY_PROOFREAD_CALL_BUDGET", _env.get("SUMMARY_PROOFREAD_CALL_BUDGET", "24"))))
+    max_depth = max(0, min(4, int(os.environ.get("SUMMARY_PROOFREAD_MAX_SPLIT_DEPTH", _env.get("SUMMARY_PROOFREAD_MAX_SPLIT_DEPTH", "2")))))
+    min_chars = max(500, int(os.environ.get("SUMMARY_PROOFREAD_MIN_CHARS", _env.get("SUMMARY_PROOFREAD_MIN_CHARS", "500"))))
+
+    def persist_checkpoint():
+        payload = {
+            "schema_version": 2,
+            "metadata": metadata,
+            "note_path": checkpoint_key.split("\n", 1)[0],
+            "segments": [
+                {"start": start, "end": end, "source_hash": digest, "result": value}
+                for (start, end, digest), value in sorted(segment_cache.items())
+            ],
+        }
+        save_transcript_diagnostic("proofread-checkpoints", checkpoint_key, payload)
+
     system_prompt, chunk_instruction, _combine_instruction = _combined_summary_prompts(
         ["proofread"],
         transcript_text,
     )
-    proofread_parts = []
-    for index, chunk in enumerate(chunks, 1):
-        if index > 1:
-            _wait_between_llm_calls("下一段校对")
+    transcript = transcript_text.strip()
+
+    def reserve_call():
+        if counters["calls"] >= max_calls:
+            raise RuntimeError(f"校对分段调用预算已耗尽（{max_calls} 次）；有效检查点保留待恢复")
+        counters["calls"] += 1
+
+    def split_range(start, end):
+        midpoint = start + (end - start) // 2
+        low, high = start + (end - start) * 4 // 10, start + (end - start) * 6 // 10
+        candidates = [transcript.rfind(token, low, high) for token in ("\n\n", "\n", "。", "！", "？", "，", " ")]
+        boundary = max(candidates)
+        if boundary <= start or boundary >= end - 1:
+            boundary = midpoint
+        elif transcript[boundary:boundary + 2] == "\n\n":
+            boundary += 2
+        else:
+            boundary += 1
+        return boundary
+
+    def proofread_range(start, end, depth, label_index):
+        nonlocal system_prompt
+        source = transcript[start:end]
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        cache_key = (start, end, digest)
+        cached_value = segment_cache.get(cache_key, "")
+        if cached_value and not proofread_errors(cached_value, source):
+            counters["reused"] += 1
+            record_cache_hit("proofread", "success_checkpoints")
+            print(f"   ♻️ {label}: 复用校对检查点 {start + 1}-{end} 字")
+            return [cached_value]
+        if counters["calls"] >= max_calls:
+            raise RuntimeError(f"校对分段调用预算已耗尽（{max_calls} 次）；原文范围 {start + 1}-{end} 保留待恢复")
         proofread = ""
-        for attempt in range(2):
+        for attempt in range(SUMMARY_PROOFREAD_MAX_RETRIES + 1):
+            previous_calls = counters["calls"]
+            reserve_call()
             if attempt:
-                _wait_between_llm_calls("质量未通过的校对段重试")
+                counters["quality_retries"] += 1
+                record_retry("proofread", "quality")
+            if previous_calls:
+                _wait_between_llm_calls("下一次校对调用", SUMMARY_PROOFREAD_COOLDOWN_DELAY)
+            source_before = transcript[max(0, start - 240):start]
+            source_after = transcript[end:min(len(transcript), end + 240)]
             user_prompt = (
-                f"视频标题：{title}\n\n"
-                f"校对分段：{index}/{len(chunks)}\n"
-                "说明：各段没有重叠，请完整校对当前段，不要概括或省略。\n\n"
-                "以下前后文只用于判断指代和句子语气，不得输出到本段：\n"
-                f"只读前文：{chunks[index - 2][-240:] if index > 1 else '无'}\n"
-                f"只读后文：{chunks[index][:240] if index < len(chunks) else '无'}\n\n"
-                f"{chunk_instruction}\n\n"
-                f"转录文本分段：\n{chunk}"
+                f"视频标题：{title}\n\n校对来源范围：{start + 1}-{end} 字（分段 {label_index}）\n"
+                "当前段不包含重叠。完整校对当前段，不要概括或省略。\n\n"
+                "以下前后文仅用于判断指代和句子语气，不得输出：\n"
+                f"只读前文：{source_before or '无'}\n只读后文：{source_after or '无'}\n\n"
+                f"{chunk_instruction}\n\n转录文本分段：\n{source}"
             )
             if attempt:
-                user_prompt += "\n\n上次未通过质量检查。请重新完整校对本段，检查标点、重复、漏段和边界标记；不要缩写。"
+                user_prompt += "\n\n上次未通过质量检查。请完整校对本段并检查标点、重复、漏段和边界标记。"
             response = _call_llm(
                 system_prompt, user_prompt,
                 max_tokens=SUMMARY_MAX_TOKENS,
-                task_name=f"校对正文 {label} 分段 {index}/{len(chunks)} 尝试{attempt + 1}",
+                task_name=f"校对正文 {label} 范围 {start + 1}-{end} 尝试{attempt + 1}",
                 enable_thinking=SUMMARY_PROOFREAD_ENABLE_THINKING,
                 timeout=SUMMARY_PROOFREAD_TIMEOUT,
+                max_retries=SUMMARY_PROOFREAD_MAX_RETRIES,
+                before_retry=reserve_call,
             )
-            parsed = _parse_combined_summary(response, ["proofread"], chunk)
-            proofread = parsed.get("proofread", "").strip()
+            proofread = _parse_combined_summary(response, ["proofread"], source).get("proofread", "").strip()
             if proofread:
-                break
-        if not proofread:
-            raise RuntimeError(f"校对正文分段 {index}/{len(chunks)} 两次未通过完整性/质量检查")
-        proofread_parts.append(proofread)
+                segment_cache[cache_key] = proofread
+                persist_checkpoint()
+                return [proofread]
+        # Only a completed response that fails the quality gate reaches this path.
+        if depth >= max_depth or end - start < min_chars * 2 or counters["calls"] + SUMMARY_PROOFREAD_MAX_RETRIES + 1 > max_calls:
+            raise RuntimeError(f"校对分段范围 {start + 1}-{end} 持续质量检查失败，已达到细分限制；该段可恢复")
+        boundary = split_range(start, end)
+        if boundary - start < min_chars or end - boundary < min_chars:
+            raise RuntimeError(f"校对分段范围 {start + 1}-{end} 无法在最小段长 {min_chars} 内细分")
+        counters["splits"] += 1
+        record_retry("proofread", "split")
+        print(f"   ✂️ {label}: 质量检查失败，有限细分来源范围 {start + 1}-{end}（深度 {depth + 1}/{max_depth}）")
+        left = proofread_range(start, boundary, depth + 1, f"{label_index}a")
+        right = proofread_range(boundary, end, depth + 1, f"{label_index}b")
+        return left + right
+
+    proofread_parts = []
+    for index, (start, end, _chunk) in enumerate(ranges, 1):
+        proofread_parts.extend(proofread_range(start, end, 0, str(index)))
     joined = "\n\n".join(proofread_parts)
     errors = proofread_errors(joined, transcript_text)
     if errors:
         raise RuntimeError("校对拼接后质量检查失败：" + "；".join(errors))
+    print(
+        f"   [校对检查点] 本次调用 {counters['calls']}，复用 {counters['reused']}，"
+        f"质量重试 {counters['quality_retries']}，细分 {counters['splits']}。"
+    )
     return joined
 
 
@@ -1153,21 +1367,117 @@ def _replace_requested_sections(content, sections):
     return content, changed
 
 
+def _ensure_video_summary_placeholders(content):
+    placeholder_keys = {
+        "一句话概括": "one_line", "速读摘要": "quick_summary", "思维导图": "mindmap",
+        "结构化正文": "structured_body", "金句/重要原话": "quotes",
+        "可复习清单": "review", "术语与概念": "terms", "校对正文": "proofread",
+    }
+    for heading, aliases in SECTION_NAMES.items():
+        existing_heading = next((alias for alias in aliases if re.search(rf"(?m)^##\s+{re.escape(alias)}\s*$", content)), "")
+        if existing_heading:
+            existing_body = section_text(content, (existing_heading,))
+            if not existing_body or not compact_text(existing_body):
+                content = _replace_section_body(content, existing_heading, PLACEHOLDERS[placeholder_keys[heading]])
+            continue
+        key = placeholder_keys[heading]
+        insert = f"## {aliases[0]}\n\n{PLACEHOLDERS[key]}\n"
+        markers = ("\n---\n<details>\n<summary>📄 原始字幕</summary>", "\n<details>\n<summary>📄 原始字幕</summary>", "\n## 原始字幕", "\n## 完整原文")
+        location = next((content.find(marker) for marker in markers if content.find(marker) >= 0), -1)
+        if location >= 0:
+            content = content[:location].rstrip() + "\n\n" + insert + content[location:]
+        else:
+            content = content.rstrip() + "\n\n" + insert
+    return content
+
+
+def _replace_section_body(content, title, value):
+    aliases = next((names for names in SECTION_NAMES.values() if title in names), (title,))
+    for alias in aliases:
+        pattern = rf"(?ms)(^##\s+{re.escape(alias)}\s*$\n)(.*?)(?=^##\s+|\Z)"
+        if re.search(pattern, content):
+            return re.sub(pattern, lambda match: match.group(1) + value.strip() + "\n\n", content, count=1)
+    return content
+
+
+def _review_section(findings, previous_section=""):
+    lines = ["## 人工复核提示", "", "> 规则检查只提示文字变化；完成人工复核不等于外部事实已核验。"]
+    prior_states = {}
+    for block in re.split(r"(?=<!-- LNS_REVIEW_ID:)", previous_section):
+        identity = re.search(r"<!-- LNS_REVIEW_ID:([0-9a-f]+) -->", block)
+        statuses = re.findall(r"\[([ xX])\]\s*(待复核|保留校对结果|按原文修正|存疑待核验)", block)
+        selected = next((label for checked, label in statuses if checked.strip()), None)
+        if identity and selected:
+            prior_states[identity.group(1)] = selected
+    if not findings:
+        lines.extend(["", "未发现需要规则提示的否定词、方向词、数量单位、证券代码或主体名称变化。"])
+    else:
+        for item in findings:
+            position = f"（原文第 {item.get('source_position')} 字附近）" if item.get("source_position") else ""
+            timestamp_range = item.get("timestamp_range")
+            timestamp = f" · 视频 {timestamp_range[0]:.1f}–{timestamp_range[1]:.1f}s" if isinstance(timestamp_range, (tuple, list)) else ""
+            identity = hashlib.sha256((str(item.get("kind")) + "\0" + "|".join(item.get("source") or []) + "\0" + "|".join(item.get("corrected") or [])).encode("utf-8")).hexdigest()[:16]
+            status = prior_states.get(identity, "待复核")
+            item["review_status"] = status
+            item["review_source"] = "人工复核" if status != "待复核" else "规则提示"
+            states = ("待复核", "保留校对结果", "按原文修正", "存疑待核验")
+            state_tokens = " · ".join(f"[{('x' if current == status else ' ')}] {current}" for current in states)
+            lines.extend([
+                "",
+                f"<!-- LNS_REVIEW_ID:{identity} -->",
+                f"- **复核状态**：{state_tokens}",
+                f"- **关键变化**{timestamp} · **{item['kind']}**{position}：原文 `{'、'.join(item['source']) or '无'}` → 校对 `{'、'.join(item['corrected']) or '无'}`。{item['message']}",
+                "  - 修改时请直接更新“校对正文”，并将状态标为“按原文修正”；“存疑待核验”表示仍需人工判断。",
+                f"  - 原文上下文：{' '.join(str(item.get('source_context') or '').split()) or '无'}",
+                f"  - 校对上下文：{' '.join(str(item.get('corrected_context') or '').split()) or '无'}",
+            ])
+    return "\n".join(lines)
+
+
+def _upsert_review_section(content, findings):
+    pattern = r"(?ms)^##\s+人工复核提示\s*$\n.*?(?=^##\s+|\Z)"
+    existing = re.search(pattern, content)
+    section = _review_section(findings, existing.group(0) if existing else "")
+    if existing:
+        return re.sub(pattern, section + "\n\n", content, count=1)
+    return _upsert_section_before_raw(content, "人工复核提示", "\n".join(section.splitlines()[2:]))
+
+
+@diagnostic_stage("video_organization", lambda result: result.status)
 def generate_summary(filepath, progress_label=None):
-    """Generate pending sections with an adaptive path for long verbatim output."""
+    """Generate or repair the complete video-note contract and report its status."""
     label = progress_label or os.path.basename(filepath)
 
     if not SUMMARY_API_KEY or not os.path.exists(filepath):
-        return False
+        return SummaryOutcome("failed", message="缺少模型凭据或笔记文件")
 
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if not any(ph in content for ph in ALL_PLACEHOLDERS):
-        proofread = re.search(r"(?ms)^##\s+校对正文\s*$\n(.*?)(?=^##\s+|\Z)", _content_before_raw_transcript(content))
-        if proofread and proofread_errors(proofread.group(1)):
-            raise RuntimeError("已有校对正文未通过质量检查，需依据原始转写重新校对")
-        return apply_original_subtitle_preference(filepath)
+    transcript_text = _extract_transcript_text(content)
+    if not transcript_text:
+        cached_source = load_transcript_diagnostic("source-by-note", os.path.abspath(filepath)) or {}
+        transcript_text = str(cached_source.get("transcript") or "")
+        if transcript_text:
+            record_cache_hit("source_recovery", "source_evidence")
+    content = _ensure_video_summary_placeholders(content)
+    rejected_findings = []
+    proofread_value = section_text(content, SECTION_NAMES["校对正文"])
+    if proofread_value and not PLACEHOLDER_RE.search(proofread_value):
+        errors = proofread_errors(proofread_value, transcript_text)
+        if errors:
+            if not transcript_text:
+                return SummaryOutcome("failed", missing_sections=("校对正文",),
+                                      message="已有校对正文不合格，且没有原始转写可恢复；请重新转写")
+            rejected_findings.append({
+                "kind": "已有校对正文", "source": errors, "corrected": [],
+                "status": "needs_review", "message": "已有正文未通过机械质量校验，已准备依据原文重新校对。",
+            })
+            save_transcript_diagnostic("proofread-rejected", filepath, {
+                "schema_version": 1, "note_path": os.path.abspath(filepath), "errors": errors,
+                "rejected_sha256": hashlib.sha256(proofread_value.encode("utf-8")).hexdigest(),
+            })
+            content = _replace_section_body(content, "校对正文", PLACEHOLDERS["proofread"])
 
     title = ""
     for line in content.splitlines():
@@ -1178,10 +1488,19 @@ def generate_summary(filepath, progress_label=None):
             title = line.split("视频标题：", 1)[1].strip()
             break
 
-    transcript_text = _extract_transcript_text(content)
     requested = _requested_summary_sections(content)
-    if not transcript_text or not requested:
-        return False
+    if not requested:
+        validation = validate_video_note(content, raw_transcript_override=transcript_text)
+        if not validation.complete:
+            return SummaryOutcome("failed", missing_sections=validation.missing_sections,
+                                  message="；".join(validation.errors))
+        record_cache_hit("video_organization", "completed_output")
+        changed = apply_original_subtitle_preference(filepath)
+        return SummaryOutcome("completed" if changed else "no_changes", changed=changed,
+                              completed_sections=validation.completed_sections)
+    if not transcript_text:
+        return SummaryOutcome("failed", missing_sections=tuple(SECTION_NAMES),
+                              message="缺少可恢复原始转写，请重新转写")
 
     requested_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in requested)
     print(f"   🚀 {label}: 整理 {requested_labels}...")
@@ -1198,11 +1517,18 @@ def generate_summary(filepath, progress_label=None):
     if "proofread" in requested:
         # Derived notes must not amplify an uncorrected or failed transcript.
         try:
-            sections["proofread"] = _run_chunked_proofread(label, title, transcript_text)
+            sections["proofread"] = _run_chunked_proofread(label, title, transcript_text, identity_path=filepath)
+            original_proofread = sections["proofread"]
+            sections["proofread"] = sanitize_model_stock_codes(original_proofread, transcript_text, True)
+            if sections["proofread"] != original_proofread:
+                rejected_findings.append({
+                    "kind": "新增证券代码", "source": [], "corrected": ["模型新增代码"],
+                    "status": "needs_review", "message": "已按原文移除未出现的证券代码，仍需复核相关公司名称。",
+                })
             completed_model_call = True
         except Exception as exc:
             print(f"   ⚠️ {label}: 分段校对失败，保留原文与占位符：{exc}")
-            return False
+            return SummaryOutcome("failed", missing_sections=("校对正文",), message=str(exc))
     else:
         existing = re.search(r"(?ms)^## 校对正文\s*\n(.*?)(?=^## |\Z)", content)
         if existing and not any(ph in existing.group(1) for ph in ALL_PLACEHOLDERS):
@@ -1222,6 +1548,7 @@ def generate_summary(filepath, progress_label=None):
 
         primary_missing = [key for key in primary_requested if key not in sections]
         if primary_missing and completed_model_call:
+            record_retry("summary", "missing_sections")
             _wait_between_llm_calls("缺失栏目的定向补偿")
             missing_labels = "、".join(SUMMARY_SECTION_LABELS[key] for key in primary_missing)
             print(f"   🔁 {label}: 仅重试缺失栏目：{missing_labels}")
@@ -1231,7 +1558,8 @@ def generate_summary(filepath, progress_label=None):
                 print(f"   ⚠️ {label}: 缺失栏目补偿失败: {exc}")
 
     if not sections and not completed_model_call:
-        return False
+        return SummaryOutcome("failed", missing_sections=tuple(SUMMARY_SECTION_LABELS[key] for key in requested),
+                              message="没有模型栏目结果")
 
     content, changed = _replace_requested_sections(content, sections)
     missing = [SUMMARY_SECTION_LABELS[key] for key in requested if key not in sections]
@@ -1246,14 +1574,39 @@ def generate_summary(filepath, progress_label=None):
             content = updated
             changed = True
 
+    if sections.get("proofread") and transcript_text:
+        review_findings = rejected_findings + review_transcript_changes(transcript_text, sections["proofread"])
+        timing = load_note_timing(pathlib.Path(filepath))
+        for finding in review_findings:
+            position = finding.get("source_position")
+            if position and not finding.get("timestamp_range"):
+                finding["timestamp_range"] = timestamp_for_position(transcript_text, int(position) - 1, timing)
+        content = _upsert_review_section(content, review_findings)
+        review_identity = os.path.abspath(filepath) + "\n" + hashlib.sha256(transcript_text.encode("utf-8")).hexdigest()
+        save_transcript_diagnostic("review", review_identity, {
+            "schema_version": 1, "note_path": os.path.abspath(filepath),
+            "source_sha256": hashlib.sha256(transcript_text.encode("utf-8")).hexdigest(),
+            "proofread_sha256": hashlib.sha256(sections["proofread"].encode("utf-8")).hexdigest(),
+            "findings": review_findings, "external_fact_check": False,
+        })
+        changed = True
+    if transcript_text:
+        save_transcript_diagnostic("source-by-note", os.path.abspath(filepath), {
+            "schema_version": 1, "note_path": os.path.abspath(filepath),
+            "source_sha256": hashlib.sha256(transcript_text.encode("utf-8")).hexdigest(),
+            "transcript": transcript_text,
+        })
     if changed:
         stock_section = build_stock_validation_section(content, A_SHARE_TERMS_ENABLED)
         if stock_section:
             content = _upsert_section_before_raw(content, "A股术语校验", stock_section)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(content)
+        _atomic_write_text(filepath, content)
 
-    return changed
+    validation = validate_video_note(content, raw_transcript_override=transcript_text)
+    status = "completed" if validation.complete else "partial"
+    return SummaryOutcome(status, changed=changed, completed_sections=validation.completed_sections,
+                          missing_sections=validation.missing_sections,
+                          message="；".join(validation.errors))
 
 
 def print_summary_stats(report_rows):
@@ -1280,6 +1633,20 @@ def _list_markdown_files(path):
             if name.endswith(".md"):
                 files.append(os.path.join(root, name))
     return sorted(files)
+
+
+def _validate_video_path(filepath):
+    with open(filepath, "r", encoding="utf-8") as handle:
+        markdown = handle.read()
+    transcript = _extract_transcript_text(markdown)
+    if not transcript:
+        cached = load_transcript_diagnostic("source-by-note", os.path.abspath(filepath)) or {}
+        transcript = str(cached.get("transcript") or "")
+    return validate_video_note(
+        markdown,
+        transcription_only=VIDEO_OUTPUT_MODE == "transcription-only",
+        raw_transcript_override=transcript,
+    )
 
 
 def run_summary_only(target_path=None):
@@ -1312,21 +1679,25 @@ def run_summary_only(target_path=None):
     for i, filepath in enumerate(files, 1):
         progress_label = f"[{i}/{len(files)}] {os.path.basename(filepath)}"
         print(f"\n📄 {progress_label}")
-        changed = False
         failed = False
+        changed = False
         try:
-            changed = generate_summary(filepath, progress_label=progress_label)
+            outcome = _coerce_summary_outcome(generate_summary(filepath, progress_label=progress_label))
+            if outcome.status not in {"completed", "no_changes"}:
+                failed = True
+                failed_count += 1
+                print(f"   ⚠️ {progress_label}: {outcome.message or outcome.status}；保留原始字幕以便重试")
+            changed = outcome.changed
         except Exception as e:
             failed_count += 1
             failed = True
             print(f"   ⚠️ {progress_label}: AI 后处理异常: {e}")
         if not failed:
-            with open(filepath, "r", encoding="utf-8") as f:
-                pending_content = f.read()
-            if any(placeholder in pending_content for placeholder in ALL_PLACEHOLDERS):
+            validation = _validate_video_path(filepath)
+            if not validation.complete:
                 failed_count += 1
                 failed = True
-                print(f"   ⚠️ {progress_label}: 仍有 AI 待处理占位符；保留原始字幕以便重试")
+                print(f"   ⚠️ {progress_label}: 完成校验失败：{'；'.join(validation.errors)}")
         if changed:
             changed_count += 1
         if not failed:
@@ -1394,25 +1765,42 @@ def main():
 
         start_time = time.time()
         output_files, returncode = transcribe_local_dir(local_dir, recursive=args.recursive)
+        summary_failed_count = 0
 
         # 生成摘要
-        if SUMMARY_API_KEY and output_files:
+        completed_files = []
+        if VIDEO_OUTPUT_MODE == "transcription-only":
+            print("[结果合同] 仅转写模式：保留原始转写，不生成衍生栏目。")
+            for path in output_files:
+                validation = _validate_video_path(path)
+                if validation.complete:
+                    completed_files.append(path)
+                else:
+                    summary_failed_count += 1
+                    print(f"   ❌ {os.path.basename(path)}: 完成校验失败：{'；'.join(validation.errors)}")
+        elif output_files:
             print(f"\n📝 生成 AI 摘要...")
             for i, f in enumerate(output_files, 1):
                 progress_label = f"[{i}/{len(output_files)}] {os.path.basename(f)}"
                 print(f"\n📄 {progress_label}")
-                changed = False
                 try:
-                    changed = generate_summary(f, progress_label=progress_label)
+                    outcome = _coerce_summary_outcome(generate_summary(f, progress_label=progress_label))
+                    validation = _validate_video_path(f)
+                    if outcome.status not in {"completed", "no_changes"} or not validation.complete:
+                        summary_failed_count += 1
+                        details = outcome.message or "；".join(validation.errors)
+                        print(f"   ❌ {progress_label}: 完成校验失败：{details}")
+                    else:
+                        completed_files.append(f)
+                        if outcome.changed and COOLDOWN_DELAY > 0 and i < len(output_files):
+                            print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                            time.sleep(COOLDOWN_DELAY)
                 except Exception as e:
+                    summary_failed_count += 1
                     print(f"   ⚠️ {progress_label}: 摘要生成异常: {e}")
-                # LLM 散热
-                if changed and COOLDOWN_DELAY > 0 and i < len(output_files):
-                    print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
-                    time.sleep(COOLDOWN_DELAY)
-        if output_files and not KEEP_ORIGINAL_SUBTITLES:
+        if completed_files and not KEEP_ORIGINAL_SUBTITLES and VIDEO_OUTPUT_MODE != "transcription-only":
             cleaned = 0
-            for f in output_files:
+            for f in completed_files:
                 if apply_original_subtitle_preference(f):
                     cleaned += 1
             if cleaned:
@@ -1420,7 +1808,12 @@ def main():
 
         total_time = time.time() - start_time
         print(f"\n⏱️  总耗时: {int(total_time // 60)}分{int(total_time % 60)}秒")
-        return returncode
+        LAST_LOCAL_BATCH_RESULT["failed"] += summary_failed_count
+        LAST_LOCAL_BATCH_RESULT["changed"] = len(completed_files)
+        from run_bilibili_transcript import record_transaction_batch
+        record_transaction_batch(dict(os.environ), LAST_LOCAL_BATCH_RESULT)
+        print("LOCAL_BATCH_RESULT_JSON:" + json.dumps(LAST_LOCAL_BATCH_RESULT, ensure_ascii=False))
+        return 1 if returncode != 0 or summary_failed_count else 0
 
     # ===== 模式：B站收藏夹转录 =====
     print("=" * 70)
@@ -1493,8 +1886,21 @@ def main():
                 time.sleep(wait)
 
         if ok and output_file and output_file != "unknown":
-            content_hash = get_content_hash(output_file)
-
+            complete = VIDEO_OUTPUT_MODE == "transcription-only"
+            progress_label = f"[{i}/{len(pending)}] {v['title']}"
+            if VIDEO_OUTPUT_MODE == "full":
+                try:
+                    outcome = _coerce_summary_outcome(generate_summary(output_file, progress_label=progress_label))
+                    complete = outcome.status in {"completed", "no_changes"} and _validate_video_path(output_file).complete
+                    if not complete:
+                        print(f"   ❌ {progress_label}: 笔记仍未完成：{outcome.message or '存在缺失栏目'}")
+                    elif outcome.changed and COOLDOWN_DELAY > 0 and i < len(pending):
+                        print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
+                        time.sleep(COOLDOWN_DELAY)
+                except Exception as exc:
+                    print(f"   ❌ {progress_label}: 摘要生成失败：{exc}")
+            validation = _validate_video_path(output_file)
+            complete = complete and validation.complete
             report_rows.append({
                 "bvid": bvid,
                 "title": v["title"],
@@ -1502,29 +1908,19 @@ def main():
                 "duration": v["duration"],
                 "source": transcript_source or "unknown",
                 "output_file": output_file,
-                "content_hash": content_hash,
-                "status": "success",
+                "content_hash": get_content_hash(output_file),
+                "status": "success" if complete else "incomplete_video_note",
                 "attempts": attempt,
             })
-
-            success_count += 1
-            save_processed(v["avid"])
-            print(f"   ✅ [{success_count}/{remaining}] 成功! 来源: {transcript_source}")
-
-            # AI摘要生成
-            if enable_summary and output_file and output_file != "unknown":
-                progress_label = f"[{i}/{len(pending)}] {v['title']}"
-                changed = False
-                try:
-                    changed = generate_summary(output_file, progress_label=progress_label)
-                except Exception as e:
-                    print(f"   ⚠️ {progress_label}: 摘要生成异常: {e}")
-                # LLM 散热
-                if changed and COOLDOWN_DELAY > 0 and i < len(pending):
-                    print(f"   🥶 {progress_label}: LLM 散热等待 {COOLDOWN_DELAY} 秒...")
-                    time.sleep(COOLDOWN_DELAY)
-            if apply_original_subtitle_preference(output_file):
-                print(f"   🧹 [{i}/{len(pending)}] 已按设置移除原始字幕")
+            if complete:
+                success_count += 1
+                save_processed(v["avid"])
+                print(f"   ✅ [{success_count}/{remaining}] 完成! 来源: {transcript_source}")
+                if VIDEO_OUTPUT_MODE != "transcription-only" and apply_original_subtitle_preference(output_file):
+                    print(f"   🧹 [{i}/{len(pending)}] 已按设置移除原始字幕")
+            else:
+                fail_count += 1
+                print(f"   ❌ [{fail_count}] 转写保留但视频笔记未通过完成校验：{'；'.join(validation.errors)}")
 
         else:
             report_rows.append({

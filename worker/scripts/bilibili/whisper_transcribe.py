@@ -19,6 +19,9 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from transcript_quality import compact_text, repetition_errors, save_transcript_diagnostic
+from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_retry
+from transcript_timing import write_segments
+from pathlib import Path
 
 
 def suspect_intervals(result, duration, has_audio):
@@ -62,10 +65,25 @@ def repair_windows(intervals, segments, duration):
     return windows
 
 
+@diagnostic_stage("asr", lambda result: "failed" if result[3] else "completed")
 def transcribe_with_repair(audio, transcribe, kwargs, has_audio):
     """One full pass, then one bounded pass over affected spans. Retain evidence."""
     duration = len(audio) / 16000
-    initial = transcribe(audio, **kwargs)
+    def measured_transcribe(samples, options):
+        call_id = begin_model_call("asr", os.path.basename(options.get("path_or_hf_repo", "")) or None,
+                                   provider="local_asr", config={
+                                       "condition_on_previous_text": options.get("condition_on_previous_text"),
+                                       "language": options.get("language"),
+                                   })
+        status = "failed"
+        try:
+            result = transcribe(samples, **options)
+            status = "completed"
+            return result
+        finally:
+            finish_model_call(call_id, "asr", status, reason="asr_error" if status == "failed" else None)
+
+    initial = measured_transcribe(audio, kwargs)
     current = dict(initial)
     current["segments"] = [dict(s) for s in initial.get("segments", [])]
     attempts = []
@@ -80,7 +98,8 @@ def transcribe_with_repair(audio, transcribe, kwargs, has_audio):
         if initial.get("language"):
             options["language"] = initial["language"]
         try:
-            retry = transcribe(audio[int(start * 16000):int(end * 16000)], **options)
+            record_retry("asr", "quality")
+            retry = measured_transcribe(audio[int(start * 16000):int(end * 16000)], options)
         except Exception as exc:
             attempts.append({"start": start, "end": end, "error": str(exc)})
             continue
@@ -167,6 +186,7 @@ def main():
     parser = argparse.ArgumentParser(description="Whisper (MLX) 语音转录")
     parser.add_argument("--audio", required=True, help="音频文件路径")
     parser.add_argument("--output-file", required=True, help="输出文件路径（第一行=来源，后续=文本）")
+    parser.add_argument("--segments-output", default="", help="当前转写的时间片段临时 JSON 路径")
     parser.add_argument("--model-path", required=True, help="本地 Whisper 模型路径")
     parser.add_argument("--language", default=None, help="转录语言（如 zh, en, ja），默认自动检测")
     parser.add_argument("--prompt", default=None, help="Whisper 初始提示词，用于提供语言、术语或风格提示")
@@ -256,6 +276,9 @@ def main():
         if not transcript:
             print("错误: 转录结果为空", file=sys.stderr)
             sys.exit(1)
+
+        if args.segments_output:
+            write_segments(Path(args.segments_output), result.get("segments", []))
 
         # === 构造来源描述 ===
         source = f"Whisper-{model_name}（MLX加速）"

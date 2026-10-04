@@ -241,7 +241,14 @@ class RequestAndCommandContractTests(unittest.TestCase):
     def test_summary_only_removes_raw_subtitles_after_note_is_complete(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             note = pathlib.Path(temp_dir) / "video.md"
-            note.write_text("# 视频\n\n## 校对正文\n\n已完成\n\n## 原始字幕\n\n原始转写\n", encoding="utf-8")
+            sections = [
+                ("一句话概括", "讨论内容已整理。"), ("速读摘要", "摘要完整。"),
+                ("思维导图", "- 主题\n  - 结论"), ("结构化正文", "经营情况需要持续跟踪。"),
+                ("金句与重要原话", "持续关注变化。"), ("可复习清单", "- 下一步核对什么？"),
+                ("术语与概念", "经营质量：持续经营能力。"), ("校对正文", "原始转写。"),
+                ("原始字幕", "原始转写。"),
+            ]
+            note.write_text("# 视频\n\n" + "\n\n".join(f"## {heading}\n\n{body}" for heading, body in sections), encoding="utf-8")
             with (
                 mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "set"),
                 mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
@@ -262,7 +269,7 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 mock.patch.object(batch_transcriber, "generate_summary", return_value=False),
             ):
                 result = batch_transcriber.run_summary_only(str(note))
-            self.assertEqual(result, 0)
+            self.assertEqual(result, 1)
             self.assertEqual(note.read_text(encoding="utf-8"), original)
 
     def test_video_note_proofreads_first_then_summarizes_validated_text(self):
@@ -375,6 +382,7 @@ class RequestAndCommandContractTests(unittest.TestCase):
                 mock.patch.object(batch_transcriber, "SUMMARY_API_KEY", "mtplx-local"),
                 mock.patch.object(batch_transcriber, "KEEP_ORIGINAL_SUBTITLES", False),
                 mock.patch.object(batch_transcriber, "SUMMARY_CHUNK_COOLDOWN_DELAY", 0),
+                mock.patch.object(batch_transcriber, "_run_chunked_proofread", return_value="保留用于重试的原始字幕。"),
                 mock.patch.object(batch_transcriber, "_run_chunked_llm", return_value=response) as model_task,
             ):
                 self.assertTrue(batch_transcriber.generate_summary(str(note)))
@@ -750,6 +758,227 @@ class RequestAndCommandContractTests(unittest.TestCase):
         self.assertEqual(env["QWEN_ORGANIZE_MAX_CHARS"], "24000")
         self.assertEqual(env["SUMMARY_CHUNK_CHARS"], "24000")
         self.assertEqual(env["OCR_RESUME"], "false")
+
+    def test_video_stage_overrides_keep_zero_distinct_from_inherit(self):
+        req = worker.TaskRequest.from_mapping({
+            "task": "bilibili-url",
+            "proofread_chunk_chars": "1600",
+            "proofread_timeout_seconds": "321",
+            "proofread_retry_count": "2",
+            "proofread_cooldown_delay": "0",
+            "proofread_enable_thinking": True,
+            "summary_chunk_chars": "12000",
+            "summary_timeout_seconds": "900",
+            "summary_retry_count": "0",
+            "summary_cooldown_delay": "0",
+            "summary_enable_thinking": False,
+        })
+        env = worker.build_env(req)
+        self.assertEqual(env["SUMMARY_PROOFREAD_CHUNK_CHARS"], "1600")
+        self.assertEqual(env["SUMMARY_PROOFREAD_TIMEOUT"], "321")
+        self.assertEqual(env["SUMMARY_PROOFREAD_MAX_RETRIES"], "2")
+        self.assertEqual(env["SUMMARY_PROOFREAD_COOLDOWN_DELAY"], "0")
+        self.assertEqual(env["SUMMARY_PROOFREAD_ENABLE_THINKING"], "true")
+        self.assertEqual(env["SUMMARY_CHUNK_CHARS"], "12000")
+        self.assertEqual(env["LLM_TIMEOUT"], "900")
+        self.assertEqual(env["LLM_MAX_RETRIES"], "0")
+        self.assertEqual(env["SUMMARY_CHUNK_COOLDOWN_DELAY"], "0")
+        self.assertEqual(env["SUMMARY_ENABLE_THINKING"], "false")
+        inherited = worker.TaskRequest.from_mapping({"task": "local-video", "retry_count": "", "cooldown_delay": ""})
+        self.assertEqual(inherited.retry_count, -1)
+        self.assertEqual(inherited.cooldown_delay, -1)
+        disabled = worker.TaskRequest.from_mapping({"task": "local-video", "retry_count": "0", "cooldown_delay": "0"})
+        self.assertEqual(disabled.retry_count, 0)
+        self.assertEqual(worker.build_env(disabled)["LLM_MAX_RETRIES"], "0")
+
+    def test_video_stage_parameter_bounds_fail_clearly(self):
+        invalid = [
+            {"task": "local-video", "proofread_chunk_chars": "499"},
+            {"task": "local-video", "proofread_chunk_chars": "8001"},
+            {"task": "local-video", "proofread_timeout_seconds": "59"},
+            {"task": "local-video", "proofread_retry_count": "6"},
+            {"task": "local-video", "summary_timeout_seconds": "0"},
+            {"task": "local-video", "summary_retry_count": "11"},
+            {"task": "local-video", "timeout_seconds": "0"},
+        ]
+        for request in invalid:
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                worker.TaskRequest.from_mapping(request)
+
+    def test_video_transaction_stages_then_publishes_valid_note_and_manifest(self):
+        def note_text():
+            raw = "订单和现金流需要持续观察。"
+            sections = {
+                "一句话概括": "本期介绍行业经营情况。",
+                "速读摘要": "摘要内容完整。",
+                "思维导图": "- 总主题\n  - 子主题",
+                "结构化正文": "订单变化影响经营判断。",
+                "金句与重要原话": "需要持续观察现金流。",
+                "可复习清单": "- 跟踪哪些指标？",
+                "术语与概念": "订单：未来履行的销售约定。",
+                "校对正文": raw,
+            }
+            return "# 视频事务样例\n\n" + "\n\n".join(f"## {key}\n\n{value}" for key, value in sections.items()) + f"\n\n## 原始字幕\n\n{raw}\n"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = pathlib.Path(temp_dir) / "notes"
+            index_root = pathlib.Path(temp_dir) / "indexes"
+            cfg = {"INDEX_DIR": str(index_root), "OVERWRITE_OUTPUT": "false"}
+
+            def produce(staged_cfg):
+                stage_note = pathlib.Path(staged_cfg["BILIBILI_OUTPUT_DIR"]) / "video.md"
+                stage_note.write_text(note_text(), encoding="utf-8")
+                runner.save_manifest(pathlib.Path(staged_cfg["INDEX_DIR"]) / "video-manifest.json", {
+                    "items": [{"source_url": "https://example.test/video/1", "output_path": str(stage_note), "title": "video"}],
+                })
+                self.assertFalse((output_root / "video.md").exists())
+                return 0
+
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                status = runner.run_video_transaction(str(output_root), cfg, produce)
+            self.assertEqual(status, 0)
+            final_note = output_root / "video.md"
+            self.assertTrue(final_note.is_file())
+            self.assertIn("## 原始字幕", final_note.read_text(encoding="utf-8"))
+            manifest = json.loads((index_root / "video-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["items"][0]["output_path"], str(final_note.resolve()))
+            result_line = next(line for line in stdout.getvalue().splitlines() if line.startswith("VIDEO_TRANSACTION_RESULT_JSON:"))
+            self.assertEqual(json.loads(result_line.split(":", 1)[1])["failed"], 0)
+
+    def test_failed_video_transaction_keeps_existing_note_and_recovery_stage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_root = pathlib.Path(temp_dir) / "notes"
+            output_root.mkdir()
+            final_note = output_root / "video.md"
+            original = "# Existing complete note\n\n" + "\n\n".join(
+                f"## {name}\n\n{body}" for name, body in [
+                    ("一句话概括", "概括"), ("速读摘要", "摘要"), ("思维导图", "- 根\n  - 子"),
+                    ("结构化正文", "正文"), ("金句与重要原话", "金句"), ("可复习清单", "清单"),
+                    ("术语与概念", "术语"), ("校对正文", "原文。"),
+                ]
+            ) + "\n\n## 原始字幕\n\n原文。\n"
+            final_note.write_text(original, encoding="utf-8")
+            original_hash = hashlib.sha256(final_note.read_bytes()).hexdigest()
+            cfg = {"INDEX_DIR": str(pathlib.Path(temp_dir) / "indexes"), "OVERWRITE_OUTPUT": "true"}
+
+            def fail_after_staging(staged_cfg):
+                (pathlib.Path(staged_cfg["BILIBILI_OUTPUT_DIR"]) / final_note.name).write_text("# incomplete\n\n## 校对正文\n\n【AI待处理】\n", encoding="utf-8")
+                return 0
+
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                status = runner.run_video_transaction(str(output_root), cfg, fail_after_staging)
+            self.assertEqual(status, 1)
+            self.assertEqual(hashlib.sha256(final_note.read_bytes()).hexdigest(), original_hash)
+            marker = next(line for line in stdout.getvalue().splitlines() if line.startswith("VIDEO_TRANSACTION_RESULT_JSON:"))
+            recovery_dir = pathlib.Path(json.loads(marker.split(":", 1)[1])["recovery_dir"])
+            self.assertTrue(recovery_dir.is_dir())
+            self.assertTrue(any(recovery_dir.rglob("video.md")))
+
+    def test_proofread_checkpoints_reuse_accepted_segments_after_later_network_failure(self):
+        templates = (
+            "第{n}批订单已按计划发运，客户验收和回款日期仍要逐项核实。",
+            "第{n}季度原料报价波动，采购、物流与替代供应安排正在调整。",
+            "第{n}项成本费用变化影响利润率，需要结合资产负债和现金流分析。",
+        )
+        pieces = [
+            "".join(template.format(n=group * 30 + index + 1) for index in range(30))
+            for group, template in enumerate(templates)
+        ]
+        transcript = "".join(pieces)
+        ranges = []
+        cursor = 0
+        for piece in pieces:
+            ranges.append((cursor, cursor + len(piece), piece))
+            cursor += len(piece)
+        cache_dir = pathlib.Path(tempfile.mkdtemp(prefix="lns-checkpoints-"))
+        self.addCleanup(shutil.rmtree, cache_dir, True)
+        note_path = cache_dir / "proofread-checkpoint-fixture.md"
+
+        def response_for_source(*args, **kwargs):
+            source = args[1].split("转录文本分段：\n", 1)[1].strip()
+            return batch_transcriber.LLMResponse(
+                f"[[LNS_SECTION:proofread]]\n{source}\n[[/LNS_SECTION:proofread]]", "stop"
+            )
+
+        attempts = {"count": 0}
+        def fail_on_third(*args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 3:
+                raise RuntimeError("fixture network failure")
+            return response_for_source(*args, **kwargs)
+
+        with (
+            mock.patch.object(batch_transcriber, "_chunk_text_ranges", return_value=ranges),
+            mock.patch.dict(os.environ, {"LOCAL_NOTE_STUDIO_INCOGNITO": "false", "TRANSCRIPT_CACHE_DIR": str(cache_dir / "cache")}),
+            mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_MAX_RETRIES", 0),
+            mock.patch.object(batch_transcriber, "_wait_between_llm_calls"),
+            mock.patch.object(batch_transcriber, "_call_llm", side_effect=fail_on_third) as first_run,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fixture network failure"):
+                batch_transcriber._run_chunked_proofread("fixture", "title", transcript, str(note_path))
+        self.assertEqual(first_run.call_count, 3)
+
+        with (
+            mock.patch.object(batch_transcriber, "_chunk_text_ranges", return_value=ranges),
+            mock.patch.dict(os.environ, {"LOCAL_NOTE_STUDIO_INCOGNITO": "false", "TRANSCRIPT_CACHE_DIR": str(cache_dir / "cache")}),
+            mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_MAX_RETRIES", 0),
+            mock.patch.object(batch_transcriber, "_wait_between_llm_calls"),
+            mock.patch.object(batch_transcriber, "_call_llm", side_effect=response_for_source) as retry,
+        ):
+            merged = batch_transcriber._run_chunked_proofread("fixture", "title", transcript, str(note_path))
+        self.assertEqual(retry.call_count, 1)
+        self.assertEqual(merged.replace("\n\n", ""), transcript)
+
+    def test_proofread_quality_failure_splits_only_within_bounded_budget(self):
+        first = "".join(f"第{i}项订单交付节点与回款周期需要逐一核实，确认合同状态和客户验收记录相符。" for i in range(1, 22))
+        second = "".join(f"第{i}项供应链采购报价和物流计划出现调整，需要评估库存与替代渠道。" for i in range(30, 51))
+        transcript = first + "\n\n" + second
+        attempts = {"count": 0}
+
+        def model_response(*args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                return batch_transcriber.LLMResponse("incomplete", "stop")
+            source = args[1].split("转录文本分段：\n", 1)[1].strip()
+            return batch_transcriber.LLMResponse(
+                f"[[LNS_SECTION:proofread]]\n{source}\n[[/LNS_SECTION:proofread]]", "stop"
+            )
+
+        with (
+            mock.patch.object(batch_transcriber, "_chunk_text_ranges", return_value=[(0, len(transcript), transcript)]),
+            mock.patch.dict(os.environ, {
+                "LOCAL_NOTE_STUDIO_INCOGNITO": "false",
+                "SUMMARY_PROOFREAD_MIN_CHARS": "500",
+                "SUMMARY_PROOFREAD_MAX_SPLIT_DEPTH": "1",
+                "SUMMARY_PROOFREAD_CALL_BUDGET": "4",
+            }),
+            mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_MAX_RETRIES", 0),
+            mock.patch.object(batch_transcriber, "_wait_between_llm_calls"),
+            mock.patch.object(batch_transcriber, "_call_llm", side_effect=model_response) as call,
+        ):
+            result = batch_transcriber._run_chunked_proofread("split-fixture", "title", transcript)
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(batch_transcriber.compact_text(result), batch_transcriber.compact_text(transcript))
+
+    def test_proofread_checkpoints_invalidate_when_effective_parameters_change(self):
+        first = "订单交付、客户验收与合同回款需要逐项核对，及时识别可能影响季度经营的异常情况。"
+        second = "采购计划、物流周期与替代渠道需要分别跟踪，确认库存和供应安全安排符合业务需求。"
+        transcript = first + second
+        ranges = [(0, len(first), first), (len(first), len(transcript), second)]
+        with tempfile.TemporaryDirectory() as temp:
+            note_path = pathlib.Path(temp) / "parameter-checkpoint.md"
+            for timeout, expected_calls in ((600, 2), (601, 2)):
+                with (
+                    mock.patch.object(batch_transcriber, "_chunk_text_ranges", return_value=ranges),
+                    mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_TIMEOUT", timeout),
+                    mock.patch.object(batch_transcriber, "SUMMARY_PROOFREAD_MAX_RETRIES", 0),
+                    mock.patch.object(batch_transcriber, "_wait_between_llm_calls"),
+                    mock.patch.object(batch_transcriber, "_call_llm", side_effect=lambda _system, prompt, **_kwargs: batch_transcriber.LLMResponse(
+                        "[[LNS_SECTION:proofread]]\n" + prompt.split("转录文本分段：\n", 1)[1].strip() + "\n[[/LNS_SECTION:proofread]]", "stop"
+                    )) as call,
+                ):
+                    batch_transcriber._run_chunked_proofread("parameter-fixture", "title", transcript, str(note_path))
+                self.assertEqual(call.call_count, expected_calls)
 
     def test_explicit_zero_disables_all_model_cooldowns(self):
         req = worker.TaskRequest.from_mapping({"task": "bilibili-up-opus", "cooldown_delay": "0"})
@@ -1930,7 +2159,15 @@ class IntegrityTests(unittest.TestCase):
 
     def test_video_raw_subtitle_strictly_follows_option(self):
         path = self.root / "video.md"
-        path.write_text("---\nsource_url: https://bilibili.com/video/BV1test\n---\n\n# 视频\n\n## 原始字幕\n\n字幕\n", encoding="utf-8")
+        sections = [
+            ("一句话概括", "视频概括。"), ("速读摘要", "摘要内容。"),
+            ("思维导图", "- 主题\n  - 内容"), ("结构化正文", "视频内容需要复核。"),
+            ("金句与重要原话", "持续跟踪。"), ("可复习清单", "- 需要核实什么？"),
+            ("术语与概念", "复核：对照原文检查内容。"), ("校对正文", "字幕内容。"),
+            ("原始字幕", "字幕内容。"),
+        ]
+        body = "\n\n".join(f"## {name}\n\n{content}" for name, content in sections)
+        path.write_text(f"---\nsource_url: https://bilibili.com/video/BV1test\n---\n\n# 视频\n\n{body}\n", encoding="utf-8")
         keep = worker.TaskRequest(task="bilibili-url", keep_original_subtitles=True)
         remove = worker.TaskRequest(task="bilibili-url", keep_original_subtitles=False)
         self.assertEqual(worker.validate_markdown_output(path, keep), [])
@@ -2133,6 +2370,35 @@ class IntegrityTests(unittest.TestCase):
         self.assertTrue(keyframes._usable_fingerprint(varied, []))
         self.assertFalse(keyframes._usable_fingerprint(varied, [varied]))
 
+    def test_keyframe_alignment_uses_matching_transcript_time_range(self):
+        note = (
+            "## 结构化正文\n\n"
+            "订单交付和客户验收决定本季度回款进度，需要按合同节点持续跟踪。\n\n"
+            "## 校对正文\n\n内容完整。"
+        )
+        transcript = (
+            "1\n00:00:10 --> 00:00:14\n订单交付和客户验收决定本季度回款进度，需要按合同节点持续跟踪。\n\n"
+            "2\n00:01:10 --> 00:01:14\n成本费用变化影响利润率，需要结合资产负债和现金流分析。\n"
+        )
+        points = keyframes._transcript_aligned_points(note, 120.0, 4, transcript)
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["alignment"], "transcript-match")
+        self.assertEqual((points[0]["range_start"], points[0]["range_end"]), (10.0, 14.0))
+        self.assertIn("订单交付", points[0]["snippet"])
+
+    def test_review_section_preserves_human_status_for_stable_findings(self):
+        source = "建议买入50万股，苹果公司预计收入增长。"
+        corrected = "不建议卖出500万股，英伟达公司预计收入下降。"
+        findings = batch_transcriber.review_transcript_changes(source, corrected)
+        initial = batch_transcriber._review_section(findings)
+        reviewed = initial.replace("[x] 待复核", "[ ] 待复核", 1).replace("[ ] 保留校对结果", "[x] 保留校对结果", 1)
+        refreshed = batch_transcriber._review_section(
+            batch_transcriber.review_transcript_changes(source, corrected), reviewed
+        )
+        self.assertIn("[x] 保留校对结果", refreshed)
+        self.assertIn("复核状态", refreshed)
+        self.assertIn("外部事实已核验", refreshed)
+
 
 class BatchAndDiagnosticsTests(unittest.TestCase):
     def test_generated_path_contract_excludes_skipped_existing_markdown(self):
@@ -2149,16 +2415,24 @@ class BatchAndDiagnosticsTests(unittest.TestCase):
             self.assertEqual(batch_transcriber._extract_output_paths(output), [str(generated)])
 
     def test_skipped_local_file_does_not_enter_postprocessing(self):
-        cfg = {"CONDA_ENV": "", "VIDEO_MANIFEST_ENABLED": "false"}
-        skipped_output = "SKIPPED_EXISTING_MARKDOWN_PATH:/tmp/already-exists.md\n"
-        with (
-            mock.patch.object(runner, "project_env", return_value={}),
-            mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
-            mock.patch.object(runner, "stream_command", return_value=(0, skipped_output)) as stream,
-            mock.patch.object(runner, "postprocess_video_notes") as postprocess,
-            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
-        ):
-            code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
+        with tempfile.TemporaryDirectory() as temp:
+            note = pathlib.Path(temp) / "already-exists.md"
+            sections = [
+                ("一句话概括", "概括。"), ("速读摘要", "摘要。"), ("思维导图", "- 主题\n  - 内容"),
+                ("结构化正文", "正文内容。"), ("金句与重要原话", "原话。"), ("可复习清单", "- 要点？"),
+                ("术语与概念", "术语：说明。"), ("校对正文", "可复核原文。"), ("原始字幕", "可复核原文。"),
+            ]
+            note.write_text("# 视频\n\n" + "\n\n".join(f"## {name}\n\n{content}" for name, content in sections), encoding="utf-8")
+            cfg = {"CONDA_ENV": "", "VIDEO_MANIFEST_ENABLED": "false"}
+            skipped_output = f"SKIPPED_EXISTING_MARKDOWN_PATH:{note}\n"
+            with (
+                mock.patch.object(runner, "project_env", return_value={}),
+                mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
+                mock.patch.object(runner, "stream_command", return_value=(0, skipped_output)) as stream,
+                mock.patch.object(runner, "postprocess_video_notes") as postprocess,
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
         self.assertEqual(code, 0)
         self.assertEqual(stream.call_count, 1)
         postprocess.assert_not_called()
@@ -2223,17 +2497,31 @@ class BatchAndDiagnosticsTests(unittest.TestCase):
             )
             cfg = {"CONDA_ENV": "", "VIDEO_MANIFEST_ENABLED": "false"}
             skipped_output = f"SKIPPED_EXISTING_MARKDOWN_PATH:{note}\n"
+            completed_sections = [
+                ("一句话概括", "讨论内容总结。"), ("速读摘要", "摘要完整。"),
+                ("思维导图", "- 主题\n  - 结论"), ("结构化正文", "经营变化需要持续跟踪。"),
+                ("金句与重要原话", "持续关注经营变化。"), ("可复习清单", "- 下一步跟踪什么？"),
+                ("术语与概念", "经营质量：企业持续经营能力。"), ("校对正文", "可恢复转写。"),
+                ("原始字幕", "可恢复转写"),
+            ]
+            def run_commands(command, *_args, **_kwargs):
+                if "--summary-only" in command:
+                    note.write_text(
+                        "# 视频\n\n" + "\n\n".join(f"## {name}\n\n{content}" for name, content in completed_sections),
+                        encoding="utf-8",
+                    )
+                return (0, skipped_output if "--summary-only" not in command else "summary ok")
             with (
                 mock.patch.object(runner, "project_env", return_value={}),
                 mock.patch.object(runner, "bash_command", return_value=["bash", "transcribe.sh"]),
                 mock.patch.object(runner, "python_command", return_value=["python", "summary.py"]),
-                mock.patch.object(runner, "stream_command", side_effect=[(0, skipped_output), (0, "summary ok")]) as stream,
+                mock.patch.object(runner, "stream_command", side_effect=run_commands) as stream,
                 mock.patch.object(runner, "postprocess_video_notes") as postprocess,
             ):
                 code = runner.run_local_file(ROOT / "worker", cfg, "/tmp/fixture.mp3", False)
             self.assertEqual(code, 0)
             self.assertEqual(stream.call_count, 2)
-            self.assertEqual(postprocess.call_count, 2)
+            self.assertEqual(postprocess.call_count, 1)
 
     def test_skipped_incomplete_legacy_note_accepts_complete_original_marker(self):
         with tempfile.TemporaryDirectory() as temp:

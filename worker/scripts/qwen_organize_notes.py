@@ -28,6 +28,7 @@ from mindmap_markdown import (
 )
 from note_filename import flag_enabled, parse_published_date, prepend_date_prefix, strip_date_prefix
 from stock_reference import build_stock_reference_prompt, build_stock_validation_section, sanitize_model_stock_codes
+from task_diagnostics import begin_model_call, diagnostic_stage, finish_model_call, record_cache_hit, record_retry
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -236,26 +237,44 @@ def call_chat_completion(cfg: dict[str, str], messages: list[dict[str, str]]) ->
     retry_count = max(0, int(cfg.get("QWEN_ORGANIZE_MAX_RETRIES") or 0))
     retry_delay = max(0.0, float(cfg.get("QWEN_ORGANIZE_RETRY_DELAY") or 0))
     last_error: Exception | None = None
+    last_reason = None
     for attempt in range(1, retry_count + 2):
         wait_before_model_call(cfg)
+        if attempt > 1:
+            record_retry("organization", last_reason or "transport")
+        call_id = begin_model_call("organization", cfg["DEFAULT_LLM_MODEL"], config={
+            "enable_thinking": payload["enable_thinking"], "timeout_seconds": timeout,
+            "max_retries": retry_count,
+        })
+        call_status, call_reason, call_usage = "failed", None, None
         try:
             try:
                 with urllib.request.urlopen(request, timeout=timeout) as response:
                     data = json.loads(response.read().decode("utf-8"))
             finally:
                 _LAST_MODEL_CALL_MONOTONIC = time.monotonic()
-            return str(data["choices"][0]["message"]["content"]).strip()
+            call_usage = data.get("usage") if isinstance(data, dict) else None
+            content = str(data["choices"][0]["message"]["content"]).strip()
+            call_status = "completed"
+            return content
         except urllib.error.HTTPError as exc:
+            call_reason = f"http_{exc.code}"
+            last_reason = call_reason
             detail = exc.read().decode("utf-8", errors="replace")
             last_error = RuntimeError(f"LLM HTTP {exc.code}: {detail}")
             if not is_retryable_http_status(exc.code) or attempt > retry_count:
                 raise last_error from exc
         except urllib.error.URLError as exc:
+            call_reason = "connection"
+            last_reason = call_reason
             last_error = RuntimeError(f"LLM connection failed: {exc.reason}")
             if attempt > retry_count:
                 raise last_error from exc
         except (KeyError, IndexError, TypeError) as exc:
+            call_reason = "invalid_response"
             raise RuntimeError(f"unexpected LLM response: {data}") from exc
+        finally:
+            finish_model_call(call_id, "organization", call_status, usage=call_usage, reason=call_reason)
         wait = retry_delay * (2 ** (attempt - 1))
         print(f"LLM request failed ({attempt}/{retry_count + 1}): {last_error}", file=sys.stderr)
         print(f"retrying in {wait:g}s", file=sys.stderr)
@@ -874,6 +893,7 @@ def write_short_opus_note(
     return output_path, item
 
 
+@diagnostic_stage("organization")
 def organize_file(
     draft_path: pathlib.Path,
     output_dir: pathlib.Path,
@@ -1125,6 +1145,7 @@ def main() -> int:
                     str(meta.get("source_hash") or "") if source_type == "bilibili-opus" else "",
                 ):
                     skipped += 1
+                    record_cache_hit("organization", "completed_output")
                     print(
                         f"{progress_label} 已存在完整笔记，无需更新（未调用 Qwen）：{planned_output.name}",
                         flush=True,
@@ -1132,6 +1153,7 @@ def main() -> int:
                     continue
                 if source_type != "bilibili-opus" and manifest_item is not None and manifest_item.get("organized_status") == "organized":
                     skipped += 1
+                    record_cache_hit("organization", "completed_output")
                     print(f"{progress_label} 已有完整整理结果，无需更新（未调用 Qwen）：{planned_output.name}", flush=True)
                     continue
             if organized > 0 and cooldown_delay > 0:

@@ -24,6 +24,7 @@ def main() -> int:
     required_resources = {
         "../worker/local_note_studio_worker.py",
         "../worker/automation_core.py",
+        "../worker/cache_maintenance.py",
         "../worker/automation_profiles.py",
         "../worker/local_notes_agent.py",
         "../worker/local_notes_mcp.py",
