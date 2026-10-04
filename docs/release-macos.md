@@ -36,6 +36,7 @@ For the verified APFS packaging path, build the signed app with `npm run tauri:b
 
 ## 0.1.29 workflow, cache maintenance and diagnostics (2026-10-04)
 
+- Integration: source/release commit `af5ceaf`, merged from `codex/p0-p1-backlog` into local `main` as `a7d0c8c` after acceptance passed. The merge tree matches the verified source commit. No remote push was performed.
 - Changes: completion contracts and transactional video publication, resumable proofreading and bounded quality subdivision, effective stage parameters, content review/timing, desktop profiles and serial queues, plus T-118 inventory, reference-protected cleanup previews, retention and redacted diagnostic exports. Automatic cleanup is disabled by default; viable recovery, referenced materials and unknown legacy provenance are protected. Diagnostic audit events are counted separately and retained.
 - Validation: `npm run release:check` passes the production frontend, both frontend regressions, 281 Python tests, 11 Rust tests and release consistency checks. Shell syntax and whitespace checks also pass.
 - Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.29_aarch64.dmg` (3,922,766 bytes).
