@@ -1,8 +1,8 @@
 # macOS Release Checklist
 
-Current internal release: 0.1.29 (2026-10-04), containing the P0/P1 workflow fixes and P2 T-118 cache maintenance and task diagnostics. The Apple Silicon app/DMG passed release checks, read-only mounting, packaged Worker acceptance and an isolated native desktop smoke test. Normal upgrades preserve evidence and retention settings; automatic cleanup remains off unless explicitly configured. Developer ID signing, notarization and independent clean-Mac acceptance remain open public-release gates.
+Current internal release: 0.1.30 (2026-10-06), fixing review-section boundaries on top of the P0/P1 workflows and P2 T-118 cache maintenance and task diagnostics. The 0.1.30 Apple Silicon app/DMG passed release checks, read-only mount/signature/hash verification and installed-app startup/dependency checks. The broader packaged Worker and isolated native desktop acceptance was completed on 0.1.29; its recorded scope is retained below. Normal upgrades preserve evidence and retention settings; automatic cleanup remains off unless explicitly configured. Developer ID signing, notarization and independent clean-Mac acceptance remain open public-release gates.
 
-Local artifact retention (2026-10-05): project housekeeping removed the older 0.1.0 debug image and 0.1.26–0.1.28 DMGs. The current 0.1.29 signed app/DMG and its frontend verification assets remain intact. Older entries below retain historical build metadata; they do not imply that those files remain in the local checkout.
+Local artifact retention (2026-10-05): project housekeeping removed the older 0.1.0 debug image and 0.1.26–0.1.28 DMGs. The 0.1.29 app/DMG and its frontend verification assets were retained at that checkpoint. The shared build output now contains the 0.1.30 app; the historical 0.1.29 DMG remains available. Older entries below retain historical build metadata; they do not imply that those files remain in the local checkout.
 
 The release build produces both `Local Note Studio.app` and a DMG. The app bundle contains the worker source but no mutable Python environment or model weights.
 
@@ -35,6 +35,15 @@ For an internal upgrade, quit Local Note Studio and replace the existing `/Appli
 An Apple Silicon DMG cannot validate Intel compatibility. Produce and test a separate `x86_64` or universal package before claiming both architectures are supported.
 
 For the verified APFS packaging path, build the signed app with `npm run tauri:build -- --bundles app`, then run `npm run release:dmg` after ejecting any mounted image with the same output path. When only repackaging an existing signed app of the current version, the first command can be skipped. The packaging script stages both the app and an `Applications -> /Applications` symlink, creates an APFS image, verifies its checksum, mounts it read-only, verifies the drop target, strict app signature and all app file hashes, then replaces the artifact only after those checks pass. Do not create a release DMG from the app folder alone: that omits the drag-to-install destination.
+
+## 0.1.30 video review-section repair (2026-10-06)
+
+- Changes: the first “人工复核提示” insertion includes its own second-level heading, preventing long review token lists from being validated as proofread speech. Repeated updates preserve manual review selections and folded raw subtitles. The 180-character punctuation and source-coverage gates retain their original thresholds.
+- Validation: `npm run release:check` passes the frontend build/regressions, 284 Python tests, 11 Rust tests and release configuration. The final review suite passes 20 tests after the folded-subtitle update. New cases first reproduced the original defects; genuine unpunctuated speech remains rejected.
+- Artifact: `src-tauri/target/release/bundle/dmg/Local Note Studio_0.1.30_aarch64.dmg` (3,924,807 bytes).
+- SHA-256: `4f91ecc23fe0b6cf07de14d170f551ff65b7f0e275a0b6458434c6856dc4e6dd`.
+- Packaging: the APFS installer passed read-only mount, Applications shortcut, strict deep ad-hoc signature and all app-file hash checks. All 37 configured bundled resources match source. The verified application replaced the installed 0.1.29 copy with the old app retained in a local temporary backup; the updated app launches and completes its dependency check.
+- Recovery acceptance: the reported 72-minute local-video task was recovered from its existing draft and ASR timestamps. Adding only the missing review heading restores the full-note contract; the proofread body exactly matches all three cached chunks. The existing transaction path generated four keyframes, published one note and merged the video Manifest with zero ASR/LLM calls. All 15 previously published notes and the original recovery draft are byte-for-byte unchanged. No broader note migration or fresh model generation was performed.
 
 ## 0.1.29 workflow, cache maintenance and diagnostics (2026-10-04)
 

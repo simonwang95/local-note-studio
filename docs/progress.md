@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-10-06
+
+- Fixed a real 0.1.29 local-video failure: first insertion of the human-review section omitted its `## 人工复核提示` heading, so a long company-name comparison list entered the proofread section and failed the punctuation gate. The insertion now passes a complete section; repeated updates preserve manual choices and folded raw subtitles. Quality thresholds remain unchanged.
+- Added regression coverage for long review lists, visible/hidden and heading/folded raw transcripts, update deduplication, manual selections, and genuine unpunctuated speech. The original defects were reproduced before the fixes. Release checks pass the frontend, 284 Python tests and 11 Rust tests; the final 20-case review suite also passes.
+- Built, verified and installed 0.1.30 with a retained 0.1.29 app backup. All 37 bundled source resources match; strict signatures and native startup/dependency checks pass. The 3,924,807-byte APFS DMG passed read-only mounted app/shortcut/hash verification, SHA-256 `4f91ecc23fe0b6cf07de14d170f551ff65b7f0e275a0b6458434c6856dc4e6dd`.
+- Recovered the reported 72-minute video through the existing transaction path with four keyframes and its Manifest entry. Only the missing review heading was added to generated text; the 23,458-character proofread body matches all three checkpoints and the source/segment hashes match. No model or ASR calls were needed. The old recovery draft and 15 existing formal notes retain exact bytes. A repair report and original-app backup remain locally available; no other notes were migrated.
+
 ## 2026-10-05
 
 - Cleaned obsolete/rebuildable project output after confirming no active project build/debug process: the 4.01 GiB debug tree (including the old 0.1.0 image), 0.1.26–0.1.28 DMGs, source-tree Python bytecode and Finder metadata. Removed 47 unused generated Android/iOS/Windows icon files while preserving the configured macOS icons, release-check PNG and SVG regeneration source. Total project allocation decreased by 4,316,360,704 bytes (4.02 GiB), from 5.96 GiB to 1.94 GiB immediately after cleanup.

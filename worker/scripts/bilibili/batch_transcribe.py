@@ -1002,6 +1002,7 @@ def _replace_placeholder(content, key, value):
 
 
 def _upsert_section_before_raw(content, section_title, section_text):
+    """Insert or replace a complete Markdown section, including its heading."""
     pattern = rf"(?ms)^##\s+{re.escape(section_title)}\s*$\n.+?(?=^##\s+|\n---\s*\n<details>|\n<details>|\Z)"
     section = section_text.strip() + "\n\n"
     if re.search(pattern, content):
@@ -1435,12 +1436,10 @@ def _review_section(findings, previous_section=""):
 
 
 def _upsert_review_section(content, findings):
-    pattern = r"(?ms)^##\s+人工复核提示\s*$\n.*?(?=^##\s+|\Z)"
+    pattern = r"(?ms)^##\s+人工复核提示\s*$\n.*?(?=^##\s+|\n---\s*\n<details>|\n<details>|\Z)"
     existing = re.search(pattern, content)
     section = _review_section(findings, existing.group(0) if existing else "")
-    if existing:
-        return re.sub(pattern, section + "\n\n", content, count=1)
-    return _upsert_section_before_raw(content, "人工复核提示", "\n".join(section.splitlines()[2:]))
+    return _upsert_section_before_raw(content, "人工复核提示", section)
 
 
 @diagnostic_stage("video_organization", lambda result: result.status)

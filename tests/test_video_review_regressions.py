@@ -16,6 +16,7 @@ from test_worker import ROOT, runner as r, batch_transcriber as b, keyframes as 
 from test_video_contract import valid_video_note
 from transcript_timing import attach_timing, load_note_timing, timing_path, timestamp_for_position
 from transcript_quality import save_transcript_diagnostic, load_transcript_diagnostic
+from video_contract import SECTION_NAMES, raw_transcript, section_text, validate_video_note
 
 
 class ReviewRegressions(unittest.TestCase):
@@ -269,6 +270,80 @@ class ReviewRegressions(unittest.TestCase):
             b._run_chunked_proofread("cooldown", "title", text, note)
             self.assertEqual(calls.call_count, 2)
             sleep.assert_called_once_with(30)
+
+    def long_review_findings(self):
+        return [{
+            "kind": "公司/主体名称",
+            "source": [f"日本企业向主力合作银行提交完整经营资料{index}" for index in range(20)],
+            "corrected": ["日本企业银行"],
+            "status": "needs_review",
+            "message": "请对照原始转写复核公司名称。",
+        }]
+
+    def test_generated_review_is_a_separate_section_with_or_without_visible_subtitles(self):
+        clauses = [f"第{index}家企业核验银行贷款与经营订单的资料" for index in range(25)]
+        source = "".join(clauses)
+        proofread = "。\n".join(clauses) + "。"
+        draft = valid_video_note(source).replace(
+            "## 校对正文\n\n" + source,
+            "## 校对正文\n\n" + b.PLACEHOLDERS["proofread"],
+        )
+        for keep_raw, folded_raw in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(keep_original_subtitles=keep_raw, folded_raw=folded_raw):
+                note = self.out / f"review-{keep_raw}-{folded_raw}.md"
+                content = draft.replace(
+                    "## 原始字幕\n\n" + source + "\n",
+                    "<details>\n<summary>📄 原始字幕</summary>\n\n" + source + "\n\n</details>\n",
+                ) if folded_raw else draft
+                note.write_text(content)
+                with (
+                    mock.patch.object(b, "SUMMARY_API_KEY", "fixture"),
+                    mock.patch.object(b, "KEEP_ORIGINAL_SUBTITLES", keep_raw),
+                    mock.patch.object(b, "A_SHARE_TERMS_ENABLED", False),
+                    mock.patch.object(b, "_run_chunked_proofread", return_value=proofread),
+                    mock.patch.object(b, "review_transcript_changes", return_value=self.long_review_findings()),
+                    mock.patch.object(b, "_run_summary_sections") as summary,
+                ):
+                    outcome = b.generate_summary(str(note))
+                content = note.read_text()
+                self.assertEqual(outcome.status, "completed")
+                summary.assert_not_called()
+                self.assertEqual(content.count("## 人工复核提示\n"), 1)
+                self.assertEqual(section_text(content, SECTION_NAMES["校对正文"]), proofread)
+                self.assertIn("日本企业向主力合作银行提交完整经营资料19", section_text(content, ("人工复核提示",)))
+                self.assertEqual(raw_transcript(content), source if keep_raw else "")
+                self.assertTrue(validate_video_note(content, raw_transcript_override=source).complete)
+
+    def test_review_upsert_preserves_manual_selection_and_does_not_duplicate_section(self):
+        for folded_raw in (False, True):
+            with self.subTest(folded_raw=folded_raw):
+                note = valid_video_note()
+                if folded_raw:
+                    raw = raw_transcript(note)
+                    note = note.replace(
+                        "## 原始字幕\n\n" + raw + "\n",
+                        "<details>\n<summary>📄 原始字幕</summary>\n\n" + raw + "\n\n</details>\n",
+                    )
+                content = b._upsert_review_section(note, self.long_review_findings())
+                content = content.replace(
+                    "[x] 待复核 · [ ] 保留校对结果",
+                    "[ ] 待复核 · [x] 保留校对结果",
+                )
+                updated = b._upsert_review_section(content, self.long_review_findings())
+                self.assertEqual(updated.count("## 人工复核提示\n"), 1)
+                self.assertEqual(updated.count("<!-- LNS_REVIEW_ID:"), 1)
+                self.assertIn("[ ] 待复核 · [x] 保留校对结果", updated)
+                self.assertEqual(raw_transcript(updated), raw_transcript(note))
+                self.assertEqual(section_text(updated, SECTION_NAMES["校对正文"]),
+                                 raw_transcript(note))
+                self.assertTrue(validate_video_note(updated).complete)
+
+    def test_review_heading_does_not_hide_unpunctuated_proofread(self):
+        source = "".join(f"第{index}家企业核验银行贷款与经营订单的资料" for index in range(25))
+        content = b._upsert_review_section(valid_video_note(source), self.long_review_findings())
+        validation = validate_video_note(content)
+        self.assertFalse(validation.complete)
+        self.assertIn("校对正文：超过180字的中文片段没有标点", validation.errors)
 
     def test_transaction_keeps_keyframe_provenance_with_published_images(self):
         def produce(cfg):
