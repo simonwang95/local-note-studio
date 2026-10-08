@@ -690,7 +690,10 @@ transcribe_bilibili_url() {
     local final_outdir="${OUTPUT_DIR}"
     mkdir -p "$final_outdir"
 
-    write_output_file "$OUTPUT_FILE" "$TITLE" "$url" "$AUTHOR" "$UPLOAD_DATE_FORMATTED" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT_SIMPLIFIED"
+    if ! write_output_file "$OUTPUT_FILE" "$TITLE" "$url" "$AUTHOR" "$UPLOAD_DATE_FORMATTED" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT_SIMPLIFIED"; then
+        echo "❌ Markdown 或字幕时间轴写入失败"
+        return 1
+    fi
 
     echo ""
     echo "✅ 转录完成！"
@@ -775,7 +778,10 @@ transcribe_local_file() {
             local subtitle_output="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
             echo "   📝 $file_label: 写入 Markdown: $(basename "$subtitle_output")"
             TRANSCRIPT_TIMING_FILE="$subtitle_file"
-            write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "本地SRT字幕" "$subtitle_text"
+            if ! write_output_file "$subtitle_output" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "本地SRT字幕" "$subtitle_text"; then
+                echo "   ❌ $file_label: Markdown 或字幕时间轴写入失败"
+                return 1
+            fi
             LOCAL_ITEM_STATUS="created"
             echo "   ✅ $file_label: 字幕导入完成 → $(basename "$subtitle_output")"
             echo "GENERATED_MARKDOWN_PATH:$subtitle_output"
@@ -855,7 +861,6 @@ transcribe_local_file() {
 
     local TRANSCRIPT_SOURCE; TRANSCRIPT_SOURCE=$(head -1 "$q3_output")
     local TRANSCRIPT_TEXT;    TRANSCRIPT_TEXT=$(tail -n +2 "$q3_output")
-    rm -rf "$work_dir"
 
     # 繁体转简体
     TRANSCRIPT_TEXT=$(echo "$TRANSCRIPT_TEXT" | to_simplified)
@@ -864,7 +869,13 @@ transcribe_local_file() {
     local OUTPUT_FILE="${CUSTOM_OUTPUT:-${LOCAL_OUT}/${SAFE_NAME}_${NOW}.md}"
 
     echo "   📝 $file_label: 写入 Markdown: $(basename "$OUTPUT_FILE")"
-    write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"
+    # The ASR timing source lives in work_dir until write_output_file attaches it.
+    if ! write_output_file "$OUTPUT_FILE" "$base_name" "file://$file_path" "本地文件" "$NOW" "$DURATION" "$TRANSCRIPT_SOURCE" "$TRANSCRIPT_TEXT"; then
+        rm -rf "$work_dir"
+        echo "   ❌ $file_label: Markdown 或字幕时间轴写入失败"
+        return 1
+    fi
+    rm -rf "$work_dir"
 
     LOCAL_ITEM_STATUS="created"
     echo "   ✅ $file_label: 转录完成 → $(basename "$OUTPUT_FILE")"
@@ -875,7 +886,7 @@ write_output_file() {
     local out="$1" title="$2" link="$3" author="$4" date="$5" duration="$6" source="$7" text="$8"
     local include_full="${INCLUDE_FULL_TEXT:-false}"
 
-    cat > "$out" << EOF
+    cat > "$out" << EOF || return 1
 # $title
 
 ## 视频信息
@@ -940,14 +951,14 @@ EOF
 
     # 原始字幕在末尾，默认折叠；LLM 后处理可按用户设置移除。
     if [ "$include_full" = "true" ]; then
-        cat >> "$out" << EOF
+        cat >> "$out" << EOF || return 1
 
 ## 原始字幕
 
 $text
 EOF
     else
-        cat >> "$out" << EOF
+        cat >> "$out" << EOF || return 1
 
 <details>
 <summary>📄 原始字幕</summary>
@@ -958,7 +969,9 @@ $text
 EOF
     fi
     if [ -n "${TRANSCRIPT_TIMING_FILE:-}" ] && [ -s "$TRANSCRIPT_TIMING_FILE" ]; then
-        run_python "$SCRIPT_DIR/../transcript_timing.py" --note "$out" --source "$TRANSCRIPT_TIMING_FILE"
+        if ! run_python "$SCRIPT_DIR/../transcript_timing.py" --note "$out" --source "$TRANSCRIPT_TIMING_FILE"; then
+            return 1
+        fi
         case "$TRANSCRIPT_TIMING_FILE" in
             *.segments.json) rm -f "$TRANSCRIPT_TIMING_FILE" ;;
         esac

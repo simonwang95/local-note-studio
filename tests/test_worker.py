@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,66 @@ quickread = load_module("quick_read_pdf_test", ROOT / "worker" / "scripts" / "qu
 organizer = load_module("qwen_organize_notes_test", ROOT / "worker" / "scripts" / "qwen_organize_notes.py")
 keyframes = sys.modules["video_keyframes"]
 mindmap_markdown = sys.modules["mindmap_markdown"]
+
+
+class SignedWorkerResourceTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = pathlib.Path(temp.name)
+        self.resources = self.root / "Resources" / "_up_" / "worker"
+        shutil.copytree(
+            ROOT / "worker", self.resources,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "env.local"),
+        )
+        # Isolate dependency probes, credentials and writable runtime state.
+        self.env = {
+            "PATH": str(self.root / "no-tools"),
+            "LOCAL_NOTE_STUDIO_APP_DATA_DIR": str(self.root / "data"),
+            "LOCAL_NOTE_STUDIO_STATE_DIR": str(self.root / "state"),
+        }
+
+    def assert_resources_unchanged(self, before):
+        after = {path.relative_to(self.resources): path.read_bytes() for path in self.resources.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+        self.assertEqual(list(self.resources.rglob("__pycache__")), [])
+        self.assertEqual(list(self.resources.rglob("*.pyc")), [])
+
+    def test_real_worker_entrypoint_env_check_preserves_signed_resources(self):
+        before = {path.relative_to(self.resources): path.read_bytes() for path in self.resources.rglob("*") if path.is_file()}
+        self.assertNotIn("PYTHONDONTWRITEBYTECODE", self.env)
+        completed = subprocess.run(
+            [sys.executable, str(self.resources / "local_note_studio_worker.py"),
+             "--task", "env-check", "--python-bin", str(self.root / "missing-python")],
+            env=self.env, text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Local Note Studio environment check", completed.stdout)
+        self.assertIn('"status": "completed"', completed.stdout)
+        self.assert_resources_unchanged(before)
+
+    def test_real_nested_python_forces_bytecode_guard_over_inherited_and_config_values(self):
+        code = """
+import pathlib, runpy, subprocess, sys
+namespace = runpy.run_path(sys.argv[1])
+assert sys.dont_write_bytecode
+env = namespace['build_env'](namespace['TaskRequest'](task='local-video'))
+assert env['PYTHONDONTWRITEBYTECODE'] == '1'
+child = "import sys; assert sys.dont_write_bytecode; sys.path.insert(0, sys.argv[1]); import scripts.video_contract"
+subprocess.run([sys.executable, '-c', child, str(pathlib.Path(sys.argv[1]).parent)], env=env, check=True)
+"""
+        # Empty values actually enable writes; even "0" is truthy to Python.
+        for disabled in ("", "0"):
+            with self.subTest(configured=disabled):
+                (self.resources / "env.local").write_text(f"PYTHONDONTWRITEBYTECODE={disabled}\n", encoding="utf-8")
+                before = {path.relative_to(self.resources): path.read_bytes() for path in self.resources.rglob("*") if path.is_file()}
+                self.env["PYTHONDONTWRITEBYTECODE"] = disabled
+                completed = subprocess.run(
+                    [sys.executable, "-c", code, str(self.resources / "local_note_studio_worker.py")],
+                    env=self.env, text=True, capture_output=True, timeout=30,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assert_resources_unchanged(before)
 
 
 class RequestAndCommandContractTests(unittest.TestCase):

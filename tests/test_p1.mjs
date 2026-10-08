@@ -270,3 +270,51 @@ assert.equal(fakeDocument.querySelector("#overwriteOutputs").checked, true);
 assert.equal(fakeDocument.querySelector("#collectionSelect").value, "A");
 assert.equal(fakeDocument.querySelector("#proofreadCooldownDelay").value, "7");
 console.log("desktop profile switching and atomic hydration: ok");
+
+// Preserve the real declaration order around the initial UI recovery. Extracting
+// only render functions would miss a const initialized after that first call.
+const bootstrapLabels = new Set(["taskLabels", "historyStatusLabels", "queueStatusLabels"]);
+const bootstrapRenderers = new Set(["renderHistory", "renderQueue", "escapeHtml"]);
+const initialRecovery = mainAst.statements.find((statement) =>
+  ts.isTryStatement(statement) && statement.tryBlock.getText(mainAst).includes("appTabs.bind()")
+);
+assert.ok(initialRecovery, "the actual startup UI recovery must be exercised");
+const bootstrapStatements = mainAst.statements.filter((statement) =>
+  statement === initialRecovery
+  || (ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => bootstrapLabels.has(declaration.name.getText(mainAst))))
+  || (ts.isFunctionDeclaration(statement) && bootstrapRenderers.has(statement.name?.text))
+);
+assert.equal(bootstrapStatements.length, bootstrapLabels.size + bootstrapRenderers.size + 1);
+history.saveTaskHistory([{
+  id: "startup-history", task: "local-video", status: "running", startedAt: "2026-10-07T00:00:00Z",
+  request: { source: "/media/resume.mp4" }, outputs: [], log: "",
+}]);
+history.saveQueue([
+  { id: "startup-running", profileId: defaultProfile.id, status: "running", addedAt: "2026-10-07T00:00:00Z", request: { task: "local-video", source: "/media/queued.mp4", output_dir: "/notes" } },
+  { id: "startup-waiting", profileId: defaultProfile.id, status: "waiting", addedAt: "2026-10-07T00:00:00Z", request: { task: "local-video", source: "/media/waiting.mp4", output_dir: "/notes" } },
+]);
+const bootstrapFields = new Map();
+const bootstrapErrors = [];
+const bootstrapContext = vm.createContext({
+  document: { querySelector(selector) {
+    if (!bootstrapFields.has(selector)) bootstrapFields.set(selector, { innerHTML: "", textContent: "", querySelectorAll: () => [] });
+    return bootstrapFields.get(selector);
+  } },
+  taskHistory: history.loadTaskHistory(), queueEntries: history.loadQueue(),
+  desktopProfiles: { profiles: [defaultProfile] }, historyFilter: "all", queueRunning: false,
+  filterTaskHistory: history.filterTaskHistory,
+  appTabs: { bind() {} }, hydrateRuntimeControls() {}, hydrateTaskControls() {}, hydrateTaskOutput() {}, bindSettingsPersistence() {},
+  setState(message) { bootstrapErrors.push(message); },
+  setOutput(message) { bootstrapErrors.push(message); }, errorMessage: String,
+});
+vm.runInContext(ts.transpileModule(bootstrapStatements.map((statement) => statement.getText(mainAst)).join("\n"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, bootstrapContext);
+assert.deepEqual(bootstrapErrors, [], "nonempty history and queue must restore without a startup error");
+assert.equal(bootstrapFields.get("#historyCount").textContent, "1/1 条");
+assert.match(bootstrapFields.get("#historyList").innerHTML, /已中断.*本地视频\/音频/s);
+assert.match(bootstrapFields.get("#historyList").innerHTML, /按历史参数重跑/);
+assert.match(bootstrapFields.get("#queueList").innerHTML, /已中断.*queued\.mp4/s);
+assert.match(bootstrapFields.get("#queueList").innerHTML, /等待中.*waiting\.mp4/s);
+assert.match(bootstrapFields.get("#queueList").innerHTML, /data-queue-action="retry"/);
+console.log("desktop startup restores persisted history and queue: ok");

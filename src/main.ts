@@ -163,6 +163,18 @@ const taskLabels: Record<TaskType, string> = {
   "epub-export": "目录导出 EPUB",
 };
 
+const historyStatusLabels: Record<TaskHistoryStatus, string> = {
+  running: "运行中",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+const queueStatusLabels: Record<QueueStatus, string> = {
+  waiting: "等待中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
+};
+
 const taskHints: Record<TaskType, string> = {
   "bilibili-url": "输入一个 Bilibili 视频链接。Markdown 会直接写入本次输出目录；可选生成关键帧图文笔记，也可不保留原始字幕。",
   "bilibili-favorite": "先读取当前登录账号的收藏夹/系列并选择目标。批量中单条失败不会阻断其余条目，结束后可只重试失败项。",
@@ -2545,18 +2557,6 @@ function manifestStatusLabel(status: string): string {
     rebuild: "输出缺失",
   }[status] ?? status;
 }
-
-const historyStatusLabels: Record<TaskHistoryStatus, string> = {
-  running: "运行中",
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-  interrupted: "已中断",
-};
-
-const queueStatusLabels: Record<QueueStatus, string> = {
-  waiting: "等待中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
-};
 
 function renderHistory(): void {
   const target = document.querySelector<HTMLElement>("#historyList");

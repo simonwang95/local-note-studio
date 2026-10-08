@@ -980,13 +980,13 @@ def _content_before_raw_transcript(content):
     return content[:min(starts)] if starts else content
 
 
-def _can_remove_original_subtitles(content):
+def _can_remove_original_subtitles(content, source=""):
     """Require a completed generated body before deleting the retry source."""
     if any(placeholder in content for placeholder in ALL_PLACEHOLDERS):
         return False
     generated_content = _content_before_raw_transcript(content)
     proofread = re.search(r"(?ms)^##\s+校对正文\s*$\n(.*?)(?=^##\s+|\Z)", generated_content)
-    if proofread and proofread_errors(proofread.group(1)):
+    if proofread and proofread_errors(proofread.group(1), source or _extract_transcript_text(content)):
         return False
     return any(
         _section_has_generated_content(generated_content, section_title)
@@ -1567,7 +1567,7 @@ def generate_summary(filepath, progress_label=None):
     if sections:
         print(f"   ✅ {label}: 整理已写入 {sum(key in sections for key in requested)}/{len(requested)} 个栏目")
 
-    if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content):
+    if not KEEP_ORIGINAL_SUBTITLES and _can_remove_original_subtitles(content, transcript_text):
         updated = _remove_original_subtitles_section(content)
         if updated != content:
             content = updated

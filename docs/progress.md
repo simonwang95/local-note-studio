@@ -1,5 +1,21 @@
 # Progress
 
+## 2026-10-08
+
+- Native acceptance exposed Python bytecode creation inside signed application resources. The Worker now disables it before local imports and forces the child-process guard after configuration loading; direct and nested subprocess regressions verify byte-for-byte resource preservation.
+- Local ASR timing evidence was deleted with its work directory before it could reach the note. Cleanup now follows Markdown/timing attachment, failures propagate explicitly, and three real-shell regressions verify timestamp/cache propagation and error cleanup.
+
+- The reported 111-minute video now completes with all eight sections. Its initial ASR text and 3,505 segments are unchanged; the 31,106-character source cache and full note contract validate. A later zero-model transaction restored timing evidence and regenerated four frames, honestly retained as estimated/low when passage matches are weak. All 124 prior files remain byte-for-byte unchanged.
+- The final 0.1.31 app is installed with a candidate backup. Packaged and installed Worker dependency checks and a historical video replay pass without changing any of the 41 signed app files. The replay reports `no_changes` and explicitly skips ASR/Qwen, leaving the completed note unchanged. Fresh native restart remains pending while the Mac is locked; the persisted-list bootstrap regression passes.
+
+## 2026-10-07
+
+- Diagnosed the latest 0.1.30 local-video failure before LLM organization: one five-word repetition at about 14:24 triggered thirteen overlapping detector windows, then survived the existing local retry. The actual segment timestamps are ordered. An independent 40-second, no-prompt transcription produced the same phrase with continuous, nonzero word timestamps, supporting a brief spoken emphasis rather than a long decoding loop.
+- Added a bounded confirmation path for Chinese phrases of 2–4 characters repeated 5–6 times (at most 24 characters). Repairs and confirmations share an eight-call budget after the full pass; confirmation clips are at most 40 seconds and require a repeat lasting at most six seconds, source context, valid source/word timing and exact segment-local position. Generic repetition checks remain strict, while proofreading accepts only a corresponding short source repetition.
+- Closed review findings around invalid original segment times, repetitions moved into another matching context, and incognito tasks with hidden subtitles. Incognito source evidence stays in a per-run temporary directory through transactional publication and final Worker validation, then is removed on success, failure or cancellation; persistent evidence/checkpoints remain disabled. Later no-source validation stays conservative and may require regeneration. Runtime incognito flags are synchronized with child processes and restored afterward.
+- Native startup acceptance exposed an existing initialization-order bug: nonempty history and queue rendering used status-label constants before they were initialized. The labels now initialize before the first restoration; a regression executes the actual startup statement order with persisted history and queue, reproducing the original error and verifying both lists after the fix.
+- Final release checks pass the frontend build and startup/profile/history/cache regressions, 302 Python tests, 11 Rust tests and release consistency. The final 3,926,619-byte APFS DMG passed read-only mounted shortcut/signature/app-hash checks, SHA-256 `f06063593b6bdd43569ab250622a268b5468b973f8fe6cc6c41fd3255c07f439`.
+
 ## 2026-10-06
 
 - Fixed a real 0.1.29 local-video failure: first insertion of the human-review section omitted its `## 人工复核提示` heading, so a long company-name comparison list entered the proofread section and failed the punctuation gate. The insertion now passes a complete section; repeated updates preserve manual choices and folded raw subtitles. Quality thresholds remain unchanged.

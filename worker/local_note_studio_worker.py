@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import sys
+
+# Bundled sources are signed resources; imports must not write beside them.
+sys.dont_write_bytecode = True
+
 import argparse
 import contextlib
 import datetime as dt
@@ -16,7 +21,6 @@ import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.error
@@ -311,7 +315,10 @@ def parse_bool(value: object) -> bool:
 def build_env(req: TaskRequest) -> dict[str, str]:
     env = os.environ.copy()
     env.update(load_env_file(WORKER_DIR / "env.local"))
+    # This internal path is allocated for each run, never supplied by saved config.
+    env.pop("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", None)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["LOCAL_NOTE_STUDIO_RUN_ID"] = req.run_id
     env["LOCAL_NOTE_STUDIO_TASK"] = req.task
     env["LOCAL_NOTE_STUDIO_SOURCE_REF"] = stable_source_ref(req.source)
@@ -2359,7 +2366,9 @@ def validate_markdown_output(path: pathlib.Path, req: TaskRequest) -> list[str]:
 
     raw_subtitle = re.search(r"(?m)^(?:##\s+原始字幕|<summary>📄\s*原始字幕</summary>)", markdown) is not None
     if req.task in {"bilibili-url", "bilibili-favorite", "local-video"}:
-        cached_source = load_transcript_diagnostic("source-by-note", str(path.resolve())) or {}
+        cached_source = (load_transcript_diagnostic("source-by-note", str(path.resolve())) or {}) if (
+            not req.incognito_mode or os.environ.get("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR")
+        ) else {}
         validation = validate_video_note(
             markdown,
             transcription_only=req.video_output_mode == "transcription-only",
@@ -2900,22 +2909,41 @@ def execute_request(req: TaskRequest, result: TaskResult) -> None:
                 result.details["cache_maintenance"] = maintenance
         except (OSError, ValueError, AutomationError) as exc:
             result.warnings.append("automatic cache maintenance skipped: " + redact_text(str(exc)))
-    diagnostic_status = result.status
-    try:
-        _execute_request(req, result, env, tracked)
-        diagnostic_status = result.status
-    except BaseException as exc:
-        code, _ = classify_error(exc)
-        diagnostic_status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
-        raise
-    finally:
+    with contextlib.ExitStack() as scope:
         if tracked:
-            try:
-                diagnostics = finalize_run(diagnostic_status, env=env)
-                if diagnostics:
-                    result.details["diagnostics"] = diagnostics
-            except (OSError, ValueError, TypeError):
-                result.warnings.append("task diagnostics could not be persisted")
+            ephemeral = scope.enter_context(tempfile.TemporaryDirectory(prefix="local-note-studio-source-")) if req.incognito_mode else None
+            if ephemeral:
+                env["LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR"] = ephemeral
+            keys = ("LOCAL_NOTE_STUDIO_INCOGNITO", "LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR")
+            previous = {key: os.environ.get(key) for key in keys}
+            def restore_source_environment():
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            scope.callback(restore_source_environment)
+            os.environ["LOCAL_NOTE_STUDIO_INCOGNITO"] = "true" if req.incognito_mode else "false"
+            if ephemeral:
+                os.environ["LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR"] = ephemeral
+            else:
+                os.environ.pop("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", None)
+        diagnostic_status = result.status
+        try:
+            _execute_request(req, result, env, tracked)
+            diagnostic_status = result.status
+        except BaseException as exc:
+            code, _ = classify_error(exc)
+            diagnostic_status = "cancelled" if code == "TASK_CANCELLED" else "timeout" if code == "TASK_TIMEOUT" else "failed"
+            raise
+        finally:
+            if tracked:
+                try:
+                    diagnostics = finalize_run(diagnostic_status, env=env)
+                    if diagnostics:
+                        result.details["diagnostics"] = diagnostics
+                except (OSError, ValueError, TypeError):
+                    result.warnings.append("task diagnostics could not be persisted")
 
 
 def cache_request_mutates(req: TaskRequest) -> bool:

@@ -7,6 +7,7 @@ missing speech or automatically turn an uncertain proper noun into a fact.
 from __future__ import annotations
 
 import difflib
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -53,11 +54,76 @@ def compact_text(text: str) -> str:
     return re.sub(r"[\W_]+", "", text, flags=re.UNICODE).lower()
 
 
+PHRASE_REPEAT_RE = re.compile(r"([\u4e00-\u9fff]{2,12})(?:[\s，,。]*\1){4,}")
+
+
+@dataclass(frozen=True)
+class ShortRepetition:
+    start: int
+    end: int
+    phrase: str
+    count: int
+    before: str
+    after: str
+
+
+def short_repetition_candidates(text: str) -> list[ShortRepetition]:
+    """Locate bounded emphasis candidates; this alone never approves a repeat."""
+    candidates = []
+    for match in PHRASE_REPEAT_RE.finditer(text):
+        run = compact_text(match.group())
+        # Use the shortest period: ten repetitions of a two-character word must
+        # not masquerade as five repetitions of a four-character phrase.
+        phrase = next((run[:size] for size in range(1, min(12, len(run)) + 1)
+                       if len(run) % size == 0 and run[:size] * (len(run) // size) == run), run)
+        count = len(run) // len(phrase)
+        if not (2 <= len(phrase) <= 4 and 5 <= count <= 6 and len(run) <= 24):
+            continue
+        candidates.append(ShortRepetition(
+            match.start(), match.end(), phrase, count,
+            compact_text(text[:match.start()])[-48:],
+            compact_text(text[match.end():])[:48],
+        ))
+    return candidates
+
+
+def _context_agrees(left: str, right: str) -> bool:
+    if min(len(left), len(right)) < 12:
+        return False
+    if PHRASE_REPEAT_RE.search(left) or PHRASE_REPEAT_RE.search(right):
+        return False
+    alignment = difflib.SequenceMatcher(None, left, right, autojunk=False)
+    return alignment.ratio() >= 0.8 and max(block.size for block in alignment.get_matching_blocks()) >= 12
+
+
+def match_source_short_repetitions(text: str, source: str, *, require_position: bool = True) -> list[tuple[ShortRepetition, ShortRepetition]]:
+    """Match individual repeats with complete nearby source context, one to one."""
+    available = short_repetition_candidates(source)
+    matches = []
+    blocks = difflib.SequenceMatcher(None, compact_text(source), compact_text(text), autojunk=False).get_matching_blocks() if require_position else []
+    for candidate in short_repetition_candidates(text):
+        for index, original in enumerate(available):
+            if require_position:
+                original_start = len(compact_text(source[:original.start]))
+                candidate_start = len(compact_text(text[:candidate.start]))
+                run_length = len(candidate.phrase) * candidate.count
+                if not any(block.a <= original_start and original_start + run_length <= block.a + block.size
+                           and block.b + original_start - block.a == candidate_start for block in blocks):
+                    continue
+            if (candidate.phrase == original.phrase and candidate.count == original.count
+                    and _context_agrees(candidate.before, original.before)
+                    and _context_agrees(candidate.after, original.after)):
+                matches.append((candidate, original))
+                available.pop(index)
+                break
+    return matches
+
+
 def repetition_errors(text: str) -> list[str]:
     errors = []
     if re.search(r"[。.!！?？]{8,}", text):
         errors.append("连续异常标点")
-    if re.search(r"([\u4e00-\u9fff]{2,12})(?:[\s，,。]*\1){4,}", text):
+    if PHRASE_REPEAT_RE.search(text):
         errors.append("短语循环重复")
     paragraphs = [compact_text(p) for p in re.split(r"\n\s*\n", text)]
     paragraphs = [p for p in paragraphs if len(p) >= 120]
@@ -70,6 +136,10 @@ def repetition_errors(text: str) -> list[str]:
 
 def proofread_errors(text: str, source: str = "") -> list[str]:
     errors = repetition_errors(text)
+    if "短语循环重复" in errors and source:
+        supported = {(candidate.start, candidate.end) for candidate, _ in match_source_short_repetitions(text, source)}
+        if all(match.span() in supported for match in PHRASE_REPEAT_RE.finditer(text)):
+            errors.remove("短语循环重复")
     if not compact_text(text):
         return errors + ["校对正文为空"]
     # Spaces are not punctuation; otherwise spaced ASR words evade this gate.
@@ -97,13 +167,20 @@ def proofread_errors(text: str, source: str = "") -> list[str]:
     return errors
 
 
-def save_transcript_diagnostic(kind: str, identity: str, payload: dict) -> str:
-    """Atomic private cache, independent of the visible raw-subtitle preference."""
+def _diagnostic_root(kind: str) -> Path | None:
     if incognito():
-        return ""
+        ephemeral = os.environ.get("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", "")
+        return Path(ephemeral) / kind if kind == "source-by-note" and ephemeral else None
     state = Path(os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR") or
                  Path.home() / "Library/Application Support/Local Note Studio/state")
-    root = Path(os.environ.get("TRANSCRIPT_CACHE_DIR") or state / "transcripts") / kind
+    return Path(os.environ.get("TRANSCRIPT_CACHE_DIR") or state / "transcripts") / kind
+
+
+def save_transcript_diagnostic(kind: str, identity: str, payload: dict) -> str:
+    """Atomic private cache; incognito permits only Worker-owned temporary source."""
+    root = _diagnostic_root(kind)
+    if root is None:
+        return ""
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     path = root / f"{digest}.json"
@@ -155,12 +232,10 @@ def save_transcript_diagnostic(kind: str, identity: str, payload: dict) -> str:
 
 
 def load_transcript_diagnostic(kind: str, identity: str) -> dict | None:
-    """Read a previously saved private diagnostic/checkpoint, unless incognito."""
-    if incognito():
+    """Read a private cache or current ephemeral source, never old incognito data."""
+    root = _diagnostic_root(kind)
+    if root is None:
         return None
-    state = Path(os.environ.get("LOCAL_NOTE_STUDIO_STATE_DIR") or
-                 Path.home() / "Library/Application Support/Local Note Studio/state")
-    root = Path(os.environ.get("TRANSCRIPT_CACHE_DIR") or state / "transcripts") / kind
     path = root / f"{hashlib.sha256(identity.encode('utf-8')).hexdigest()}.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))

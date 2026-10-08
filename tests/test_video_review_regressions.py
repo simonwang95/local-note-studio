@@ -345,6 +345,89 @@ class ReviewRegressions(unittest.TestCase):
         self.assertFalse(validation.complete)
         self.assertIn("校对正文：超过180字的中文片段没有标点", validation.errors)
 
+    def test_incognito_hidden_subtitles_use_ephemeral_source_through_transaction_and_worker(self):
+        source = "课程先解释模型训练与人类偏好之间的边界，所以你不停地去" + "优化" * 5 + "了下去就是人类自身的极限，接下来讨论新的学习框架与训练方法。"
+        target = self.out / "video.md"
+        old_cache = Path(save_transcript_diagnostic("source-by-note", str(target.resolve()), {"transcript": "之前任务的私有原文"}))
+        old_bytes = old_cache.read_bytes()
+        req = worker.TaskRequest(task="local-video", source="/fixture/clip.mp4", output_dir=str(self.out),
+                                 incognito_mode=True, keep_original_subtitles=False)
+        result = worker.TaskResult(run_id="ephemeral-review", caller="gui", task=req.task, status="completed",
+                                   started_at=worker.utc_now(), source_ref=req.source, output_dir=req.output_dir)
+        observed = []
+        def execute(_req, _result, env, _tracked):
+            ephemeral = Path(env["LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR"])
+            observed.append(ephemeral)
+            self.assertIsNone(load_transcript_diagnostic("source-by-note", str(target.resolve())))
+            cfg = {**self.cfg, **env, "BILIBILI_OUTPUT_DIR": str(self.out), "INDEX_DIR": str(self.root / "indexes")}
+            def produce(staged_cfg):
+                staged = Path(staged_cfg["BILIBILI_OUTPUT_DIR"]) / "video.md"
+                staged.write_text("---\nsource_path: /fixture/clip.mp4\n---\n" + valid_video_note(source))
+                with mock.patch.object(b, "SUMMARY_API_KEY", "fixture"), mock.patch.object(b, "KEEP_ORIGINAL_SUBTITLES", False):
+                    self.assertEqual(b.generate_summary(str(staged)).status, "completed")
+                self.assertEqual(raw_transcript(staged.read_text()), "")
+                self.assertTrue(r.video_validation(staged, staged_cfg).complete)
+                return 0
+            self.assertEqual(r.run_video_transaction(str(self.out), cfg, produce), 0)
+            self.assertEqual(load_transcript_diagnostic("source-by-note", str(target.resolve()))["transcript"], source)
+            self.assertEqual(worker.validate_markdown_output(target, req), [])
+            self.assertFalse(list(ephemeral.glob("**/proofread-checkpoints/*.json")))
+        with mock.patch.object(worker, "_execute_request", side_effect=execute):
+            worker.execute_request(req, result)
+        self.assertTrue(target.is_file())
+        self.assertTrue(observed)
+        self.assertFalse(observed[0].exists())
+        self.assertEqual(old_cache.read_bytes(), old_bytes)
+        self.assertNotIn("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", os.environ)
+        # A later incognito check has no private source from this completed run.
+        self.assertIn("校对正文：短语循环重复", worker.validate_markdown_output(target, req))
+
+    def test_incognito_ephemeral_source_is_removed_on_failure_and_cancellation(self):
+        for error in (RuntimeError("failed"), KeyboardInterrupt("cancelled")):
+            with self.subTest(error=type(error).__name__):
+                req = worker.TaskRequest(task="local-video", source="/fixture/clip.mp4", output_dir=str(self.out), incognito_mode=True)
+                result = worker.TaskResult(run_id="ephemeral-failure", caller="gui", task=req.task, status="completed",
+                                           started_at=worker.utc_now(), source_ref=req.source, output_dir=req.output_dir)
+                observed = []
+                def fail(_req, _result, env, _tracked):
+                    observed.append(Path(env["LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR"]))
+                    save_transcript_diagnostic("source-by-note", "fixture", {"transcript": "临时任务原文"})
+                    self.assertTrue(list(observed[-1].glob("**/*.json")))
+                    raise error
+                with mock.patch.object(worker, "_execute_request", side_effect=fail), self.assertRaises(type(error)):
+                    worker.execute_request(req, result)
+                self.assertFalse(observed[-1].exists())
+                self.assertEqual(os.environ["LOCAL_NOTE_STUDIO_INCOGNITO"], "false")
+                self.assertNotIn("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", os.environ)
+
+    def test_ordinary_and_private_worker_runs_scope_and_restore_inherited_source_environment(self):
+        save_transcript_diagnostic("source-by-note", "fixture", {"transcript": "普通任务持久来源"})
+        private_roots = []
+        with mock.patch.dict(os.environ, {"LOCAL_NOTE_STUDIO_INCOGNITO": "true",
+                                          "LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR": "/outer/private-evidence"}):
+            for private in (False, True, False):
+                req = worker.TaskRequest(task="local-video", source="/fixture/clip.mp4", output_dir=str(self.out), incognito_mode=private)
+                result = worker.TaskResult(run_id="source-scope", caller="gui", task=req.task, status="completed",
+                                           started_at=worker.utc_now(), source_ref=req.source, output_dir=req.output_dir)
+                def inspect(_req, _result, env, _tracked):
+                    self.assertEqual(os.environ["LOCAL_NOTE_STUDIO_INCOGNITO"], "true" if private else "false")
+                    self.assertEqual(env["LOCAL_NOTE_STUDIO_INCOGNITO"], os.environ["LOCAL_NOTE_STUDIO_INCOGNITO"])
+                    if private:
+                        private_roots.append(Path(env["LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR"]))
+                        self.assertIsNone(load_transcript_diagnostic("source-by-note", "fixture"))
+                        save_transcript_diagnostic("source-by-note", "fixture", {"transcript": "本次隐身临时来源"})
+                        self.assertEqual(load_transcript_diagnostic("source-by-note", "fixture")["transcript"], "本次隐身临时来源")
+                    else:
+                        self.assertNotIn("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", env)
+                        self.assertNotIn("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR", os.environ)
+                        self.assertEqual(load_transcript_diagnostic("source-by-note", "fixture")["transcript"], "普通任务持久来源")
+                with mock.patch.object(worker, "_execute_request", side_effect=inspect):
+                    worker.execute_request(req, result)
+                self.assertEqual(os.environ["LOCAL_NOTE_STUDIO_INCOGNITO"], "true")
+                self.assertEqual(os.environ["LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR"], "/outer/private-evidence")
+        self.assertTrue(private_roots)
+        self.assertTrue(all(not path.exists() for path in private_roots))
+
     def test_transaction_keeps_keyframe_provenance_with_published_images(self):
         def produce(cfg):
             stage = Path(cfg["BILIBILI_OUTPUT_DIR"])

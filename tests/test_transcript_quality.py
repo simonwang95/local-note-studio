@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,12 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker/scripts"))
-from transcript_quality import proofread_errors, save_transcript_diagnostic
+from transcript_quality import (
+    PHRASE_REPEAT_RE, proofread_errors, repetition_errors, save_transcript_diagnostic,
+    short_repetition_candidates,
+)
+from test_video_contract import valid_video_note
+from video_contract import raw_transcript, validate_video_note
 
 
 def load(name, path):
@@ -38,6 +44,170 @@ class Audio:
 
 
 class TranscriptQualityTests(unittest.TestCase):
+    def short_repeat_fixture(self):
+        before = "这段课程解释人类偏好与模型训练之间的明确边界，所以你不停地去"
+        after = "了下去就是人类自身的极限，因此模型容易讨好人类而非解决问题。"
+        closing = "接下来需要比较新的学习框架与现有训练方法之间的差别。"
+        segments = [
+            {"start": 0, "end": 20, "text": before},
+            {"start": 20, "end": 22, "text": "优化" * 4},
+            {"start": 22, "end": 24, "text": "优化" + after},
+            {"start": 24, "end": 60, "text": closing},
+        ]
+        text = "".join(segment["text"] for segment in segments)
+        initial = {"language": "zh", "text": text, "segments": segments}
+        words = [{"word": before, "start": 0, "end": 18.2}]
+        for index, character in enumerate("优化" * 5):
+            words.append({"word": character, "start": 18.2 + index * 0.2,
+                          "end": 18.2 + (index + 1) * 0.2, "probability": 0.55})
+        words.append({"word": after + closing, "start": 20.2, "end": 40})
+        independent = {"language": "zh", "text": text,
+                       "segments": [{"start": 0, "end": 40, "text": text, "words": words}]}
+        return initial, independent
+
+    def test_generic_repeat_gate_stays_strict_and_proofread_requires_matching_source_context(self):
+        source, _ = self.short_repeat_fixture()
+        text = source["text"]
+        self.assertIn("短语循环重复", repetition_errors(text))
+        self.assertIn("短语循环重复", proofread_errors(text))
+        self.assertEqual(proofread_errors(text, text), [])
+        response = batch.LLMResponse(f"[[LNS_SECTION:proofread]]{text}[[/LNS_SECTION:proofread]]", "stop")
+        self.assertEqual(batch._parse_combined_summary(response, ["proofread"], text)["proofread"], text)
+        self.assertIn("短语循环重复", proofread_errors(text + text, text))
+        other_context = "居民家庭讨论消费开支与房屋贷款之间的关系，所以需要做好" + "优化" * 5 + "接着银行会审核资产负债及经营现金流，不涉及模型训练。"
+        self.assertIn("短语循环重复", proofread_errors(other_context, text))
+
+    def test_source_supported_repeat_limits_use_the_shortest_period(self):
+        source, _ = self.short_repeat_fixture()
+        for phrase, count, accepted in (("优化", 6, True), ("优化", 7, False),
+                                        ("优化", 10, False), ("优化模型参数", 5, False)):
+            text = source["text"].replace("优化" * 5, phrase * count)
+            with self.subTest(phrase=phrase, count=count):
+                self.assertEqual("短语循环重复" not in proofread_errors(text, text), accepted)
+        self.assertEqual(short_repetition_candidates("优化" * 10), [])
+        self.assertIn("短语循环重复", proofread_errors(source["text"].replace("优化" * 5, "优化" * 6), source["text"]))
+
+    def test_proofread_cannot_move_a_repeat_to_a_distant_place_with_identical_context(self):
+        before = "我们回到刚才所说的模型训练方法需要围绕成本和训练效率做判断各种办法都要比较能够改进的方向所以接下来继续"
+        after = "。随后讨论具体指标和实验记录以便检查结论能否用于当前场景不同团队还会根据真实反馈安排后续工作并总结经验。"
+        separator = "".join(f"第{i}项测试比较设备成本与交付时间，记录需求变化和执行结果。" for i in range(20))
+        source = before + "优化" * 5 + after + separator + before + "提升" + after
+        corrected = before + "提升" + after + separator + before + "优化" * 5 + after
+        self.assertEqual(proofread_errors(source, source), [])
+        self.assertIn("短语循环重复", proofread_errors(corrected, source))
+
+    def test_confirmed_asr_emphasis_retains_original_words_and_records_independent_evidence(self):
+        initial, independent = self.short_repeat_fixture()
+        call = mock.Mock(side_effect=[initial, copy.deepcopy(initial), independent])
+        raw, final, attempts, errors = asr.transcribe_with_repair(
+            Audio(60), call, {"condition_on_previous_text": False, "initial_prompt": "课程术语"}, lambda a, b: True)
+        self.assertEqual(errors, [])
+        self.assertEqual(raw, initial)
+        self.assertEqual(final["text"], initial["text"])
+        self.assertEqual(final["segments"], initial["segments"])
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(len(call.call_args.args[0]), 40 * 16000)
+        self.assertTrue(call.call_args.kwargs["word_timestamps"])
+        self.assertNotIn("initial_prompt", call.call_args.kwargs)
+        self.assertEqual(call.call_args.kwargs["temperature"], 0.0)
+        self.assertEqual(attempts[-1]["kind"], "short_repeat_confirmation")
+        evidence = final["confirmed_short_repetitions"][0]
+        self.assertEqual((evidence["phrase"], evidence["count"]), ("优化", 5))
+        self.assertEqual(len(evidence["word_ranges"]), 5)
+        self.assertIn("position_key", evidence)
+
+    def test_word_confirmation_rejects_zero_overlap_missing_and_changed_repeats(self):
+        initial, independent = self.short_repeat_fixture()
+        for kind in ("zero", "overlap", "missing", "changed", "too_long"):
+            invalid = copy.deepcopy(independent)
+            words = invalid["segments"][0]["words"]
+            if kind == "zero":
+                words[1]["end"] = words[1]["start"]
+            elif kind == "overlap":
+                words[2]["start"] = words[1]["start"]
+            elif kind == "missing":
+                invalid["segments"][0].pop("words")
+            elif kind == "changed":
+                words[1]["word"] = "其"
+                invalid["text"] = invalid["text"].replace("优化" * 5, "其化" + "优化" * 4)
+            else:
+                for index, word in enumerate(words[1:11]):
+                    word.update(start=18.2 + index * 0.8, end=18.2 + (index + 1) * 0.8)
+            with self.subTest(kind=kind):
+                self.assertEqual(asr._confirm_short_repetitions(initial["segments"], invalid, 2, 42), [])
+
+    def test_word_confirmation_requires_valid_source_segment_timestamps(self):
+        initial, independent = self.short_repeat_fixture()
+        for kind in ("zero", "reversed", "nan", "negative", "overlap"):
+            source = copy.deepcopy(initial["segments"])
+            if kind == "zero":
+                source[1]["end"] = source[1]["start"]
+            elif kind == "reversed":
+                source[1]["end"] = source[1]["start"] - 1
+            elif kind == "nan":
+                source[1]["start"] = float("nan")
+            elif kind == "negative":
+                source[1]["start"] = -1
+            else:
+                source[2]["start"] = source[1]["end"] - 1
+            with self.subTest(kind=kind):
+                self.assertEqual(asr._confirm_short_repetitions(source, independent, 2, 42), [])
+
+    def test_confirmed_position_does_not_approve_another_repeat_in_the_same_segment(self):
+        initial, _ = self.short_repeat_fixture()
+        text = initial["text"] + initial["text"]
+        segments = [{"start": 0, "end": 60, "text": text}]
+        joined, spans = asr._segment_text(segments)
+        first = next(PHRASE_REPEAT_RE.finditer(joined))
+        evidence = [{"phrase": "优化", "count": 5, "start": 0, "end": 60,
+                     "position_key": asr._span_key(*first.span(), spans)}]
+        self.assertIn("短语循环重复", asr._asr_repetition_errors(segments, evidence))
+
+    def test_confirmation_and_repairs_share_the_call_budget_and_still_block_other_faults(self):
+        base, independent = self.short_repeat_fixture()
+        initial = copy.deepcopy(base)
+        initial["segments"].extend([
+            {"start": 60, "end": 120, "text": "中间课程讨论不同算法的正常训练过程。"},
+            {"start": 120, "end": 180, "text": "。"},
+        ])
+        initial["text"] = "".join(segment["text"] for segment in initial["segments"])
+        call = mock.Mock(side_effect=[initial, base, independent])
+        self.assertEqual(asr.ASR_REPAIR_CALL_BUDGET, 8)
+        with mock.patch.object(asr, "ASR_REPAIR_CALL_BUDGET", 2):
+            _, _, attempts, errors = asr.transcribe_with_repair(Audio(180), call, {}, lambda a, b: True)
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(any("预算" in error for error in errors))
+        self.assertTrue(any("120.0" in error for error in errors))
+
+    def test_confirmed_short_repeat_does_not_hide_global_paragraph_repetition(self):
+        base, independent = self.short_repeat_fixture()
+        paragraph = "".join(f"第{i}家企业分析设备采购与订单交付，核验执行过程中的预算。" for i in range(15))
+        initial = copy.deepcopy(base)
+        initial["segments"].extend([
+            {"start": 60, "end": 120, "text": paragraph},
+            {"start": 120, "end": 180, "text": paragraph},
+        ])
+        initial["text"] += "\n\n" + paragraph + "\n\n" + paragraph
+        call = mock.Mock(side_effect=[initial, base, independent])
+        _, final, _, errors = asr.transcribe_with_repair(Audio(180), call, {}, lambda a, b: True)
+        self.assertIn("confirmed_short_repetitions", final)
+        self.assertIn("相邻大段内容重复", errors)
+
+    def test_source_supported_repeat_can_hide_subtitles_and_pass_final_contract(self):
+        initial, _ = self.short_repeat_fixture()
+        source = initial["text"]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"TRANSCRIPT_CACHE_DIR": tmp}):
+            note = Path(tmp) / "note.md"
+            note.write_text(valid_video_note(source))
+            self.assertTrue(batch._can_remove_original_subtitles(note.read_text()))
+            with mock.patch.object(batch, "SUMMARY_API_KEY", "fixture"), mock.patch.object(batch, "KEEP_ORIGINAL_SUBTITLES", False), mock.patch.object(batch, "_call_llm") as call:
+                outcome = batch.generate_summary(str(note))
+            self.assertEqual(outcome.status, "completed")
+            call.assert_not_called()
+            self.assertEqual(raw_transcript(note.read_text()), "")
+            self.assertTrue(validate_video_note(note.read_text(), raw_transcript_override=source).complete)
+
     def test_actual_failure_shapes_are_rejected_even_with_complete_markers(self):
         for body in ["这里介绍产业和企业未来的盈利情况" * 40,
                      "应用。这边的。。。。。。。。。。下一段。",

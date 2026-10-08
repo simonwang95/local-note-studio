@@ -811,6 +811,14 @@ def run_video_transaction(output_dir: str, cfg: dict[str, str], runner: Callable
                 entry["committed"] = True
                 entry["backup"] = str(backup) if backup else ""
                 committed.append(actual_target)
+                if (parse_bool(cfg.get("LOCAL_NOTE_STUDIO_INCOGNITO", "false"))
+                        and os.environ.get("LOCAL_NOTE_STUDIO_EPHEMERAL_SOURCE_DIR")):
+                    # Share source only until the outer Worker's final contract
+                    # check. Its TemporaryDirectory owns cleanup on every exit.
+                    cached = load_transcript_diagnostic("source-by-note", str(staged.resolve()))
+                    if cached:
+                        save_transcript_diagnostic("source-by-note", str(actual_target.resolve()),
+                                                   {**cached, "note_path": str(actual_target.resolve())})
             else:
                 entry["skipped"] = True
             _save_transaction_journal(journal_path, journal)
